@@ -14,6 +14,7 @@ set -e
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="$REPO_DIR/qo100_lvgl/build/qo100datv"
+APP_ICON="$REPO_DIR/assets/qo100datv-icon.png"
 DESKTOP_FILE="$HOME/Desktop/qo100datv.desktop"
 SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/qo100datv.service"
@@ -28,7 +29,7 @@ Name=QO-100 DATV Receiver
 Comment=Start the QO-100 DATV receiver UI
 Exec=lxterminal -e $REPO_DIR/qo100_lvgl/run.sh
 Path=$REPO_DIR/qo100_lvgl
-Icon=video-television
+Icon=$APP_ICON
 Terminal=false
 Type=Application
 StartupNotify=false
