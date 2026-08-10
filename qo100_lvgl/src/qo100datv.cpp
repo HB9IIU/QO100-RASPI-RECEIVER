@@ -143,6 +143,7 @@ lv_obj_t * video_panel = nullptr;
  * one unit while the video is fullscreen, see video_panel_click_cb. */
 lv_obj_t * normal_view = nullptr;
 lv_obj_t * chat_page = nullptr;
+lv_obj_t * settings_page = nullptr;
 void request_video_reset();
 
 constexpr float DISPLAY_MAX_DB = 10.0F;
@@ -761,7 +762,12 @@ void start_longmynd(long freq_khz, long symrate_ksps)
  * section - do not invent values not in that table.
  * =================================================================== */
 
-constexpr double LNB_LO_MHZ = 9750.0;
+/* LNB local oscillator offset (MHz) and bias-tee voltage - user-configurable
+ * via the settings page (gear button, see build_settings_page()). Defaults
+ * match a standard QO-100 LNB with externally-fed power (no bias tee). */
+double g_lnb_lo_mhz = 9750.0;
+bool g_lnb_voltage_enabled = false;
+bool g_lnb_voltage_horizontal = false; /* false = 13V (vertical), true = 18V (horizontal) */
 
 struct ModcodEntry { const char * mod; const char * fec; };
 
@@ -1084,7 +1090,7 @@ void finish_rx_status_update()
 
     const std::string & service = !rx_service_name.empty() ? rx_service_name : rx_service_provider;
     if(locked_now && rx_carrier_khz > 0 && !service.empty()) {
-        const double frequency_mhz = LNB_LO_MHZ + rx_carrier_khz / 1000.0;
+        const double frequency_mhz = g_lnb_lo_mhz + rx_carrier_khz / 1000.0;
         auto existing = std::find_if(decoded_services.begin(), decoded_services.end(),
             [&](const DecodedService & item) {
                 return item.callsign == service || std::abs(item.frequency_mhz - frequency_mhz) < 0.05;
@@ -1407,6 +1413,52 @@ void send_control_command(const std::string & cmd)
         control_cmd_ready = true;
     }
     if(longmynd_ws_context != nullptr) lws_cancel_service(longmynd_ws_context);
+}
+
+/* ===================================================================
+ * Settings persistence (LNB LO offset, LNB bias-tee voltage). Loaded once
+ * at startup and rewritten whenever the settings page's SAVE button is
+ * pressed - see build_settings_page().
+ * =================================================================== */
+
+constexpr const char * SETTINGS_FILE = "/home/daniel/DATVreceiver/qo100_lvgl/settings.json";
+
+void load_settings()
+{
+    json_object * root = json_object_from_file(SETTINGS_FILE);
+    if(root == nullptr) return;
+
+    json_object * value = nullptr;
+    if(json_object_object_get_ex(root, "lnb_lo_mhz", &value))
+        g_lnb_lo_mhz = json_object_get_double(value);
+    if(json_object_object_get_ex(root, "lnb_voltage_enabled", &value))
+        g_lnb_voltage_enabled = json_object_get_boolean(value);
+    if(json_object_object_get_ex(root, "lnb_voltage_horizontal", &value))
+        g_lnb_voltage_horizontal = json_object_get_boolean(value);
+
+    json_object_put(root);
+}
+
+void save_settings()
+{
+    json_object * root = json_object_new_object();
+    json_object_object_add(root, "lnb_lo_mhz", json_object_new_double(g_lnb_lo_mhz));
+    json_object_object_add(root, "lnb_voltage_enabled", json_object_new_boolean(g_lnb_voltage_enabled));
+    json_object_object_add(root, "lnb_voltage_horizontal", json_object_new_boolean(g_lnb_voltage_horizontal));
+    json_object_to_file_ext(SETTINGS_FILE, root, JSON_C_TO_STRING_PRETTY);
+    json_object_put(root);
+}
+
+/* Sends longmynd_ws's live "V<enabled>,<horizontal>" control command (see
+ * longmynd_ws/web/web.c's LWS_CALLBACK_RECEIVE handler and main.c's
+ * config_set_lnbv()) - applied without a process restart, same mechanism
+ * retune_exact() uses for frequency/symbol rate. */
+void apply_lnb_voltage()
+{
+    char cmd[16];
+    std::snprintf(cmd, sizeof(cmd), "V%d,%d",
+                  g_lnb_voltage_enabled ? 1 : 0, g_lnb_voltage_horizontal ? 1 : 0);
+    send_control_command(cmd);
 }
 
 /* ===================================================================
@@ -2018,8 +2070,8 @@ void retune_exact(double downlink_mhz, long symrate_ksps)
     }
     last_retune_time = now;
 
-    const long if_khz = std::lround((downlink_mhz - LNB_LO_MHZ) * 1000.0);
-    std::fprintf(stderr, "[TUNE] computed IF = %ld kHz (LNB LO = %.1f MHz)\n", if_khz, LNB_LO_MHZ);
+    const long if_khz = std::lround((downlink_mhz - g_lnb_lo_mhz) * 1000.0);
+    std::fprintf(stderr, "[TUNE] computed IF = %ld kHz (LNB LO = %.1f MHz)\n", if_khz, g_lnb_lo_mhz);
     if(if_khz <= 0) {
         std::fprintf(stderr, "[TUNE] ignored - non-positive IF frequency\n");
         return;
@@ -2900,6 +2952,158 @@ void build_video_panel(lv_obj_t * screen)
     lv_timer_create(video_frame_update_cb, 33, nullptr);
 }
 
+/* ===================================================================
+ * Settings page (gear button on the main view). LNB LO offset and bias-tee
+ * voltage only - see the "Settings persistence" section above for how
+ * these are stored/applied.
+ * =================================================================== */
+
+lv_obj_t * settings_lo_spinbox = nullptr;
+lv_obj_t * settings_voltage_btns[3] = {nullptr, nullptr, nullptr}; /* None, 13V, 18V */
+lv_obj_t * settings_saved_label = nullptr;
+int settings_voltage_choice = 0; /* 0=None, 1=13V, 2=18V - synced from g_lnb_voltage_* on page show */
+
+void update_settings_voltage_btn_styles()
+{
+    for(int i = 0; i < 3; ++i) {
+        const bool selected = (i == settings_voltage_choice);
+        lv_obj_set_style_bg_color(settings_voltage_btns[i], selected ? lv_color_hex(0x1f4d33) : COLOR_PANEL, 0);
+        lv_obj_set_style_border_color(settings_voltage_btns[i], selected ? COLOR_GREEN : COLOR_BORDER, 0);
+    }
+}
+
+void settings_voltage_btn_cb(lv_event_t * event)
+{
+    settings_voltage_choice = static_cast<int>(
+        reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
+    update_settings_voltage_btn_styles();
+}
+
+void settings_lo_inc_cb(lv_event_t *) { lv_spinbox_increment(settings_lo_spinbox); }
+void settings_lo_dec_cb(lv_event_t *) { lv_spinbox_decrement(settings_lo_spinbox); }
+
+void show_settings_cb(lv_event_t *)
+{
+    lv_spinbox_set_value(settings_lo_spinbox, static_cast<int32_t>(std::lround(g_lnb_lo_mhz)));
+    settings_voltage_choice = !g_lnb_voltage_enabled ? 0 : (g_lnb_voltage_horizontal ? 2 : 1);
+    update_settings_voltage_btn_styles();
+    lv_obj_add_flag(settings_saved_label, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(normal_view, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(video_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+}
+
+void hide_settings_cb(lv_event_t *)
+{
+    lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(normal_view, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(video_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void settings_save_btn_cb(lv_event_t *)
+{
+    g_lnb_lo_mhz = static_cast<double>(lv_spinbox_get_value(settings_lo_spinbox));
+    g_lnb_voltage_enabled = (settings_voltage_choice != 0);
+    g_lnb_voltage_horizontal = (settings_voltage_choice == 2);
+    save_settings();
+    apply_lnb_voltage();
+    lv_obj_remove_flag(settings_saved_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+void build_settings_page(lv_obj_t * screen)
+{
+    settings_page = lv_obj_create(screen);
+    lv_obj_set_size(settings_page, SCREEN_W, SCREEN_H);
+    lv_obj_set_style_bg_color(settings_page, COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(settings_page, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(settings_page, 0, 0);
+    lv_obj_set_style_pad_all(settings_page, 0, 0);
+    lv_obj_remove_flag(settings_page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t * title = make_label(settings_page, "SETTINGS", COLOR_CYAN, &lv_font_montserrat_20);
+    lv_obj_set_pos(title, 12, 12);
+
+    lv_obj_t * back = lv_button_create(settings_page);
+    lv_obj_set_pos(back, 910, 5);
+    lv_obj_set_size(back, 106, 38);
+    lv_obj_set_style_bg_color(back, COLOR_PANEL, 0);
+    lv_obj_set_style_border_color(back, COLOR_CYAN, 0);
+    lv_obj_set_style_border_width(back, 1, 0);
+    lv_obj_t * back_label = make_label(back, "BACK", COLOR_CYAN, &lv_font_montserrat_16);
+    lv_obj_center(back_label);
+    lv_obj_add_event_cb(back, hide_settings_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t * card = make_panel(settings_page, 40, 70, SCREEN_W - 80, 280);
+
+    /* LNB LO offset row: spinbox with +/- buttons either side (touch-friendly,
+     * no need for a full on-screen keyboard for a 4-5 digit MHz value). */
+    lv_obj_t * lo_label = make_label(card, "LNB LO Offset (MHz)", COLOR_TEXT, &lv_font_montserrat_16);
+    lv_obj_set_pos(lo_label, 24, 24);
+
+    lv_obj_t * lo_dec = lv_button_create(card);
+    lv_obj_set_pos(lo_dec, 24, 60);
+    lv_obj_set_size(lo_dec, 48, 44);
+    lv_obj_set_style_bg_color(lo_dec, COLOR_PANEL, 0);
+    lv_obj_set_style_border_color(lo_dec, COLOR_BORDER, 0);
+    lv_obj_set_style_border_width(lo_dec, 1, 0);
+    lv_obj_t * lo_dec_label = make_label(lo_dec, "-", COLOR_TEXT, &lv_font_montserrat_20);
+    lv_obj_center(lo_dec_label);
+    lv_obj_add_event_cb(lo_dec, settings_lo_dec_cb, LV_EVENT_CLICKED, nullptr);
+
+    settings_lo_spinbox = lv_spinbox_create(card);
+    lv_obj_set_pos(settings_lo_spinbox, 80, 60);
+    lv_obj_set_size(settings_lo_spinbox, 140, 44);
+    lv_spinbox_set_range(settings_lo_spinbox, 1000, 20000);
+    lv_spinbox_set_digit_format(settings_lo_spinbox, 5, 0);
+    lv_spinbox_set_step(settings_lo_spinbox, 1);
+    lv_spinbox_set_value(settings_lo_spinbox, 9750);
+    lv_obj_set_style_text_font(settings_lo_spinbox, &lv_font_montserrat_20, 0);
+
+    lv_obj_t * lo_inc = lv_button_create(card);
+    lv_obj_set_pos(lo_inc, 228, 60);
+    lv_obj_set_size(lo_inc, 48, 44);
+    lv_obj_set_style_bg_color(lo_inc, COLOR_PANEL, 0);
+    lv_obj_set_style_border_color(lo_inc, COLOR_BORDER, 0);
+    lv_obj_set_style_border_width(lo_inc, 1, 0);
+    lv_obj_t * lo_inc_label = make_label(lo_inc, "+", COLOR_TEXT, &lv_font_montserrat_20);
+    lv_obj_center(lo_inc_label);
+    lv_obj_add_event_cb(lo_inc, settings_lo_inc_cb, LV_EVENT_CLICKED, nullptr);
+
+    /* LNB bias-tee voltage row: 3-way selector styled like the main page's
+     * SNAP/CHAT/EXIT buttons. */
+    lv_obj_t * v_label = make_label(card, "LNB Bias Voltage", COLOR_TEXT, &lv_font_montserrat_16);
+    lv_obj_set_pos(v_label, 24, 132);
+
+    const char * voltage_texts[3] = {"NONE", "13V", "18V"};
+    for(int i = 0; i < 3; ++i) {
+        lv_obj_t * btn = lv_button_create(card);
+        lv_obj_set_pos(btn, 24 + i * 116, 168);
+        lv_obj_set_size(btn, 104, 48);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_t * label = make_label(btn, voltage_texts[i], COLOR_TEXT, &lv_font_montserrat_16);
+        lv_obj_center(label);
+        lv_obj_add_event_cb(btn, settings_voltage_btn_cb, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        settings_voltage_btns[i] = btn;
+    }
+
+    lv_obj_t * save_btn = lv_button_create(card);
+    lv_obj_set_pos(save_btn, 24, 236);
+    lv_obj_set_size(save_btn, 140, 48);
+    lv_obj_set_style_bg_color(save_btn, COLOR_PANEL, 0);
+    lv_obj_set_style_border_color(save_btn, COLOR_GREEN, 0);
+    lv_obj_set_style_border_width(save_btn, 1, 0);
+    lv_obj_t * save_label = make_label(save_btn, "SAVE", COLOR_GREEN, &lv_font_montserrat_16);
+    lv_obj_center(save_label);
+    lv_obj_add_event_cb(save_btn, settings_save_btn_cb, LV_EVENT_CLICKED, nullptr);
+
+    settings_saved_label = make_label(card, "Saved - applied live", COLOR_GREEN, &lv_font_montserrat_16);
+    lv_obj_set_pos(settings_saved_label, 180, 250);
+    lv_obj_add_flag(settings_saved_label, LV_OBJ_FLAG_HIDDEN);
+}
+
 void build_status_panel(lv_obj_t * screen)
 {
     constexpr int panel_w = SCREEN_W - STATUS_PANEL_X - PANEL_MARGIN;
@@ -2972,7 +3176,7 @@ void build_status_panel(lv_obj_t * screen)
 
     constexpr int button_gap = 8;
     constexpr int button_margin = 8;
-    constexpr int button_w = (panel_w - 2 * button_margin - 2 * button_gap) / 3;
+    constexpr int button_w = (panel_w - 2 * button_margin - 3 * button_gap) / 4;
     lv_obj_t * screenshot_btn = lv_button_create(panel);
     lv_obj_set_pos(screenshot_btn, button_margin, bottom_btn_y);
     lv_obj_set_size(screenshot_btn, button_w, 54);
@@ -2993,9 +3197,19 @@ void build_status_panel(lv_obj_t * screen)
     lv_obj_center(chat_label);
     lv_obj_add_event_cb(chat_btn, show_chat_cb, LV_EVENT_CLICKED, nullptr);
 
+    lv_obj_t * settings_btn = lv_button_create(panel);
+    lv_obj_set_pos(settings_btn, button_margin + 2 * (button_w + button_gap), bottom_btn_y);
+    lv_obj_set_size(settings_btn, button_w, 54);
+    lv_obj_set_style_bg_color(settings_btn, COLOR_PANEL, 0);
+    lv_obj_set_style_border_color(settings_btn, COLOR_YELLOW, 0);
+    lv_obj_set_style_border_width(settings_btn, 1, 0);
+    lv_obj_t * settings_label = make_label(settings_btn, LV_SYMBOL_SETTINGS, COLOR_YELLOW, &lv_font_montserrat_20);
+    lv_obj_center(settings_label);
+    lv_obj_add_event_cb(settings_btn, show_settings_cb, LV_EVENT_CLICKED, nullptr);
+
     /* Fullscreen kiosk mode has no window chrome, so this is the only exit. */
     lv_obj_t * exit_btn = lv_button_create(panel);
-    lv_obj_set_pos(exit_btn, button_margin + 2 * (button_w + button_gap), bottom_btn_y);
+    lv_obj_set_pos(exit_btn, button_margin + 3 * (button_w + button_gap), bottom_btn_y);
     lv_obj_set_size(exit_btn, button_w, 54);
     lv_obj_set_style_bg_color(exit_btn, COLOR_PANEL, 0);
     lv_obj_set_style_border_color(exit_btn, COLOR_RED, 0);
@@ -3036,6 +3250,9 @@ int main()
     lv_obj_set_style_pad_all(screen, 0, 0);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
+    load_settings();
+    boot_mark("load_settings done");
+
     start_longmynd(BEACON_FREQ_KHZ, BEACON_SYMRATE_KSPS);
     boot_mark("start_longmynd done");
     atexit(stop_longmynd);
@@ -3060,6 +3277,8 @@ int main()
     boot_mark("status panels done");
     build_chat_page(screen);
     boot_mark("chat page done");
+    build_settings_page(screen);
+    boot_mark("settings page done");
 
     start_websocket();
     boot_mark("start_websocket done");
@@ -3069,6 +3288,7 @@ int main()
     boot_mark("start_local_websocket done");
     lv_timer_create(service_local_websocket, 10, nullptr);
     lv_timer_create(service_status_fifo, 20, nullptr);
+    apply_lnb_voltage();
 
     start_chat_websocket();
     boot_mark("start_chat_websocket done");

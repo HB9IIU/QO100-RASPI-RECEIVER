@@ -30,6 +30,10 @@ longmynd_ws/ts_analyse
 longmynd_ws/longmynd_main_status
 longmynd_ws/longmynd_main_ts
 
+# User-specific runtime settings (LNB LO offset, bias voltage) - code has
+# sensible defaults baked in, see load_settings() in qo100datv.cpp
+qo100_lvgl/settings.json
+
 # Logs
 *.log
 
