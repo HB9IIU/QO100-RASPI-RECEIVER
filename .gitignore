@@ -20,12 +20,15 @@ build-debug/
 qo100_lvgl/lvgl/
 longmynd_ws/web/libwebsockets/
 
-# Compiled binaries from longmynd/longmynd_ws
-longmynd/longmynd
-longmynd/fake_read
+# Compiled binaries from longmynd_ws
 longmynd_ws/longmynd
 longmynd_ws/fake_read
 longmynd_ws/ts_analyse
+
+# Runtime artifacts (pidfile, named pipes) from running longmynd_ws
+*.pid
+longmynd_ws/longmynd_main_status
+longmynd_ws/longmynd_main_ts
 
 # Logs
 *.log
