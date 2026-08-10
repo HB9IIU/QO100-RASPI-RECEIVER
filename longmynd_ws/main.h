@@ -95,6 +95,12 @@ typedef struct {
 
     bool polarisation_supply;
     bool polarisation_horizontal; // false -> 13V, true -> 18V
+    /* Set on its own (without "new") so a bias-tee change applies without a
+     * full nim_init()/stv6120_init() reinit + retune - see config_set_lnbv()
+     * in main.c. A full reinit pulses the NIM_RESET line, which is unrelated
+     * to bias-tee hardware but was found to disrupt/drop the LNB supply on
+     * some MiniTiouner boards when triggered on every voltage toggle. */
+    bool polarisation_new;
 
     int ts_timeout;
 

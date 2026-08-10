@@ -50,7 +50,7 @@
 #define MSB_FAILING_EDGE_CLOCK_BIT_IN   0x26
 
 /*
-FTDI GPIO Pins
+FTDI GPIO Pins - ACBUS (high byte)
 LSB
  - AC0: NIM Reset
  - AC1: TS2SYNC
@@ -68,6 +68,18 @@ MSB
 #define FTDI_GPIO_PINID_LNB_BIAS_ENABLE   4
 #define FTDI_GPIO_PINID_LNB_BIAS_VSEL   7
 
+/* Some MiniTiouner hardware revisions (e.g. Pro 2, and apparently some "S"
+ * units) fit a second, independent LNB bias supply wired to the ADBUS/low
+ * byte GPIOL pins instead of the ACBUS/high byte pins above - stock
+ * longmynd (this file's upstream) only ever knew about the high-byte one.
+ * Pin numbers and the fact that this is bit-banged with MPSSE command 0x80
+ * (SET_DATA_BITS_LOWBYTE) on the same I2C USB channel come from BATC's
+ * OpenTuner reference client (MediaSources/Minitiouner/HardwareInterfaces/
+ * FTDI/FTDIInterface.cs, hw_set_polarization_supply()/lnb_num==1 path),
+ * which explicitly handles this second output. */
+#define FTDI_GPIO_PINID_LNB2_BIAS_VSEL    4
+#define FTDI_GPIO_PINID_LNB2_BIAS_ENABLE  5
+
 /* -------------------------------------------------------------------------------------------------- */
 /* ----------------- GLOBALS ------------------------------------------------------------------------ */
 /* -------------------------------------------------------------------------------------------------- */
@@ -80,6 +92,11 @@ static uint8_t ftdi_gpio_value = 0x6f;
 
 /* Default GPIO direction 0xf1 = 0b11110001 = LNB pins, NIM Reset are outputs, TS2SYNC is input (0 for in and 1 for out) */
 static uint8_t ftdi_gpio_direction = 0xf1;
+
+/* ADBUS/low byte GPIO state for the second LNB bias output - all pins
+ * output, all low (bias off) by default, matching OpenTuner's FTDIInterface.cs. */
+static uint8_t ftdi_gpio_lowbyte_value = 0x00;
+static uint8_t ftdi_gpio_lowbyte_direction = 0xff;
 
 /* -------------------------------------------------------------------------------------------------- */
 /* ----------------- ROUTINES ----------------------------------------------------------------------- */
@@ -123,8 +140,8 @@ uint8_t ftdi_setup_ftdi_io(void){
     num_bytes_to_send = 0;
 
     out_buffer[num_bytes_to_send++]=0x80;
-    out_buffer[num_bytes_to_send++]=0x13;
-    out_buffer[num_bytes_to_send++]=0x13;
+    out_buffer[num_bytes_to_send++]=0x00;
+    out_buffer[num_bytes_to_send++]=0xff;
 
     out_buffer[num_bytes_to_send++]=0x82;
     out_buffer[num_bytes_to_send++]=0x6f;
@@ -159,14 +176,14 @@ uint8_t ftdi_i2c_set_start(void) {
 
     for (count=0; count<FTDI_STOP_START_REPEATS; count++) {
     	out_buffer[num_bytes_to_send++] = 0x80;
-    	out_buffer[num_bytes_to_send++] = 0x03;
-    	out_buffer[num_bytes_to_send++] = 0x13;
+    	out_buffer[num_bytes_to_send++] = 0x03 | ftdi_gpio_lowbyte_value;
+    	out_buffer[num_bytes_to_send++] = 0xf3;
     }
 
     for (count=0; count<FTDI_STOP_START_REPEATS; count++) {
     	out_buffer[num_bytes_to_send++] = 0x80;
-    	out_buffer[num_bytes_to_send++] = 0x01;
-    	out_buffer[num_bytes_to_send++] = 0x13;
+    	out_buffer[num_bytes_to_send++] = 0x01 | ftdi_gpio_lowbyte_value;
+    	out_buffer[num_bytes_to_send++] = 0xf3;
     }
     /* note we don't send this out yet as there will be more */
 
@@ -183,17 +200,17 @@ uint8_t ftdi_i2c_set_stop(void) {
 
     for (count=0; count<FTDI_STOP_START_REPEATS; count++) {
         out_buffer[num_bytes_to_send++] = 0x80;
-        out_buffer[num_bytes_to_send++] = 0x01;
-        out_buffer[num_bytes_to_send++] = 0x13;
+        out_buffer[num_bytes_to_send++] = 0x01 | ftdi_gpio_lowbyte_value;
+        out_buffer[num_bytes_to_send++] = 0xf3;
     }
     for (count=0; count<FTDI_STOP_START_REPEATS; count++) {
         out_buffer[num_bytes_to_send++] = 0x80;
-        out_buffer[num_bytes_to_send++] = 0x03;
-        out_buffer[num_bytes_to_send++] = 0x13;
+        out_buffer[num_bytes_to_send++] = 0x03 | ftdi_gpio_lowbyte_value;
+        out_buffer[num_bytes_to_send++] = 0xf3;
     }
     out_buffer[num_bytes_to_send++] = 0x80;
-    out_buffer[num_bytes_to_send++] = 0x03;
-    out_buffer[num_bytes_to_send++] = 0x10;
+    out_buffer[num_bytes_to_send++] = 0x03 | ftdi_gpio_lowbyte_value;
+    out_buffer[num_bytes_to_send++] = 0xf0;
     /* note we don't send this out yet as there will be more */
 
     return ERROR_NONE;
@@ -211,15 +228,15 @@ uint8_t ftdi_i2c_send_byte_check_ack(uint8_t b)
     uint8_t err;
 
     out_buffer[num_bytes_to_send++] = 0x80;
-    out_buffer[num_bytes_to_send++] = 0x00;
-    out_buffer[num_bytes_to_send++] = 0x13;
+    out_buffer[num_bytes_to_send++] = 0x00 | ftdi_gpio_lowbyte_value;
+    out_buffer[num_bytes_to_send++] = 0xf3;
     out_buffer[num_bytes_to_send++] = 0x11;
     out_buffer[num_bytes_to_send++] = 0x00;
     out_buffer[num_bytes_to_send++] = 0x00; /* Data length of 0x0000 means clock out 1 byte */
     out_buffer[num_bytes_to_send++] = b; /* Actual byte to clock out */
     out_buffer[num_bytes_to_send++] = 0x80;
-    out_buffer[num_bytes_to_send++] = 0x00;
-    out_buffer[num_bytes_to_send++] = 0x11;
+    out_buffer[num_bytes_to_send++] = 0x00 | ftdi_gpio_lowbyte_value;
+    out_buffer[num_bytes_to_send++] = 0xf1;
     out_buffer[num_bytes_to_send++] = 0x27;
     out_buffer[num_bytes_to_send++] = 0x00;
     out_buffer[num_bytes_to_send++] = 0x87;
@@ -246,11 +263,11 @@ int ftdi_i2c_read_byte_send_nak(uint8_t *b ) {
 
     /* first send off the commands to do the read */
     out_buffer[num_bytes_to_send++] = 0x80;
-    out_buffer[num_bytes_to_send++] = 0x00;
-    out_buffer[num_bytes_to_send++] = 0x13;
+    out_buffer[num_bytes_to_send++] = 0x00 | ftdi_gpio_lowbyte_value;
+    out_buffer[num_bytes_to_send++] = 0xf3;
     out_buffer[num_bytes_to_send++] = 0x80;
-    out_buffer[num_bytes_to_send++] = 0x00;
-    out_buffer[num_bytes_to_send++] = 0x11; 
+    out_buffer[num_bytes_to_send++] = 0x00 | ftdi_gpio_lowbyte_value;
+    out_buffer[num_bytes_to_send++] = 0xf1;
     out_buffer[num_bytes_to_send++] = 0x25;
     out_buffer[num_bytes_to_send++] = 0x00;
     out_buffer[num_bytes_to_send++] = 0x00;
@@ -464,6 +481,35 @@ uint8_t ftdi_gpio_write(uint8_t pin_id, bool pin_value)
 }
 
 /* -------------------------------------------------------------------------------------------------- */
+uint8_t ftdi_gpio_write_lowbyte(uint8_t pin_id, bool pin_value)
+/* -------------------------------------------------------------------------------------------------- */
+/* write pin_value to the FTDI GPIO pin AD<pin_id> - see FTDI_GPIO_PINID_LNB2_* above                 */
+/* -------------------------------------------------------------------------------------------------- */
+{
+    printf("Flow: FTDI GPIO Write (low byte): pin %d -> value %d\n", pin_id, (int)pin_value);
+
+    if(pin_value)
+    {
+        ftdi_gpio_lowbyte_value |= (1 << pin_id);
+    }
+    else
+    {
+        ftdi_gpio_lowbyte_value &= ~(1 << pin_id);
+    }
+
+    num_bytes_to_send = 0;
+    out_buffer[num_bytes_to_send++] = 0x80; /* aka. MPSSE_CMD_SET_DATA_BITS_LOWBYTE */
+    out_buffer[num_bytes_to_send++] = ftdi_gpio_lowbyte_value;
+    out_buffer[num_bytes_to_send++] = ftdi_gpio_lowbyte_direction;
+
+    ftdi_usb_i2c_write(out_buffer, num_bytes_to_send);
+
+    num_bytes_to_send = 0;
+
+    return ERROR_NONE;
+}
+
+/* -------------------------------------------------------------------------------------------------- */
 uint8_t ftdi_nim_reset(void)
 /* -------------------------------------------------------------------------------------------------- */
 /* toggle the reset line on the nim                                                                    */
@@ -484,22 +530,35 @@ uint8_t ftdi_nim_reset(void)
 uint8_t ftdi_set_polarisation_supply(bool supply_enable, bool supply_horizontal)
 /* -------------------------------------------------------------------------------------------------- */
 /* Controls RT5047A LNB Power Supply IC, fitted to an additional board.                               */
+/* Drives both the original high-byte pins and the "LNB2" low-byte pins (see                          */
+/* FTDI_GPIO_PINID_LNB2_* above) in parallel, since which one is actually                              */
+/* wired to the bias-tee IC varies by MiniTiouner hardware revision and we                             */
+/* have no way to detect that at runtime. Whichever pair isn't physically                              */
+/* connected on a given board is just an unused, harmless GPIO toggle.                                 */
 /* -------------------------------------------------------------------------------------------------- */
 {
     if(supply_enable) {
         /* Set Voltage */
         if(supply_horizontal) {
             ftdi_gpio_write(FTDI_GPIO_PINID_LNB_BIAS_VSEL, 1);
+            ftdi_gpio_write_lowbyte(FTDI_GPIO_PINID_LNB2_BIAS_VSEL, 1);
         }
         else {
             ftdi_gpio_write(FTDI_GPIO_PINID_LNB_BIAS_VSEL, 0);
+            ftdi_gpio_write_lowbyte(FTDI_GPIO_PINID_LNB2_BIAS_VSEL, 0);
         }
         /* Then enable output */
         ftdi_gpio_write(FTDI_GPIO_PINID_LNB_BIAS_ENABLE, 1);
+        ftdi_gpio_write_lowbyte(FTDI_GPIO_PINID_LNB2_BIAS_ENABLE, 1);
     }
     else {
-        /* Disable output */
+        /* Disable output. OpenTuner's reference driver clears both ENABLE and
+         * VSEL on disable (not just ENABLE) - match that exactly rather than
+         * relying on ENABLE alone being sufficient on every RT5047A board. */
         ftdi_gpio_write(FTDI_GPIO_PINID_LNB_BIAS_ENABLE, 0);
+        ftdi_gpio_write(FTDI_GPIO_PINID_LNB_BIAS_VSEL, 0);
+        ftdi_gpio_write_lowbyte(FTDI_GPIO_PINID_LNB2_BIAS_ENABLE, 0);
+        ftdi_gpio_write_lowbyte(FTDI_GPIO_PINID_LNB2_BIAS_VSEL, 0);
     }
 
     return ERROR_NONE;

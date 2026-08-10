@@ -155,7 +155,10 @@ void config_set_lnbv(bool enabled, bool horizontal)
 
     longmynd_config.polarisation_supply = enabled;
     longmynd_config.polarisation_horizontal = horizontal;
-    longmynd_config.new = true;
+    /* polarisation_new only - deliberately NOT longmynd_config.new, so a
+     * bias-tee toggle doesn't force a full nim_init()/stv6120_init() reinit
+     * (which pulses NIM_RESET and retunes) on every voltage change. */
+    longmynd_config.polarisation_new = true;
 
     pthread_mutex_unlock(&longmynd_config.mutex);
 }
@@ -640,6 +643,10 @@ void *loop_i2c(void *arg) {
             memcpy(&config_cpy, thread_vars->config, sizeof(longmynd_config_t));
             /* Clear new config flag */
             thread_vars->config->new = false;
+            /* This reinit applies the current polarisation_supply/horizontal
+             * too (see below), so no separate lightweight apply is needed
+             * right after. */
+            thread_vars->config->polarisation_new = false;
             /* Set flag to clear ts buffer */
             thread_vars->config->ts_reset = true;
             pthread_mutex_unlock(&thread_vars->config->mutex);
@@ -696,6 +703,25 @@ void *loop_i2c(void *arg) {
             }
 
             status_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
+        }
+        else if(thread_vars->config->polarisation_new)
+        {
+            /* Bias-tee change only - apply it directly without a full
+             * nim_init()/stv6120_init() reinit (see polarisation_new's
+             * comment in main.h for why: a full reinit pulses NIM_RESET and
+             * retunes on every voltage toggle, which was found to disrupt
+             * the LNB supply on some MiniTiouner boards). */
+            pthread_mutex_lock(&thread_vars->config->mutex);
+            const bool polarisation_supply = thread_vars->config->polarisation_supply;
+            const bool polarisation_horizontal = thread_vars->config->polarisation_horizontal;
+            thread_vars->config->polarisation_new = false;
+            pthread_mutex_unlock(&thread_vars->config->mutex);
+
+            if (*err==ERROR_NONE) *err=ftdi_set_polarisation_supply(polarisation_supply, polarisation_horizontal);
+            if (*err==ERROR_NONE) {
+                status_cpy.polarisation_supply = polarisation_supply;
+                status_cpy.polarisation_horizontal = polarisation_horizontal;
+            }
         }
 
         /* Main receiver state machine */
