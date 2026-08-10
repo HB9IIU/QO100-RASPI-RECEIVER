@@ -5,8 +5,9 @@
 #    (builds via run.sh, so source changes are picked up).
 # 2. Installs and enables a systemd --user service that launches the
 #    prebuilt binary directly at login (no build step, no toolchain
-#    dependency at boot). Restart=on-failure covers the case where the
-#    service starts before the display is ready.
+#    dependency at boot). Waits for the X11 socket before launching, since
+#    XWayland starts on demand and this service can otherwise race ahead
+#    of it (app runs with audio but no visible window).
 #
 # Safe to re-run: the desktop shortcut is left alone if present, the
 # service unit is always rewritten to match this script.
@@ -54,6 +55,11 @@ After=default.target
 Type=simple
 Environment=DISPLAY=:0.0
 WorkingDirectory=$REPO_DIR/qo100_lvgl
+# labwc starts XWayland on demand; at boot this service can otherwise race
+# ahead of it and connect to a DISPLAY that isn't ready yet. The app then
+# runs (decoding/rendering internally, audio audible) with no visible
+# window. Wait for the X11 socket before launching.
+ExecStartPre=/bin/sh -c 'for i in \$(seq 1 60); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 0.5; done; echo "X11 socket never appeared"; exit 1'
 ExecStart=$APP_BIN
 Restart=on-failure
 RestartSec=3
