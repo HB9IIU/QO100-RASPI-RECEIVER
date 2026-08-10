@@ -37,6 +37,9 @@ qo100_lvgl/settings.json
 # Logs
 *.log
 
+# SNAP button output / ad-hoc diagnostic screenshots
+screenshots/
+
 # Editor/OS temp
 *~
 *.swp

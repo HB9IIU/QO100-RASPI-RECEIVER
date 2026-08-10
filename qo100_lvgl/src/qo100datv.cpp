@@ -13,6 +13,7 @@
  */
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <libwebsockets.h>
@@ -1030,6 +1031,10 @@ constexpr const char * LOCAL_WS_HOST = "127.0.0.1";
 lws_context * longmynd_ws_context = nullptr;
 lws * control_wsi = nullptr;
 lws * monitor_wsi = nullptr;
+/* True while the monitor link to longmynd_ws is up - shown on the settings
+ * page so a tuner that enumerated on USB but failed to open (wrong udev
+ * rule, permission denied, etc.) is visible without a dmesg/journalctl dive. */
+std::atomic<bool> g_monitor_ws_connected{false};
 std::vector<uint8_t> monitor_message_buffer;
 bool monitor_message_is_binary = false;
 std::string pending_control_cmd;
@@ -1230,6 +1235,7 @@ int callback_monitor(lws * websocket, lws_callback_reasons reason,
     switch(reason) {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
             monitor_wsi = websocket;
+            g_monitor_ws_connected = true;
             std::fprintf(stderr, "[WS] monitor connected\n");
             break;
 
@@ -1255,7 +1261,10 @@ int callback_monitor(lws * websocket, lws_callback_reasons reason,
 
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
         case LWS_CALLBACK_CLIENT_CLOSED:
-            if(monitor_wsi == websocket) monitor_wsi = nullptr;
+            if(monitor_wsi == websocket) {
+                monitor_wsi = nullptr;
+                g_monitor_ws_connected = false;
+            }
             break;
 
         default:
@@ -2961,7 +2970,53 @@ void build_video_panel(lv_obj_t * screen)
 lv_obj_t * settings_lo_spinbox = nullptr;
 lv_obj_t * settings_voltage_btns[3] = {nullptr, nullptr, nullptr}; /* None, 13V, 18V */
 lv_obj_t * settings_saved_label = nullptr;
+lv_obj_t * settings_tuner_value = nullptr;
+lv_obj_t * settings_link_value = nullptr;
 int settings_voltage_choice = 0; /* 0=None, 1=13V, 2=18V - synced from g_lnb_voltage_* on page show */
+
+/* Scans /sys/bus/usb/devices for an attached FTDI FT2232H reporting the
+ * MiniTiouner's VID:PID (0403:6010), and returns its USB "product" string
+ * (e.g. "MiniTiouner_Pro_TS2", "MiniTiouner") - the exact string
+ * longmynd_ws/minitiouner.rules must match for the device node to be
+ * readable/writable without root. Empty if none is attached. */
+std::string detect_tuner_product_string()
+{
+    DIR * dir = opendir("/sys/bus/usb/devices");
+    if(dir == nullptr) return {};
+
+    std::string result;
+    struct dirent * entry;
+    while((entry = readdir(dir)) != nullptr) {
+        const std::string path = std::string("/sys/bus/usb/devices/") + entry->d_name;
+
+        char vid[8] = {0};
+        FILE * vf = std::fopen((path + "/idVendor").c_str(), "r");
+        if(vf == nullptr) continue;
+        const bool got_vid = std::fgets(vid, sizeof(vid), vf) != nullptr;
+        std::fclose(vf);
+        if(!got_vid || std::strncmp(vid, "0403", 4) != 0) continue;
+
+        char pid[8] = {0};
+        FILE * pf = std::fopen((path + "/idProduct").c_str(), "r");
+        if(pf == nullptr) continue;
+        const bool got_pid = std::fgets(pid, sizeof(pid), pf) != nullptr;
+        std::fclose(pf);
+        if(!got_pid || std::strncmp(pid, "6010", 4) != 0) continue;
+
+        FILE * prod_f = std::fopen((path + "/product").c_str(), "r");
+        if(prod_f == nullptr) continue;
+        char product[64] = {0};
+        if(std::fgets(product, sizeof(product), prod_f) != nullptr) {
+            result = product;
+            while(!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+                result.pop_back();
+        }
+        std::fclose(prod_f);
+        break;
+    }
+    closedir(dir);
+    return result;
+}
 
 void update_settings_voltage_btn_styles()
 {
@@ -2988,6 +3043,23 @@ void show_settings_cb(lv_event_t *)
     settings_voltage_choice = !g_lnb_voltage_enabled ? 0 : (g_lnb_voltage_horizontal ? 2 : 1);
     update_settings_voltage_btn_styles();
     lv_obj_add_flag(settings_saved_label, LV_OBJ_FLAG_HIDDEN);
+
+    const std::string tuner_product = detect_tuner_product_string();
+    if(tuner_product.empty()) {
+        lv_label_set_text(settings_tuner_value, "Not detected");
+        lv_obj_set_style_text_color(settings_tuner_value, COLOR_RED, 0);
+    } else {
+        lv_label_set_text(settings_tuner_value, tuner_product.c_str());
+        lv_obj_set_style_text_color(settings_tuner_value, COLOR_TEXT, 0);
+    }
+
+    if(g_monitor_ws_connected.load(std::memory_order_relaxed)) {
+        lv_label_set_text(settings_link_value, "Connected");
+        lv_obj_set_style_text_color(settings_link_value, COLOR_GREEN, 0);
+    } else {
+        lv_label_set_text(settings_link_value, "Not connected");
+        lv_obj_set_style_text_color(settings_link_value, COLOR_RED, 0);
+    }
 
     lv_obj_add_flag(normal_view, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(video_panel, LV_OBJ_FLAG_HIDDEN);
@@ -3102,6 +3174,20 @@ void build_settings_page(lv_obj_t * screen)
     settings_saved_label = make_label(card, "Saved - applied live", COLOR_GREEN, &lv_font_montserrat_16);
     lv_obj_set_pos(settings_saved_label, 180, 250);
     lv_obj_add_flag(settings_saved_label, LV_OBJ_FLAG_HIDDEN);
+
+    /* Read-only tuner diagnostics, refreshed on every page show (see
+     * show_settings_cb()) - not user-editable, just a quicker way to see
+     * "which tuner is plugged in" and "is longmynd actually talking to it"
+     * than a dmesg/journalctl dive. */
+    lv_obj_t * tuner_label = make_label(card, "Tuner (USB)", COLOR_TEXT, &lv_font_montserrat_16);
+    lv_obj_set_pos(tuner_label, 340, 24);
+    settings_tuner_value = make_label(card, "Not detected", COLOR_RED, &lv_font_montserrat_16);
+    lv_obj_set_pos(settings_tuner_value, 340, 56);
+
+    lv_obj_t * link_label = make_label(card, "Longmynd Link", COLOR_TEXT, &lv_font_montserrat_16);
+    lv_obj_set_pos(link_label, 340, 132);
+    settings_link_value = make_label(card, "Not connected", COLOR_RED, &lv_font_montserrat_16);
+    lv_obj_set_pos(settings_link_value, 340, 164);
 }
 
 void build_status_panel(lv_obj_t * screen)
@@ -3219,6 +3305,11 @@ void build_status_panel(lv_obj_t * screen)
     lv_obj_add_event_cb(exit_btn, exit_btn_cb, LV_EVENT_CLICKED, nullptr);
 }
 
+void auto_close_msgbox_cb(lv_timer_t * timer)
+{
+    lv_msgbox_close(static_cast<lv_obj_t *>(lv_timer_get_user_data(timer)));
+}
+
 } // namespace
 
 int main()
@@ -3279,6 +3370,45 @@ int main()
     boot_mark("chat page done");
     build_settings_page(screen);
     boot_mark("settings page done");
+
+    if(detect_tuner_product_string().empty()) {
+        lv_obj_t * no_tuner_msgbox = lv_msgbox_create(nullptr);
+        lv_obj_set_style_bg_color(no_tuner_msgbox, COLOR_PANEL, 0);
+        lv_obj_t * no_tuner_title = lv_msgbox_add_title(no_tuner_msgbox, "No Tuner Found");
+        lv_obj_set_style_text_color(no_tuner_title, COLOR_RED, 0);
+        lv_obj_set_flex_grow(no_tuner_title, 1);
+        lv_obj_set_style_text_align(no_tuner_title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_t * no_tuner_header = lv_msgbox_get_header(no_tuner_msgbox);
+        if(no_tuner_header != nullptr) {
+            lv_obj_set_style_bg_color(no_tuner_header, COLOR_PANEL, 0);
+            lv_obj_set_style_bg_opa(no_tuner_header, LV_OPA_COVER, 0);
+        }
+        lv_obj_t * no_tuner_text = lv_msgbox_add_text(no_tuner_msgbox,
+            "No MiniTiouner detected on USB.\nCheck the cable and power, then restart the app.");
+        lv_obj_set_style_text_color(no_tuner_text, COLOR_TEXT, 0);
+        lv_obj_set_style_text_align(no_tuner_text, LV_TEXT_ALIGN_CENTER, 0);
+        lv_msgbox_add_close_button(no_tuner_msgbox);
+    }
+    else {
+        const std::string tuner_product = detect_tuner_product_string();
+        lv_obj_t * tuner_msgbox = lv_msgbox_create(nullptr);
+        lv_obj_set_style_bg_color(tuner_msgbox, COLOR_PANEL, 0);
+        lv_obj_t * tuner_title = lv_msgbox_add_title(tuner_msgbox, "Tuner Detected");
+        lv_obj_set_style_text_color(tuner_title, COLOR_GREEN, 0);
+        lv_obj_set_flex_grow(tuner_title, 1);
+        lv_obj_set_style_text_align(tuner_title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_t * tuner_header = lv_msgbox_get_header(tuner_msgbox);
+        if(tuner_header != nullptr) {
+            lv_obj_set_style_bg_color(tuner_header, COLOR_PANEL, 0);
+            lv_obj_set_style_bg_opa(tuner_header, LV_OPA_COVER, 0);
+        }
+        lv_obj_t * tuner_text = lv_msgbox_add_text(tuner_msgbox, tuner_product.c_str());
+        lv_obj_set_style_text_color(tuner_text, COLOR_TEXT, 0);
+        lv_obj_set_style_text_align(tuner_text, LV_TEXT_ALIGN_CENTER, 0);
+        lv_timer_t * auto_close_timer = lv_timer_create(auto_close_msgbox_cb, 3000, tuner_msgbox);
+        lv_timer_set_repeat_count(auto_close_timer, 1);
+    }
+    boot_mark("tuner presence check done");
 
     start_websocket();
     boot_mark("start_websocket done");
