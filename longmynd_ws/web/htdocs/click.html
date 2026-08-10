@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en" translate="no">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Longmynd Spectrum Monitor</title>
+    <link href="/lib/bootstrap-4.6.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="click.css" rel="stylesheet">
+    <script src="/lib/jquery-3.6.0.min.js"></script>
+    <script src="/lib/bootstrap-4.6.1/js/bootstrap.min.js"></script>
+    <script src="/lib/socket.io-3.1.1.min.js"></script>
+    <script src="/lib/strWebsocket.js"></script>
+    <script src="/lib/u16Websocket.js"></script>
+    <script src="https://eshail.batc.org.uk/lib/chat.js"></script>
+    <script>
+      var ws_url_override = "wss://eshail.batc.org.uk/wb/fft";
+      var signals = [];
+      var signal_selected = null;
+      var signals_decoded = [];
+    </script>
+    <script src="https://eshail.batc.org.uk/wb/index.js"></script>
+    <script src="longmynd.js?v=0"></script>
+  </head>
+  <body class="bg-light">
+    <div id="content" role="main">
+      <div class="row">
+        <div id="fft-col" class="col-xl-6">
+          <canvas id="c" width="1" height="1"></canvas>
+          <div id="under-canvas">
+            <span id="stats">Loading..</span>
+            <span id="bandplan-link"><a href="https://wiki.batc.org.uk/Es%27hail-2_DATV_Bandplan" target="_blank">DATV Bandplan</a></span>
+            <span id="fullscreen-link-span">
+                <select id="fft-speed-select">
+                    <option value="fft" selected="selected">Slow</option>
+                    <option value="fft_fast">Fast</option>
+                </select>
+                <select id="fft-colour-select">
+                    <option value="green" selected="selected">Green</option>
+                    <option value="yellow">Yellow</option>
+                    <option value="red">Red</option>
+                    <option value="blue">Blue</option>
+                </select>
+                <button id="fullscreen-link" onclick="fft_fullscreen();">Open fullscreen</button></span>
+          </div>
+          <div class="card card-body bg-light">
+            <table id="longmynd-status-table" width="100%">
+              <tr>
+                <td width="33%">
+                  Tuning Mode:<br>
+                  <div class="btn-group btn-group-toggle" data-toggle="buttons">
+                    <label class="btn btn-sm btn-secondary active" id="button-tune-click">
+                      <input type="radio" name="options" checked> Click
+                    </label>
+                    <label class="btn btn-sm btn-secondary" id="button-tune-scan">
+                      <input type="radio" name="options"> Scan
+                    </label>
+                  </div>
+                  <hr>
+                  RF Port:<br>
+                  <div class="btn-group btn-group-toggle" data-toggle="buttons">
+                    <label class="btn btn-sm btn-secondary" id="button-port-top">
+                      <input type="radio" name="options"> TOP
+                    </label>
+                    <label class="btn btn-sm btn-secondary" id="button-port-bottom">
+                      <input type="radio" name="options"> BOTTOM
+                    </label>
+                  </div><br>
+                  LO:         <input type="text" class="form-control form-control-sm" id="input-frequency-lo" placeholder="LO Frequency">
+                  LNB Bias Voltage:<br>
+                  <div class="btn-group btn-group-toggle" data-toggle="buttons">
+                    <label class="btn btn-sm btn-secondary" id="button-lnbv-0v">
+                      <input type="radio" name="options"> 0V
+                    </label>
+                    <label class="btn btn-sm btn-secondary" id="button-lnbv-12v">
+                      <input type="radio" name="options"> 12V
+                    </label>
+                    <label class="btn btn-sm btn-secondary" id="button-lnbv-18v">
+                      <input type="radio" name="options"> 18V
+                    </label>
+                  </div>
+                  <hr>
+                  VLC Autoreset:
+                  <input type="checkbox" class="form-vlcautoreset-checkbox" id="input-vlcautoreset-enable">
+                    <input type="text" class="form-control form-control-sm" id="input-vlcautoreset-ip" placeholder="IP Address"><br>
+                  TS Output:<br>
+                  <input type="text" class="form-control form-control-sm" id="input-udpts-host" placeholder="TS UDP Host">
+                  <input type="text" class="form-control form-control-sm" id="input-udpts-port" placeholder="TS UDP Port">
+                  <button class="form-control form-control-sm" id="button-udpts-submit">Set</button>
+                </td>
+                <td width="33%">
+                  Frequency:  <span id="span-status-frequency"></span><br>
+                  Symbolrate: <span id="span-status-symbolrate"></span><br>
+                  State: <span id="badge-state" class="badge badge-light">...</span><br>
+                    MODCOD: <span id="span-status-modcod"></span><br>
+                    MER: <div class="progress"><div id="progressbar-mer" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="31.0"></div></div>
+                    BCH Errors:  <span id="span-status-errors-bch"></span><br>
+                    LDPC Errors: <span id="span-status-errors-ldpc"></span><br>
+                </td>
+                <td width="33%">
+                    Name: <span id="span-status-name"></span><br>
+                    Provider: <span id="span-status-provider"></span><br>
+                    TS Density: <div class="progress"><div id="progressbar-density" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100.0"></div></div>
+                    PIDs: <div id="div-ts-pids"><ul></ul></div>
+                </td>
+              </tr>
+            </table>
+          </div>
+        </div>
+
+        <div id="chat-col" class="col-xl-6">
+          <div id="chat"></div>
+          <div id="under-chat">
+            <a id="chat-page-link" href="chat/" target="_blank">Chat-only webpage</a>
+            <a id="chat-logs-link" href="chat/log/" target="_blank">Chat Logs</a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </body>
+</html>

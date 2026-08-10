@@ -1,0 +1,87 @@
+on: [push, pull_request]
+
+jobs:
+  build-x86_64:
+    runs-on: ${{ matrix.os }}
+    name: Build on ${{ matrix.os }} x86_64
+    strategy:
+      matrix:
+        os: [ubuntu-22.04]
+
+    steps:
+    - uses: actions/checkout@v2.1.0
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -q -y
+        sudo apt-get install -q -y build-essential
+        # Install longmynd dependencies
+        sudo apt-get install -q -y libusb-1.0-0-dev libasound2-dev libjson-c-dev
+        # Install libwebsocket dependencies
+        sudo apt-get install -q -y git cmake
+    - name: Build longmynd
+      shell: bash
+      run: |
+        make clean && make werror
+
+  build-arm:
+    # The host should always be linux
+    runs-on: ubuntu-20.04
+    name: Build on ${{ matrix.distro }} ${{ matrix.arch }}
+
+    strategy:
+      matrix:
+        include:
+          - arch: armv6
+            distro: buster
+          - arch: armv7
+            distro: stretch
+          - arch: aarch64
+            distro: ubuntu22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          recursive: true
+      - uses: uraimo/run-on-arch-action@v2.7.1
+        name: Build Matrix
+        id: build
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ${{ matrix.distro }}
+
+          githubToken: ${{ github.token }}
+
+          shell: /bin/sh
+
+          install: |
+            case "${{ matrix.distro }}" in
+              buster)
+                apt-get update -q -y
+                apt-get install -q -y build-essential libusb-1.0-0-dev libasound2-dev libjson-c-dev
+                apt-get install -q -y git cmake
+                ;;
+              stretch)
+                apt-get update -q -y
+                apt-get install -q -y build-essential libusb-1.0-0-dev libasound2-dev libjson-c-dev
+                apt-get install -q -y git cmake
+                ;;
+              ubuntu22.04)
+                apt-get update -q -y
+                apt-get install -q -y build-essential libusb-1.0-0-dev libasound2-dev libjson-c-dev
+                apt-get install -q -y git cmake
+                ;;
+            esac
+
+          run: |
+            case "${{ matrix.distro }}" in
+              buster)
+                make clean && make werror
+                ;;
+              stretch)
+                make clean && make werror
+                ;;
+              ubuntu22.04)
+                make clean && make werror
+                ;;
+            esac

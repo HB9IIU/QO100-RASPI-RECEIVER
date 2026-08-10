@@ -1,0 +1,5 @@
+build/
+build-debug/
+lvgl/
+.DS_Store
+._*

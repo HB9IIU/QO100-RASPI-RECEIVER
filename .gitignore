@@ -1,0 +1,35 @@
+# macOS junk
+.DS_Store
+._*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local tooling (self-extracted CLIs etc.)
+.tools/
+
+# Build artifacts
+build/
+build-debug/
+*.o
+*.d
+
+# Vendored third-party deps (large, fetch separately if needed)
+qo100_lvgl/lvgl/
+longmynd_ws/web/libwebsockets/
+
+# Compiled binaries from longmynd/longmynd_ws
+longmynd/longmynd
+longmynd/fake_read
+longmynd_ws/longmynd
+longmynd_ws/fake_read
+longmynd_ws/ts_analyse
+
+# Logs
+*.log
+
+# Editor/OS temp
+*~
+*.swp

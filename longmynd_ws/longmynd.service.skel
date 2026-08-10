@@ -1,0 +1,14 @@
+[Unit]
+Description=Longmynd Receiver
+After=syslog.target
+
+[Service]
+Type=simple
+User=phil
+ExecStart=/usr/bin/stdbuf -oL -eL {{directory}}/run.sh
+WorkingDirectory={{directory}}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

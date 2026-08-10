@@ -1,0 +1,7 @@
+*~
+*.swp
+*.o
+*.d
+longmynd
+fake_read
+ts_analyse

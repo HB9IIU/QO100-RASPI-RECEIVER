@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(DISPLAY=:0.0 scrot /tmp/claude-1000/-home-daniel-DATVreceiver/5c8bdcba-73d3-4dc8-98ad-f428d28bad38/scratchpad/qo100datv_skeleton2.png)"
+    ]
+  }
+}

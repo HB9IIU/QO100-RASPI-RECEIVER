@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build-qo100-monitor-debug",
+            "type": "shell",
+            "command": "mkdir -p '${workspaceFolder}/qo100_lvgl/build-debug' && cmake -S '${workspaceFolder}/qo100_lvgl' -B '${workspaceFolder}/qo100_lvgl/build-debug' -DCMAKE_BUILD_TYPE=Debug && cmake --build '${workspaceFolder}/qo100_lvgl/build-debug' -j$(nproc)",
+            "problemMatcher": ["$gcc"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "screenshot-app-window",
+            "type": "shell",
+            "command": "${workspaceFolder}/scripts/screenshot.sh",
+            "problemMatcher": []
+        }
+    ]
+}
