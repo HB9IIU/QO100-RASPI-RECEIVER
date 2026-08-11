@@ -2,40 +2,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug QO-100 Monitor",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/qo100_lvgl/build-debug/qo100_monitor",
-            "cwd": "${workspaceFolder}/qo100_lvgl/build-debug",
-            "environment": [
-                {
-                    "name": "DISPLAY",
-                    "value": ":0.0"
-                }
-            ],
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "valuesFormatting": "parseText",
-            "preLaunchTask": "build-qo100-monitor-debug"
-        },
-        {
-            "name": "Debug Spectrum Test",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/qo100_lvgl/build-debug/spectrum_test",
-            "cwd": "${workspaceFolder}/qo100_lvgl/build-debug",
-            "environment": [
-                {
-                    "name": "DISPLAY",
-                    "value": ":0.0"
-                }
-            ],
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "valuesFormatting": "parseText",
-            "preLaunchTask": "build-qo100-monitor-debug"
-        },
-        {
             "name": "Debug QO-100 DATV",
             "type": "cppdbg",
             "request": "launch",

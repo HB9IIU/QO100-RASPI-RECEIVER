@@ -140,12 +140,32 @@ int spectrum_panel_w = 0;
 lv_obj_t * tune_marker = nullptr;
 lv_obj_t * tune_marker_label = nullptr;
 lv_obj_t * video_panel = nullptr;
+/* Covers the video canvas from the moment a retune is requested (see
+ * retune_exact()) until either a fresh frame from the new stream actually
+ * reaches the screen (video_frame_update_cb) or the lock watchdog gives up
+ * (finish_rx_status_update()) - otherwise the old stream's last decoded
+ * frame just sits there frozen for the whole search/relock/redecode
+ * stretch, looking like tapping a new signal did nothing. */
+lv_obj_t * tuning_overlay = nullptr;
+/* Set from retune_exact(), read in video_frame_update_cb() - both always run
+ * on the UI thread (LVGL event callback / lv_timer callback), so this needs
+ * no synchronization despite decode_session_count itself being atomic. */
+int tuning_overlay_target_session = 0;
+/* Bumped once per decode_loop() outer-loop iteration, i.e. every time it
+ * tears down and reopens a fresh AVFormatContext. tuning_overlay's hide
+ * condition waits for this rather than "any successful frame" - data
+ * already past the tuner and sitting in the ring buffer at tap time can
+ * still belong to the *old* stream, so the very next rendered frame after a
+ * retune isn't necessarily from the new one; the next fresh decode session
+ * is. See retune_exact() and video_frame_update_cb(). */
+std::atomic<int> decode_session_count{0};
 /* Everything except video_panel (spectrum + both status panels) - hidden as
  * one unit while the video is fullscreen, see video_panel_click_cb. */
 lv_obj_t * normal_view = nullptr;
 lv_obj_t * chat_page = nullptr;
 lv_obj_t * settings_page = nullptr;
 void request_video_reset();
+void return_to_beacon();
 
 constexpr float DISPLAY_MAX_DB = 10.0F;
 constexpr float SERVER_UNITS_PER_DB = 3276.8F;
@@ -819,6 +839,17 @@ constexpr auto LOCK_WATCHDOG_TIMEOUT = std::chrono::milliseconds(8000);
 bool tuning_pending = false;
 bool watchdog_timeout_logged = false;
 
+/* Auto-return-to-beacon: watching someone's TX (a non-beacon signal, see
+ * retune_exact()) and their signal disappears - most often they just
+ * unkeyed, not a real dropout. finish_rx_status_update() arms this on the
+ * lock->unlock edge, waits AUTO_BEACON_RETURN_DELAY in case lock comes back
+ * on its own (a brief fade, or they're still mid-transmission), and only
+ * then calls return_to_beacon(). Never arms while already on the beacon. */
+constexpr auto AUTO_BEACON_RETURN_DELAY = std::chrono::milliseconds(2500);
+bool tuned_to_beacon = true;
+bool auto_beacon_return_armed = false;
+std::chrono::steady_clock::time_point auto_beacon_return_deadline{};
+
 lv_obj_t * g_mode_value = nullptr;
 lv_obj_t * g_mer_value = nullptr;
 lv_obj_t * g_agc_value = nullptr;
@@ -1091,6 +1122,16 @@ void finish_rx_status_update()
         std::fprintf(stderr, "[TUNE] lock established - resetting video decoder\n");
         request_video_reset();
     }
+    if(!locked_now && rx_was_locked && !tuned_to_beacon) {
+        auto_beacon_return_armed = true;
+        auto_beacon_return_deadline = std::chrono::steady_clock::now() + AUTO_BEACON_RETURN_DELAY;
+        std::fprintf(stderr, "[TUNE] lock lost on non-beacon signal - returning to beacon in %lldms unless it comes back\n",
+                     static_cast<long long>(AUTO_BEACON_RETURN_DELAY.count()));
+    }
+    if(locked_now && auto_beacon_return_armed) {
+        auto_beacon_return_armed = false;
+        std::fprintf(stderr, "[TUNE] lock regained - cancelled pending return to beacon\n");
+    }
     rx_was_locked = locked_now;
 
     const std::string & service = !rx_service_name.empty() ? rx_service_name : rx_service_provider;
@@ -1125,6 +1166,15 @@ void finish_rx_status_update()
                 LOCK_WATCHDOG_TIMEOUT).count()),
             rx_state);
         watchdog_timeout_logged = true;
+        /* Give up covering the stale frame too - a weak/no signal on the new
+         * frequency means no fresh frame is ever coming to hide it for us,
+         * and leaving the overlay up forever would hide that fact. */
+        if(tuning_overlay != nullptr) lv_obj_add_flag(tuning_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if(auto_beacon_return_armed && std::chrono::steady_clock::now() >= auto_beacon_return_deadline) {
+        auto_beacon_return_armed = false;
+        return_to_beacon();
     }
 }
 
@@ -1425,12 +1475,17 @@ void send_control_command(const std::string & cmd)
 }
 
 /* ===================================================================
- * Settings persistence (LNB LO offset, LNB bias-tee voltage). Loaded once
- * at startup and rewritten whenever the settings page's SAVE button is
- * pressed - see build_settings_page().
+ * Settings persistence (LNB LO offset, LNB bias-tee voltage, audio volume).
+ * Loaded once at startup and rewritten whenever the settings page's SAVE
+ * button is pressed - see build_settings_page() - or the volume slider
+ * changes - see volume_slider_cb().
  * =================================================================== */
 
 constexpr const char * SETTINGS_FILE = "/home/daniel/DATVreceiver/qo100_lvgl/settings.json";
+
+/* Declared here (ahead of its normal home near the audio code below) so
+ * load_settings()/save_settings() can reach it. */
+std::atomic<int> audio_volume_percent{50};
 
 void load_settings()
 {
@@ -1444,6 +1499,8 @@ void load_settings()
         g_lnb_voltage_enabled = json_object_get_boolean(value);
     if(json_object_object_get_ex(root, "lnb_voltage_horizontal", &value))
         g_lnb_voltage_horizontal = json_object_get_boolean(value);
+    if(json_object_object_get_ex(root, "audio_volume_percent", &value))
+        audio_volume_percent.store(json_object_get_int(value), std::memory_order_relaxed);
 
     json_object_put(root);
 }
@@ -1454,6 +1511,8 @@ void save_settings()
     json_object_object_add(root, "lnb_lo_mhz", json_object_new_double(g_lnb_lo_mhz));
     json_object_object_add(root, "lnb_voltage_enabled", json_object_new_boolean(g_lnb_voltage_enabled));
     json_object_object_add(root, "lnb_voltage_horizontal", json_object_new_boolean(g_lnb_voltage_horizontal));
+    json_object_object_add(root, "audio_volume_percent",
+                            json_object_new_int(audio_volume_percent.load(std::memory_order_relaxed)));
     json_object_to_file_ext(SETTINGS_FILE, root, JSON_C_TO_STRING_PRETTY);
     json_object_put(root);
 }
@@ -2088,6 +2147,8 @@ void retune_exact(double downlink_mhz, long symrate_ksps)
 
     show_tune_marker(downlink_mhz);
     reset_rx_status();
+    tuned_to_beacon = false;
+    auto_beacon_return_armed = false;
 
     char cmd[48];
     std::snprintf(cmd, sizeof(cmd), "C%ld,%ld", if_khz, symrate_ksps);
@@ -2095,7 +2156,43 @@ void retune_exact(double downlink_mhz, long symrate_ksps)
 
     tuning_pending = true;
     watchdog_timeout_logged = false;
+    if(tuning_overlay != nullptr) {
+        lv_obj_remove_flag(tuning_overlay, LV_OBJ_FLAG_HIDDEN);
+        /* +1: any TS bytes already past the tuner and sitting in the ring
+         * buffer right now still belong to the *old* stream, so don't clear
+         * on the decode session already in flight - only on the next one,
+         * which can only start once decode_loop has torn that down and
+         * reopened for whatever the tuner is on after this retune. */
+        tuning_overlay_target_session = decode_session_count.load(std::memory_order_relaxed) + 1;
+    }
     std::fprintf(stderr, "[TUNE] retune command queued - waiting for lock\n");
+}
+
+/* Fires once AUTO_BEACON_RETURN_DELAY has passed with no lock regained after
+ * a non-beacon signal disappeared (armed in finish_rx_status_update()).
+ * BEACON_FREQ_KHZ is already an IF, unlike retune_exact()'s downlink-MHz
+ * input, so this skips the LNB LO conversion and goes straight to the same
+ * debounce + control-command + tuning_pending/overlay bookkeeping. */
+void return_to_beacon()
+{
+    const auto now = std::chrono::steady_clock::now();
+    if(now - last_retune_time < RETUNE_MIN_INTERVAL) return;
+    last_retune_time = now;
+
+    std::fprintf(stderr, "[TUNE] auto-returning to beacon (TX stopped)\n");
+    reset_rx_status();
+    tuned_to_beacon = true;
+
+    char cmd[48];
+    std::snprintf(cmd, sizeof(cmd), "C%ld,%ld", BEACON_FREQ_KHZ, BEACON_SYMRATE_KSPS);
+    send_control_command(cmd);
+
+    tuning_pending = true;
+    watchdog_timeout_logged = false;
+    if(tuning_overlay != nullptr) {
+        lv_obj_remove_flag(tuning_overlay, LV_OBJ_FLAG_HIDDEN);
+        tuning_overlay_target_session = decode_session_count.load(std::memory_order_relaxed) + 1;
+    }
 }
 
 void spectrum_click_cb(lv_event_t *)
@@ -2159,19 +2256,50 @@ void spectrum_click_cb(lv_event_t *)
     }
 }
 
-/* Fullscreen has no window chrome to close, so this is the only way out.
- * exit() runs the atexit() handlers registered in main() (stop_longmynd,
- * stop_background_threads), same as LVGL's own SDL quit-event path. */
-void exit_btn_cb(lv_event_t *)
+/* Shared by restart_btn_cb() and the SIGTERM/SIGINT handling below. Do not
+ * call exit() from either path: its atexit handler joins the libwebsockets
+ * workers, and libwebsockets can remain blocked in TLS/context teardown for
+ * an unbounded time. Stop our child receiver first and then let the OS
+ * atomically tear down this process and all of its threads/sockets. */
+void safe_shutdown(int exit_code)
 {
-    std::fprintf(stderr, "[CLICK] exit_btn_cb fired\n");
-    /* Do not call exit() here: its atexit handler joins the libwebsockets
-     * workers, and libwebsockets can remain blocked in TLS/context teardown
-     * for an unbounded time. This is the explicit kiosk shutdown path, so
-     * stop our child receiver first and then let the OS atomically tear down
-     * this process and all of its threads/sockets. */
     stop_longmynd();
-    std::_Exit(0);
+    std::_Exit(exit_code);
+}
+
+/* Fullscreen has no window chrome, so this is the only in-app way to
+ * recover from a stuck tuner/decoder without physically power-cycling the
+ * Pi. The app runs under qo100datv.service (see scripts/setup_autostart.sh)
+ * with Restart=on-failure, RestartSec=3 - so exiting with a non-zero status
+ * is enough to make systemd relaunch it; no self-exec/fork needed. */
+void restart_btn_cb(lv_event_t *)
+{
+    std::fprintf(stderr, "[CLICK] restart_btn_cb fired\n");
+    safe_shutdown(1);
+}
+
+/* SDL installs its own SIGTERM/SIGINT handlers (see SDL_QuitInit()) that
+ * turn the signal into an SDL_QUIT event instead of terminating the process.
+ * LVGL's SDL driver reacts to that event with a plain exit() when
+ * LV_SDL_DIRECT_EXIT is set (see lv_sdl_window.c) - the exact hang-prone path
+ * safe_shutdown() above avoids. `systemctl stop`/`restart` send SIGTERM, so
+ * left alone, every stop can hang for the full TimeoutStopSec and end in a
+ * SIGKILL instead of a clean exit. Override SDL's handler (installed after
+ * driver_backends_init_backend() in main() so ours wins) and just flag it;
+ * signal handlers must stick to async-signal-safe calls, so the actual
+ * shutdown happens from termination_signal_check_cb() on the next timer
+ * tick, in normal thread context. */
+std::atomic<bool> g_termination_signal_received{false};
+
+extern "C" void handle_termination_signal(int)
+{
+    g_termination_signal_received.store(true, std::memory_order_relaxed);
+}
+
+void termination_signal_check_cb(lv_timer_t *)
+{
+    if(g_termination_signal_received.load(std::memory_order_relaxed))
+        safe_shutdown(0);
 }
 
 /* Temporary: fullscreen also ate the ctrl+shift+p screenshot shortcut, so
@@ -2371,11 +2499,25 @@ void start_udp_receiver()
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(LONGMYND_TS_UDP_PORT);
-    if(bind(udp_sock, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+
+    /* A restart (see restart_btn_cb()) can occasionally overlap the tail end
+     * of the previous process still releasing this socket. Retry briefly
+     * instead of giving up outright - failing here silently kills video/audio
+     * for the entire session with no recovery until the next restart. */
+    constexpr int BIND_RETRY_ATTEMPTS = 10;
+    constexpr int BIND_RETRY_DELAY_MS = 200;
+    int bind_result = -1;
+    for(int attempt = 1; attempt <= BIND_RETRY_ATTEMPTS; ++attempt) {
+        bind_result = bind(udp_sock, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+        if(bind_result == 0) break;
+        if(attempt < BIND_RETRY_ATTEMPTS)
+            std::this_thread::sleep_for(std::chrono::milliseconds(BIND_RETRY_DELAY_MS));
+    }
+    if(bind_result < 0) {
         /* No point starting the receiver thread - it would spin on a socket
          * that's never going to see the TS traffic it was meant to catch. */
-        std::fprintf(stderr, "[UDP] bind() to port %d failed: %s\n",
-                     LONGMYND_TS_UDP_PORT, std::strerror(errno));
+        std::fprintf(stderr, "[UDP] bind() to port %d failed after %d attempts: %s\n",
+                     LONGMYND_TS_UDP_PORT, BIND_RETRY_ATTEMPTS, std::strerror(errno));
         close(udp_sock);
         udp_sock = -1;
         return;
@@ -2415,7 +2557,6 @@ std::atomic<bool> frame_ready{false};
 constexpr int AUDIO_OUTPUT_RATE = 48000;
 constexpr int AUDIO_OUTPUT_CHANNELS = 2;
 SDL_AudioDeviceID audio_device = 0;
-std::atomic<int> audio_volume_percent{100};
 std::atomic<int> audio_peak_percent{0};
 lv_obj_t * audio_vu_bar = nullptr;
 lv_obj_t * audio_volume_label = nullptr;
@@ -2430,6 +2571,7 @@ void volume_slider_cb(lv_event_t * event)
         std::snprintf(text, sizeof(text), "%d%%", volume);
         lv_label_set_text(audio_volume_label, text);
     }
+    save_settings();
 }
 
 void audio_vu_update_cb(lv_timer_t *)
@@ -2490,6 +2632,7 @@ std::string uppercase_codec_name(AVCodecID id)
 void decode_loop()
 {
     while(decode_thread_running.load(std::memory_order_relaxed)) {
+        decode_session_count.fetch_add(1, std::memory_order_relaxed);
         {
             /* Clear stale names from the previous service immediately -
              * otherwise the old codec name would linger on screen while
@@ -2788,6 +2931,14 @@ void request_video_reset()
 {
     decode_reset_requested.store(true, std::memory_order_relaxed);
     clear_audio_queue();
+    /* Drop whatever's still buffered from the old stream *here*, not just in
+     * decode_loop()'s own end-of-session cleanup - otherwise the old decode
+     * session keeps draining its backlog (still showing the old picture)
+     * for as long as that takes before it ever notices decode_reset_requested,
+     * instead of stopping the moment we know a new stream is coming. Clear
+     * before wake() so the pop() it unblocks sees an empty buffer and takes
+     * the EOF path immediately rather than returning more stale bytes. */
+    g_ts_ring.clear();
     /* Setting the flag alone isn't enough - decode_loop() only checks it
      * between reads, so a decode session with no more TS arriving would
      * otherwise sit blocked in TsRingBuffer::pop() forever, never getting
@@ -2876,6 +3027,9 @@ void video_frame_update_cb(lv_timer_t *)
              * redraw every 33ms even when decode_loop hasn't produced a new
              * frame, for no visible benefit. */
             frame_ready.store(false, std::memory_order_relaxed);
+            if(tuning_overlay != nullptr &&
+               decode_session_count.load(std::memory_order_relaxed) >= tuning_overlay_target_session)
+                lv_obj_add_flag(tuning_overlay, LV_OBJ_FLAG_HIDDEN);
 
             /* Diagnostic: gap since the previous successful render - an
              * aggregate rate can hide "many small stalls" behind an OK-
@@ -2954,11 +3108,37 @@ void build_video_panel(lv_obj_t * screen)
     lv_canvas_set_buffer(video_canvas, video_canvas_pixels, VIDEO_SMALL_W, VIDEO_SMALL_H, LV_COLOR_FORMAT_RGB565);
     lv_obj_set_pos(video_canvas, CONTENT_MARGIN, 1);
 
+    /* Created after video_canvas so it draws on top; LV_PCT sizing tracks
+     * video_panel_click_cb's fullscreen/small resizing automatically, no
+     * extra handling needed there. Not clickable, so taps fall through to
+     * panel's own click handler below (tap video to fill screen) even while
+     * this is showing. */
+    tuning_overlay = lv_obj_create(panel);
+    lv_obj_set_pos(tuning_overlay, 0, 0);
+    lv_obj_set_size(tuning_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(tuning_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(tuning_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(tuning_overlay, 0, 0);
+    lv_obj_set_style_radius(tuning_overlay, 0, 0);
+    lv_obj_remove_flag(tuning_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(tuning_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(tuning_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t * tuning_overlay_label = make_label(tuning_overlay, "Please wait,\nTuning...",
+                                                 COLOR_TEXT, &lv_font_montserrat_32);
+    lv_obj_set_style_text_align(tuning_overlay_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(tuning_overlay_label);
+
     lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(panel, video_panel_click_cb, LV_EVENT_CLICKED, nullptr);
 
     start_video_pipeline();
-    lv_timer_create(video_frame_update_cb, 33, nullptr);
+    /* Panel refreshes at ~58Hz (xrandr) and decode targets 50fps - sampling
+     * at the old 33ms/~30Hz meant up to ~40% of already-decoded frames were
+     * silently overwritten in frame_pixels before this timer ever looked at
+     * them. 17ms comfortably covers both; this timer already skips all real
+     * work (the memcpy/redraw below) whenever decode hasn't produced a new
+     * frame, so firing it more often costs next to nothing. */
+    lv_timer_create(video_frame_update_cb, 17, nullptr);
 }
 
 /* ===================================================================
@@ -3236,7 +3416,9 @@ void build_status_panel(lv_obj_t * screen)
     lv_obj_t * volume_title = make_label(panel, "VOL", COLOR_TEXT_DIM);
     lv_obj_set_pos(volume_title, 10, bottom_btn_y - 52);
 
-    audio_volume_label = make_label(panel, "100%", COLOR_TEXT);
+    char volume_text[12];
+    std::snprintf(volume_text, sizeof(volume_text), "%d%%", audio_volume_percent.load());
+    audio_volume_label = make_label(panel, volume_text, COLOR_TEXT);
     lv_obj_set_pos(audio_volume_label, panel_w - 46, bottom_btn_y - 52);
 
     lv_obj_t * volume_slider = lv_slider_create(panel);
@@ -3279,7 +3461,7 @@ void build_status_panel(lv_obj_t * screen)
     lv_obj_set_style_bg_color(chat_btn, COLOR_PANEL, 0);
     lv_obj_set_style_border_color(chat_btn, COLOR_CYAN, 0);
     lv_obj_set_style_border_width(chat_btn, 1, 0);
-    lv_obj_t * chat_label = make_label(chat_btn, "CHAT", COLOR_CYAN, &lv_font_montserrat_16);
+    lv_obj_t * chat_label = make_label(chat_btn, LV_SYMBOL_ENVELOPE, COLOR_CYAN, &lv_font_montserrat_20);
     lv_obj_center(chat_label);
     lv_obj_add_event_cb(chat_btn, show_chat_cb, LV_EVENT_CLICKED, nullptr);
 
@@ -3293,16 +3475,15 @@ void build_status_panel(lv_obj_t * screen)
     lv_obj_center(settings_label);
     lv_obj_add_event_cb(settings_btn, show_settings_cb, LV_EVENT_CLICKED, nullptr);
 
-    /* Fullscreen kiosk mode has no window chrome, so this is the only exit. */
-    lv_obj_t * exit_btn = lv_button_create(panel);
-    lv_obj_set_pos(exit_btn, button_margin + 3 * (button_w + button_gap), bottom_btn_y);
-    lv_obj_set_size(exit_btn, button_w, 54);
-    lv_obj_set_style_bg_color(exit_btn, COLOR_PANEL, 0);
-    lv_obj_set_style_border_color(exit_btn, COLOR_RED, 0);
-    lv_obj_set_style_border_width(exit_btn, 1, 0);
-    lv_obj_t * exit_label = make_label(exit_btn, "EXIT", COLOR_RED, &lv_font_montserrat_16);
-    lv_obj_center(exit_label);
-    lv_obj_add_event_cb(exit_btn, exit_btn_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t * restart_btn = lv_button_create(panel);
+    lv_obj_set_pos(restart_btn, button_margin + 3 * (button_w + button_gap), bottom_btn_y);
+    lv_obj_set_size(restart_btn, button_w, 54);
+    lv_obj_set_style_bg_color(restart_btn, COLOR_PANEL, 0);
+    lv_obj_set_style_border_color(restart_btn, COLOR_RED, 0);
+    lv_obj_set_style_border_width(restart_btn, 1, 0);
+    lv_obj_t * restart_label = make_label(restart_btn, LV_SYMBOL_REFRESH, COLOR_RED, &lv_font_montserrat_20);
+    lv_obj_center(restart_label);
+    lv_obj_add_event_cb(restart_btn, restart_btn_cb, LV_EVENT_CLICKED, nullptr);
 }
 
 void auto_close_msgbox_cb(lv_timer_t * timer)
@@ -3334,6 +3515,13 @@ int main()
         return 1;
     }
     boot_mark("display backend init done");
+
+    /* Must come after driver_backends_init_backend() (SDL_Init) so this
+     * overrides SDL's own SIGTERM/SIGINT handlers - see handle_termination_
+     * signal()'s comment for why. */
+    signal(SIGTERM, handle_termination_signal);
+    signal(SIGINT, handle_termination_signal);
+    lv_timer_create(termination_signal_check_cb, 100, nullptr);
 
     lv_obj_t * screen = lv_screen_active();
     lv_obj_set_style_bg_color(screen, COLOR_BG, 0);
