@@ -89,27 +89,38 @@ std::string resolve_path(int levels_up, const std::string & relative)
 }
 
 /* Default is the real kiosk hardware (1024x600), fullscreen. Set
- * QO100_DISPLAY=WxH (e.g. "800x480") to preview a different target
- * resolution windowed on whatever screen this happens to run on instead -
- * same binary, no separate build, no stretching/scaling since the window is
- * created at exactly that size. The panel grid below is entirely derived
- * from SCREEN_W/H so it keeps its proportions at any resolution; fixed
- * pixel values elsewhere (button heights, margins, font sizes) don't scale
- * and may need actual visual tuning once a non-default size is in use. */
+ * QO100_DISPLAY=WxH (e.g. "800x480") to target a different resolution -
+ * same binary, no separate build. Fullscreen by default there too (for a
+ * second, smaller real kiosk unit); add QO100_WINDOWED=1 to instead preview
+ * that resolution windowed on whatever screen this happens to run on, no
+ * stretching/scaling since the window is created at exactly that size. The
+ * panel grid below is entirely derived from SCREEN_W/H so it keeps its
+ * proportions at any resolution; fixed pixel values elsewhere (button
+ * heights, margins, font sizes) don't scale and may need actual visual
+ * tuning once a non-default size is in use. */
 struct DisplayConfig { int width; int height; bool fullscreen; };
 
 DisplayConfig resolve_display_config()
 {
+    DisplayConfig config{1024, 600, true};
+
     const char * env = std::getenv("QO100_DISPLAY");
     if(env != nullptr) {
         int w = 0, h = 0;
         if(std::sscanf(env, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
-            std::fprintf(stderr, "[STARTUP] QO100_DISPLAY=%dx%d - running windowed for preview\n", w, h);
-            return DisplayConfig{w, h, false};
+            config.width = w;
+            config.height = h;
         }
-        std::fprintf(stderr, "[STARTUP] QO100_DISPLAY=\"%s\" not in WxH format, ignoring\n", env);
+        else {
+            std::fprintf(stderr, "[STARTUP] QO100_DISPLAY=\"%s\" not in WxH format, ignoring\n", env);
+        }
     }
-    return DisplayConfig{1024, 600, true};
+
+    if(std::getenv("QO100_WINDOWED") != nullptr) config.fullscreen = false;
+
+    std::fprintf(stderr, "[STARTUP] display: %dx%d, %s\n", config.width, config.height,
+                 config.fullscreen ? "fullscreen" : "windowed");
+    return config;
 }
 
 const DisplayConfig g_display = resolve_display_config();
