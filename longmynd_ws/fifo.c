@@ -179,11 +179,22 @@ static uint8_t fifo_init(int *fd_ptr, char *fifo_path, bool *fifo_ready) {
   
     //printf("Flow: Fifo Init\n");
 
-    /* First check the file exists */
-    struct stat   buffer; 
+    /* First check the file exists - create it if this is a fresh checkout
+     * that never had it made by hand (both longmynd_main_status and
+     * longmynd_main_ts are untracked named pipes, not regular files). */
+    struct stat   buffer;
     if(stat(fifo_path, &buffer) < 0) {
-        printf("ERROR: Failed to open fifo %s (error: %s)\n",fifo_path,strerror(errno));
-        err=ERROR_OPEN_TS_FIFO;
+        if(errno == ENOENT) {
+            if(mkfifo(fifo_path, 0666) < 0) {
+                printf("ERROR: Failed to create fifo %s (error: %s)\n",fifo_path,strerror(errno));
+                err=ERROR_OPEN_TS_FIFO;
+            } else {
+                printf("      Status: created fifo %s\n",fifo_path);
+            }
+        } else {
+            printf("ERROR: Failed to stat fifo %s (error: %s)\n",fifo_path,strerror(errno));
+            err=ERROR_OPEN_TS_FIFO;
+        }
     }
 
     if (err==ERROR_NONE) {

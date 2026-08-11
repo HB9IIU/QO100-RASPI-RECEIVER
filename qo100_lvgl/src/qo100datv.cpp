@@ -1,9 +1,8 @@
 /*
  * qo100datv.cpp
  * ---------------------------------------------------------------------------
- * The real target application (see /home/daniel/DATVreceiver/tempo/mydream.png
- * for the visual spec). Layout follows that mockup; panels are filled in with
- * real data one at a time.
+ * The real target application, built from an early visual mockup. Layout
+ * follows that mockup; panels are filled in with real data one at a time.
  *
  * Status: spectrum panel shows the live BATC WB feed (visual only - no
  * click-to-tune yet, no signal-detection labels). Video/status panels are
@@ -65,8 +64,57 @@ namespace {
  * first-timer-call marker in service_websocket(). */
 const auto g_boot_t0 = std::chrono::steady_clock::now();
 
-constexpr int SCREEN_W = 1024;
-constexpr int SCREEN_H = 600;
+/* Resolves a path relative to some ancestor of the running binary's own
+ * directory, so paths work regardless of the username or checkout location
+ * this was built in - no more baking in one machine's absolute path.
+ * levels_up=0 is the binary's own directory (qo100_lvgl/build{,-debug}/,
+ * e.g. the bundled TTF font); levels_up=1 is qo100_lvgl/ (settings.json);
+ * levels_up=2 is the repo root (longmynd_ws/, screenshots/). Falls back to
+ * a plain relative path (resolved against the process's cwd) if
+ * /proc/self/exe can't be read. */
+std::string resolve_path(int levels_up, const std::string & relative)
+{
+    char executable[PATH_MAX]{};
+    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1U);
+    if(length <= 0) return relative;
+    executable[length] = '\0';
+
+    std::string dir(executable);
+    for(int i = 0; i <= levels_up; ++i) {
+        const size_t slash = dir.find_last_of('/');
+        if(slash == std::string::npos) return relative;
+        dir.resize(slash);
+    }
+    return dir + "/" + relative;
+}
+
+/* Default is the real kiosk hardware (1024x600), fullscreen. Set
+ * QO100_DISPLAY=WxH (e.g. "800x480") to preview a different target
+ * resolution windowed on whatever screen this happens to run on instead -
+ * same binary, no separate build, no stretching/scaling since the window is
+ * created at exactly that size. The panel grid below is entirely derived
+ * from SCREEN_W/H so it keeps its proportions at any resolution; fixed
+ * pixel values elsewhere (button heights, margins, font sizes) don't scale
+ * and may need actual visual tuning once a non-default size is in use. */
+struct DisplayConfig { int width; int height; bool fullscreen; };
+
+DisplayConfig resolve_display_config()
+{
+    const char * env = std::getenv("QO100_DISPLAY");
+    if(env != nullptr) {
+        int w = 0, h = 0;
+        if(std::sscanf(env, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+            std::fprintf(stderr, "[STARTUP] QO100_DISPLAY=%dx%d - running windowed for preview\n", w, h);
+            return DisplayConfig{w, h, false};
+        }
+        std::fprintf(stderr, "[STARTUP] QO100_DISPLAY=\"%s\" not in WxH format, ignoring\n", env);
+    }
+    return DisplayConfig{1024, 600, true};
+}
+
+const DisplayConfig g_display = resolve_display_config();
+const int SCREEN_W = g_display.width;
+const int SCREEN_H = g_display.height;
 
 /* Panel grid, derived from SCREEN_W/H so it keeps the original design's
  * proportions (hand-tuned for the first 800x480 display) on any other
@@ -75,15 +123,15 @@ constexpr int PANEL_MARGIN = 4;
 /* Shared inset for content drawn inside a panel (spectrum plot, video canvas)
  * - keeps their margins equal by construction rather than by coincidence. */
 constexpr int CONTENT_MARGIN = 14;
-constexpr int SPECTRUM_PANEL_H = SCREEN_H * 230 / 480;
-constexpr int BOTTOM_ROW_Y = PANEL_MARGIN + SPECTRUM_PANEL_H + PANEL_MARGIN;
-constexpr int BOTTOM_ROW_H = SCREEN_H - BOTTOM_ROW_Y - PANEL_MARGIN;
-constexpr int BOTTOM_ROW_INNER_W = SCREEN_W - 4 * PANEL_MARGIN;
-constexpr int VIDEO_PANEL_W = SCREEN_W * 420 / 800;
-constexpr int STATUS_PANEL_W = SCREEN_W * 178 / 800;
-constexpr int STATUS2_PANEL_W = BOTTOM_ROW_INNER_W - VIDEO_PANEL_W - STATUS_PANEL_W;
-constexpr int STATUS_PANEL_X = PANEL_MARGIN + VIDEO_PANEL_W + PANEL_MARGIN;
-constexpr int STATUS2_PANEL_X = STATUS_PANEL_X + STATUS_PANEL_W + PANEL_MARGIN;
+const int SPECTRUM_PANEL_H = SCREEN_H * 230 / 480;
+const int BOTTOM_ROW_Y = PANEL_MARGIN + SPECTRUM_PANEL_H + PANEL_MARGIN;
+const int BOTTOM_ROW_H = SCREEN_H - BOTTOM_ROW_Y - PANEL_MARGIN;
+const int BOTTOM_ROW_INNER_W = SCREEN_W - 4 * PANEL_MARGIN;
+const int VIDEO_PANEL_W = SCREEN_W * 420 / 800;
+const int STATUS_PANEL_W = SCREEN_W * 178 / 800;
+const int STATUS2_PANEL_W = BOTTOM_ROW_INNER_W - VIDEO_PANEL_W - STATUS_PANEL_W;
+const int STATUS_PANEL_X = PANEL_MARGIN + VIDEO_PANEL_W + PANEL_MARGIN;
+const int STATUS2_PANEL_X = STATUS_PANEL_X + STATUS_PANEL_W + PANEL_MARGIN;
 
 constexpr lv_color_t COLOR_BG        = LV_COLOR_MAKE(0x10, 0x14, 0x1c);
 constexpr lv_color_t COLOR_PANEL     = LV_COLOR_MAKE(0x18, 0x1e, 0x2a);
@@ -94,6 +142,7 @@ constexpr lv_color_t COLOR_CYAN      = LV_COLOR_MAKE(0x39, 0xd6, 0xff);
 constexpr lv_color_t COLOR_GREEN     = LV_COLOR_MAKE(0x35, 0xd4, 0x6a);
 constexpr lv_color_t COLOR_YELLOW    = LV_COLOR_MAKE(0xff, 0xd1, 0x66);
 constexpr lv_color_t COLOR_RED       = LV_COLOR_MAKE(0xff, 0x4d, 0x4d);
+constexpr lv_color_t COLOR_PURPLE    = LV_COLOR_MAKE(0xb3, 0x66, 0xff);
 
 lv_obj_t * make_panel(lv_obj_t * parent, int x, int y, int w, int h)
 {
@@ -166,6 +215,7 @@ lv_obj_t * chat_page = nullptr;
 lv_obj_t * settings_page = nullptr;
 void request_video_reset();
 void return_to_beacon();
+void scan_advance();
 
 constexpr float DISPLAY_MAX_DB = 10.0F;
 constexpr float SERVER_UNITS_PER_DB = 3276.8F;
@@ -705,10 +755,10 @@ void service_websocket(lv_timer_t *)
  * UI thread never touches a blocking read.
  * =================================================================== */
 
-constexpr const char * LONGMYND_DIR = "/home/daniel/DATVreceiver/longmynd_ws";
-const std::string LONGMYND_BIN = std::string(LONGMYND_DIR) + "/longmynd";
-const std::string LONGMYND_LOG = std::string(LONGMYND_DIR) + "/longmynd.log";
-const std::string LONGMYND_PID_FILE = std::string(LONGMYND_DIR) + "/longmynd.pid";
+const std::string LONGMYND_DIR = resolve_path(2, "longmynd_ws");
+const std::string LONGMYND_BIN = LONGMYND_DIR + "/longmynd";
+const std::string LONGMYND_LOG = LONGMYND_DIR + "/longmynd.log";
+const std::string LONGMYND_PID_FILE = LONGMYND_DIR + "/longmynd.pid";
 
 constexpr int LONGMYND_WS_PORT = 8765;
 constexpr int LONGMYND_TS_UDP_PORT = 5600;
@@ -751,7 +801,7 @@ void start_longmynd(long freq_khz, long symrate_ksps)
 
     pid_t pid = fork();
     if(pid == 0) {
-        chdir(LONGMYND_DIR);
+        chdir(LONGMYND_DIR.c_str());
         int fd = open(LONGMYND_LOG.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if(fd >= 0) {
             dup2(fd, STDOUT_FILENO);
@@ -849,6 +899,51 @@ constexpr auto AUTO_BEACON_RETURN_DELAY = std::chrono::milliseconds(2500);
 bool tuned_to_beacon = true;
 bool auto_beacon_return_armed = false;
 std::chrono::steady_clock::time_point auto_beacon_return_deadline{};
+
+/* Scanner: steps through last_detected_signals (the same list
+ * spectrum_click_cb() snaps taps to) from the beacon upward, dwelling on
+ * each until it loses lock (see finish_rx_status_update()) or
+ * SCAN_MAX_DWELL elapses, whichever first - see scan_advance(). Any manual
+ * tap on the spectrum (spectrum_click_cb()) cancels it, same as a manual
+ * retune already overrides auto-return-to-beacon. */
+constexpr auto SCAN_MAX_DWELL = std::chrono::seconds(30);
+lv_obj_t * scan_btn = nullptr;
+/* The button's icon: a small ring plus a needle from its center (see
+ * build_scan_glyph()) - LVGL's built-in symbol set has nothing that reads
+ * as "scanning across frequencies", so this is drawn directly instead of
+ * using a font glyph like the other buttons. */
+lv_obj_t * scan_radar_needle = nullptr;
+bool scan_active = false;
+double scan_current_freq_mhz = 0.0;
+std::chrono::steady_clock::time_point scan_dwell_deadline{};
+
+void scan_radar_needle_angle_cb(void * var, int32_t angle)
+{
+    lv_obj_set_style_transform_rotation(static_cast<lv_obj_t *>(var), angle, 0);
+}
+
+void set_scan_active(bool active)
+{
+    scan_active = active;
+    if(scan_btn != nullptr)
+        lv_obj_set_style_bg_color(scan_btn, active ? COLOR_PURPLE : COLOR_PANEL, 0);
+
+    if(scan_radar_needle == nullptr) return;
+    lv_anim_delete(scan_radar_needle, scan_radar_needle_angle_cb);
+    if(active) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, scan_radar_needle);
+        lv_anim_set_exec_cb(&a, scan_radar_needle_angle_cb);
+        lv_anim_set_values(&a, 0, 3600);
+        lv_anim_set_duration(&a, 1500);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(&a);
+    }
+    else {
+        lv_obj_set_style_transform_rotation(scan_radar_needle, 0, 0);
+    }
+}
 
 lv_obj_t * g_mode_value = nullptr;
 lv_obj_t * g_mer_value = nullptr;
@@ -1122,11 +1217,17 @@ void finish_rx_status_update()
         std::fprintf(stderr, "[TUNE] lock established - resetting video decoder\n");
         request_video_reset();
     }
-    if(!locked_now && rx_was_locked && !tuned_to_beacon) {
-        auto_beacon_return_armed = true;
-        auto_beacon_return_deadline = std::chrono::steady_clock::now() + AUTO_BEACON_RETURN_DELAY;
-        std::fprintf(stderr, "[TUNE] lock lost on non-beacon signal - returning to beacon in %lldms unless it comes back\n",
-                     static_cast<long long>(AUTO_BEACON_RETURN_DELAY.count()));
+    if(!locked_now && rx_was_locked) {
+        if(scan_active) {
+            std::fprintf(stderr, "[SCAN] lock lost - advancing\n");
+            scan_advance();
+        }
+        else if(!tuned_to_beacon) {
+            auto_beacon_return_armed = true;
+            auto_beacon_return_deadline = std::chrono::steady_clock::now() + AUTO_BEACON_RETURN_DELAY;
+            std::fprintf(stderr, "[TUNE] lock lost on non-beacon signal - returning to beacon in %lldms unless it comes back\n",
+                         static_cast<long long>(AUTO_BEACON_RETURN_DELAY.count()));
+        }
     }
     if(locked_now && auto_beacon_return_armed) {
         auto_beacon_return_armed = false;
@@ -1175,6 +1276,13 @@ void finish_rx_status_update()
     if(auto_beacon_return_armed && std::chrono::steady_clock::now() >= auto_beacon_return_deadline) {
         auto_beacon_return_armed = false;
         return_to_beacon();
+    }
+
+    /* Safety cap: move on even if still locked, so one long-running
+     * transmission can't hold the scan in place indefinitely. */
+    if(scan_active && std::chrono::steady_clock::now() >= scan_dwell_deadline) {
+        std::fprintf(stderr, "[SCAN] max dwell reached - advancing\n");
+        scan_advance();
     }
 }
 
@@ -1481,7 +1589,7 @@ void send_control_command(const std::string & cmd)
  * changes - see volume_slider_cb().
  * =================================================================== */
 
-constexpr const char * SETTINGS_FILE = "/home/daniel/DATVreceiver/qo100_lvgl/settings.json";
+const std::string SETTINGS_FILE = resolve_path(1, "settings.json");
 
 /* Declared here (ahead of its normal home near the audio code below) so
  * load_settings()/save_settings() can reach it. */
@@ -1489,7 +1597,7 @@ std::atomic<int> audio_volume_percent{50};
 
 void load_settings()
 {
-    json_object * root = json_object_from_file(SETTINGS_FILE);
+    json_object * root = json_object_from_file(SETTINGS_FILE.c_str());
     if(root == nullptr) return;
 
     json_object * value = nullptr;
@@ -1513,7 +1621,7 @@ void save_settings()
     json_object_object_add(root, "lnb_voltage_horizontal", json_object_new_boolean(g_lnb_voltage_horizontal));
     json_object_object_add(root, "audio_volume_percent",
                             json_object_new_int(audio_volume_percent.load(std::memory_order_relaxed)));
-    json_object_to_file_ext(SETTINGS_FILE, root, JSON_C_TO_STRING_PRETTY);
+    json_object_to_file_ext(SETTINGS_FILE.c_str(), root, JSON_C_TO_STRING_PRETTY);
     json_object_put(root);
 }
 
@@ -1569,22 +1677,13 @@ const lv_font_t * get_chat_font()
 {
     if(chat_font_16 != nullptr) return chat_font_16;
 
-    char executable[PATH_MAX]{};
-    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1U);
-    if(length > 0) {
-        executable[length] = '\0';
-        char * slash = std::strrchr(executable, '/');
-        if(slash != nullptr) {
-            std::strcpy(slash + 1, "Montserrat-Medium.ttf");
-            const std::string lvgl_path = "A:" + std::string(executable);
-            chat_font_16 = lv_tiny_ttf_create_file(lvgl_path.c_str(), 16);
-            /* Montserrat TTF provides Unicode text but not LVGL's private-use
-             * icon codepoints used by Backspace, Shift, Enter, etc. Resolve
-             * those missing glyphs through LVGL's symbol-equipped font. */
-            if(chat_font_16 != nullptr)
-                chat_font_16->fallback = &lv_font_montserrat_16;
-        }
-    }
+    const std::string lvgl_path = "A:" + resolve_path(0, "Montserrat-Medium.ttf");
+    chat_font_16 = lv_tiny_ttf_create_file(lvgl_path.c_str(), 16);
+    /* Montserrat TTF provides Unicode text but not LVGL's private-use icon
+     * codepoints used by Backspace, Shift, Enter, etc. Resolve those missing
+     * glyphs through LVGL's symbol-equipped font. */
+    if(chat_font_16 != nullptr)
+        chat_font_16->fallback = &lv_font_montserrat_16;
     if(chat_font_16 == nullptr)
         std::fprintf(stderr, "[CHAT] Could not load Unicode font; using LVGL fallback\n");
     return chat_font_16 != nullptr ? chat_font_16 : &lv_font_montserrat_16;
@@ -2195,6 +2294,59 @@ void return_to_beacon()
     }
 }
 
+/* Picks the next signal to visit: the closest detected signal above
+ * scan_current_freq_mhz, wrapping back to the lowest one at/above the
+ * beacon once nothing further up is currently detected. Re-reads
+ * last_detected_signals fresh each call rather than tracking an index,
+ * since detections can appear/disappear between scan steps. */
+void scan_advance()
+{
+    if(!scan_active) return;
+
+    const double beacon_mhz = g_lnb_lo_mhz + BEACON_FREQ_KHZ / 1000.0;
+    constexpr double BEACON_GUARD_MHZ = 0.1; /* skip the beacon's own bin */
+
+    const DetectedSignal * next = nullptr;
+    const DetectedSignal * lowest = nullptr;
+    for(const DetectedSignal & signal : last_detected_signals) {
+        if(signal.frequency_mhz <= beacon_mhz + BEACON_GUARD_MHZ) continue;
+        if(lowest == nullptr || signal.frequency_mhz < lowest->frequency_mhz)
+            lowest = &signal;
+        if(signal.frequency_mhz > scan_current_freq_mhz &&
+           (next == nullptr || signal.frequency_mhz < next->frequency_mhz))
+            next = &signal;
+    }
+
+    const DetectedSignal * target = next != nullptr ? next : lowest;
+    if(target == nullptr) {
+        /* Nothing detected above the beacon right now - stay armed and
+         * try again shortly rather than stalling with no dwell deadline
+         * set at all. */
+        std::fprintf(stderr, "[SCAN] nothing detected above the beacon - retrying shortly\n");
+        scan_dwell_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        return;
+    }
+
+    std::fprintf(stderr, "[SCAN] moving to %.3f MHz\n", target->frequency_mhz);
+    scan_current_freq_mhz = target->frequency_mhz;
+    scan_dwell_deadline = std::chrono::steady_clock::now() + SCAN_MAX_DWELL;
+    retune_exact(target->frequency_mhz, std::lround(target->symbol_rate_ms * 1000.0F));
+}
+
+void scan_btn_cb(lv_event_t *)
+{
+    if(scan_active) {
+        std::fprintf(stderr, "[SCAN] stopped\n");
+        set_scan_active(false);
+        return;
+    }
+
+    std::fprintf(stderr, "[SCAN] started\n");
+    set_scan_active(true);
+    scan_current_freq_mhz = g_lnb_lo_mhz + BEACON_FREQ_KHZ / 1000.0;
+    scan_advance();
+}
+
 void spectrum_click_cb(lv_event_t *)
 {
     std::fprintf(stderr, "[CLICK] spectrum_click_cb fired\n");
@@ -2246,6 +2398,7 @@ void spectrum_click_cb(lv_event_t *)
             "estimated SR=%.0f kS/s strength=%.0f (bins %zu-%zu)\n",
             hit->frequency_mhz, hit->measured_width_mhz,
             hit->symbol_rate_ms * 1000.0F, hit->strength, hit->start_bin, hit->end_bin);
+        set_scan_active(false);
         retune_exact(hit->frequency_mhz, std::lround(hit->symbol_rate_ms * 1000.0F));
     }
     else {
@@ -2309,14 +2462,15 @@ void termination_signal_check_cb(lv_timer_t *)
 void screenshot_btn_cb(lv_event_t *)
 {
     std::fprintf(stderr, "[CLICK] screenshot_btn_cb fired\n");
-    system("grim /home/daniel/DATVreceiver/screenshots/latest.png");
+    const std::string cmd = "grim " + resolve_path(2, "screenshots/latest.png");
+    system(cmd.c_str());
 }
 
 /* ================================================================= */
 
 void build_spectrum_panel(lv_obj_t * screen)
 {
-    constexpr int panel_x = 4, panel_y = 4, panel_w = SCREEN_W - 8, panel_h = SPECTRUM_PANEL_H;
+    const int panel_x = 4, panel_y = 4, panel_w = SCREEN_W - 8, panel_h = SPECTRUM_PANEL_H;
     lv_obj_t * panel = make_panel(screen, panel_x, panel_y, panel_w, panel_h);
 
     /* Top/left/right margins all equal (CONTENT_MARGIN); no dB scale labels
@@ -2377,13 +2531,13 @@ void build_spectrum_panel(lv_obj_t * screen)
     lv_obj_add_event_cb(spectrum_canvas, spectrum_click_cb, LV_EVENT_CLICKED, nullptr);
 }
 
-constexpr int VIDEO_PANEL_H = BOTTOM_ROW_H;
+const int VIDEO_PANEL_H = BOTTOM_ROW_H;
 /* Video canvas target size in the small (normal) view: left/bottom margins
  * match the spectrum plot's (CONTENT_MARGIN); top/right stay the original
  * 1px inset, just enough to clear the panel border. Fullscreen mode (see
  * video_panel_click_cb) targets SCREEN_W x SCREEN_H directly instead. */
-constexpr int VIDEO_SMALL_W = VIDEO_PANEL_W - CONTENT_MARGIN - 1;
-constexpr int VIDEO_SMALL_H = VIDEO_PANEL_H - 1 - CONTENT_MARGIN;
+const int VIDEO_SMALL_W = VIDEO_PANEL_W - CONTENT_MARGIN - 1;
+const int VIDEO_SMALL_H = VIDEO_PANEL_H - 1 - CONTENT_MARGIN;
 
 /* ===================================================================
  * Video decode pipeline - UDP TS in, RGB565 frames out, fully decoupled
@@ -3094,7 +3248,7 @@ void video_panel_click_cb(lv_event_t *)
 
 void build_video_panel(lv_obj_t * screen)
 {
-    constexpr int panel_x = 4, panel_y = BOTTOM_ROW_Y, panel_w = VIDEO_PANEL_W, panel_h = VIDEO_PANEL_H;
+    const int panel_x = 4, panel_y = BOTTOM_ROW_Y, panel_w = VIDEO_PANEL_W, panel_h = VIDEO_PANEL_H;
     lv_obj_t * panel = make_panel(screen, panel_x, panel_y, panel_w, panel_h);
     lv_obj_set_style_pad_all(panel, 0, 0);
     video_panel = panel;
@@ -3370,11 +3524,47 @@ void build_settings_page(lv_obj_t * screen)
     lv_obj_set_pos(settings_link_value, 340, 164);
 }
 
+/* Small radar icon for the scan button: a ring plus a needle from its
+ * center that set_scan_active() spins continuously while a scan is
+ * running (and holds still, reset to 0deg, otherwise). */
+void build_scan_glyph(lv_obj_t * parent)
+{
+    constexpr int RING_SIZE = 22;
+    lv_obj_t * ring = lv_obj_create(parent);
+    lv_obj_set_size(ring, RING_SIZE, RING_SIZE);
+    lv_obj_center(ring);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(ring, COLOR_PURPLE, 0);
+    lv_obj_set_style_border_width(ring, 2, 0);
+    lv_obj_set_style_pad_all(ring, 0, 0);
+    lv_obj_remove_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+
+    constexpr int NEEDLE_W = 2;
+    constexpr int NEEDLE_H = RING_SIZE / 2;
+    scan_radar_needle = lv_obj_create(parent);
+    lv_obj_set_size(scan_radar_needle, NEEDLE_W, NEEDLE_H);
+    /* Center the needle on the parent, then shift up by half its own
+     * height so its *bottom* edge (the pivot below) lands exactly on the
+     * ring's center, like a clock hand. */
+    lv_obj_align(scan_radar_needle, LV_ALIGN_CENTER, 0, -NEEDLE_H / 2);
+    lv_obj_set_style_bg_color(scan_radar_needle, COLOR_PURPLE, 0);
+    lv_obj_set_style_bg_opa(scan_radar_needle, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(scan_radar_needle, 0, 0);
+    lv_obj_set_style_radius(scan_radar_needle, 0, 0);
+    lv_obj_set_style_pad_all(scan_radar_needle, 0, 0);
+    lv_obj_remove_flag(scan_radar_needle, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(scan_radar_needle, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_transform_pivot_x(scan_radar_needle, NEEDLE_W / 2, 0);
+    lv_obj_set_style_transform_pivot_y(scan_radar_needle, NEEDLE_H, 0);
+}
+
 void build_status_panel(lv_obj_t * screen)
 {
-    constexpr int panel_w = SCREEN_W - STATUS_PANEL_X - PANEL_MARGIN;
+    const int panel_w = SCREEN_W - STATUS_PANEL_X - PANEL_MARGIN;
     constexpr int left_x = 10;
-    constexpr int right_x = panel_w / 2 + 8;
+    const int right_x = panel_w / 2 + 8;
     constexpr int value_offset = 90;
     lv_obj_t * panel = make_panel(screen, STATUS_PANEL_X, BOTTOM_ROW_Y, panel_w, VIDEO_PANEL_H);
 
@@ -3398,6 +3588,16 @@ void build_status_panel(lv_obj_t * screen)
         {"Pilots", &g_pilots_value},
     };
 
+    /* Row spacing was hand-tuned (24px) for the original 1024x600 design's
+     * 301px-tall panel. Scale it down at smaller panel heights (e.g. an
+     * 800x480 preview - see QO100_DISPLAY) so the grid, volume controls, and
+     * button row all still fit instead of the bottom-anchored volume block
+     * creeping up into the grid's rows. Never scales past the original 24px
+     * - taller panels than the reference just keep the hand-tuned spacing. */
+    constexpr int REFERENCE_PANEL_H = 301;
+    constexpr int REFERENCE_ROW_H = 24;
+    const int row_h = std::clamp(VIDEO_PANEL_H * REFERENCE_ROW_H / REFERENCE_PANEL_H, 18, REFERENCE_ROW_H);
+
     auto build_column = [&](const Row * rows, size_t count, int x) {
         int y = 8;
         for(size_t i = 0; i < count; ++i) {
@@ -3406,23 +3606,25 @@ void build_status_panel(lv_obj_t * screen)
             lv_obj_t * value = make_label(panel, "---", COLOR_TEXT_DIM);
             lv_obj_set_pos(value, x + value_offset, y);
             *rows[i].value_out = value;
-            y += 24;
+            y += row_h;
         }
     };
-    build_column(left_rows, sizeof(left_rows) / sizeof(left_rows[0]), left_x);
-    build_column(right_rows, sizeof(right_rows) / sizeof(right_rows[0]), right_x);
+    constexpr size_t row_count = sizeof(left_rows) / sizeof(left_rows[0]);
+    build_column(left_rows, row_count, left_x);
+    build_column(right_rows, row_count, right_x);
+    const int grid_bottom_y = 8 + static_cast<int>(row_count) * row_h;
 
-    constexpr int bottom_btn_y = VIDEO_PANEL_H - 54 - 11;
+    const int bottom_btn_y = VIDEO_PANEL_H - 54 - 11;
     lv_obj_t * volume_title = make_label(panel, "VOL", COLOR_TEXT_DIM);
-    lv_obj_set_pos(volume_title, 10, bottom_btn_y - 52);
+    lv_obj_set_pos(volume_title, 10, grid_bottom_y);
 
     char volume_text[12];
     std::snprintf(volume_text, sizeof(volume_text), "%d%%", audio_volume_percent.load());
     audio_volume_label = make_label(panel, volume_text, COLOR_TEXT);
-    lv_obj_set_pos(audio_volume_label, panel_w - 46, bottom_btn_y - 52);
+    lv_obj_set_pos(audio_volume_label, panel_w - 46, grid_bottom_y);
 
     lv_obj_t * volume_slider = lv_slider_create(panel);
-    lv_obj_set_pos(volume_slider, 50, bottom_btn_y - 47);
+    lv_obj_set_pos(volume_slider, 50, grid_bottom_y + 5);
     lv_obj_set_size(volume_slider, panel_w - 105, 7);
     lv_slider_set_range(volume_slider, 0, 100);
     lv_slider_set_value(volume_slider, audio_volume_percent.load(), LV_ANIM_OFF);
@@ -3434,7 +3636,7 @@ void build_status_panel(lv_obj_t * screen)
     lv_obj_add_event_cb(volume_slider, volume_slider_cb, LV_EVENT_VALUE_CHANGED, nullptr);
 
     audio_vu_bar = lv_bar_create(panel);
-    lv_obj_set_pos(audio_vu_bar, 50, bottom_btn_y - 27);
+    lv_obj_set_pos(audio_vu_bar, 50, grid_bottom_y + 25);
     lv_obj_set_size(audio_vu_bar, panel_w - 105, 5);
     lv_bar_set_range(audio_vu_bar, 0, 100);
     lv_bar_set_value(audio_vu_bar, 0, LV_ANIM_OFF);
@@ -3444,7 +3646,7 @@ void build_status_panel(lv_obj_t * screen)
 
     constexpr int button_gap = 8;
     constexpr int button_margin = 8;
-    constexpr int button_w = (panel_w - 2 * button_margin - 3 * button_gap) / 4;
+    const int button_w = (panel_w - 2 * button_margin - 4 * button_gap) / 5;
     lv_obj_t * screenshot_btn = lv_button_create(panel);
     lv_obj_set_pos(screenshot_btn, button_margin, bottom_btn_y);
     lv_obj_set_size(screenshot_btn, button_w, 54);
@@ -3475,8 +3677,17 @@ void build_status_panel(lv_obj_t * screen)
     lv_obj_center(settings_label);
     lv_obj_add_event_cb(settings_btn, show_settings_cb, LV_EVENT_CLICKED, nullptr);
 
+    scan_btn = lv_button_create(panel);
+    lv_obj_set_pos(scan_btn, button_margin + 3 * (button_w + button_gap), bottom_btn_y);
+    lv_obj_set_size(scan_btn, button_w, 54);
+    lv_obj_set_style_bg_color(scan_btn, COLOR_PANEL, 0);
+    lv_obj_set_style_border_color(scan_btn, COLOR_PURPLE, 0);
+    lv_obj_set_style_border_width(scan_btn, 1, 0);
+    build_scan_glyph(scan_btn);
+    lv_obj_add_event_cb(scan_btn, scan_btn_cb, LV_EVENT_CLICKED, nullptr);
+
     lv_obj_t * restart_btn = lv_button_create(panel);
-    lv_obj_set_pos(restart_btn, button_margin + 3 * (button_w + button_gap), bottom_btn_y);
+    lv_obj_set_pos(restart_btn, button_margin + 4 * (button_w + button_gap), bottom_btn_y);
     lv_obj_set_size(restart_btn, button_w, 54);
     lv_obj_set_style_bg_color(restart_btn, COLOR_PANEL, 0);
     lv_obj_set_style_border_color(restart_btn, COLOR_RED, 0);
@@ -3503,7 +3714,7 @@ int main()
 
     settings.window_width = SCREEN_W;
     settings.window_height = SCREEN_H;
-    settings.fullscreen = true;
+    settings.fullscreen = g_display.fullscreen;
 
     driver_backends_register();
     lv_init();

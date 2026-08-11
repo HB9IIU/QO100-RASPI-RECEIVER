@@ -19,6 +19,18 @@ A standalone QO-100 (Es'hail-2) digital amateur TV receiver: a **Raspberry Pi 5*
 
 Default tuning at startup is the QO-100 beacon: **741474 kHz, 1500 ksps**.
 
+## Quick setup (fresh Pi)
+
+```bash
+scripts/initialSetup.sh
+```
+
+Installs build dependencies, fetches the two vendored libraries below (pinned
+to the versions this repo expects), creates the longmynd status FIFO,
+installs the MiniTiouner udev rule, and builds both `longmynd_ws` and
+`qo100_lvgl`. Safe to re-run - every step is skipped if already done. See the
+sections below for what it's doing and why, or to run any step by hand.
+
 ## Getting the vendored dependencies
 
 Two third-party libraries are required to build but are not vendored in this repo (kept out to keep it small) — clone them into place before building:
