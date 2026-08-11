@@ -9,10 +9,18 @@
 #    XWayland starts on demand and this service can otherwise race ahead
 #    of it (app runs with audio but no visible window).
 #
+# Usage: scripts/setup_autostart.sh [WxH]
+#   No argument: default 1024x600 kiosk panel (this Pi's original hardware).
+#   e.g. "800x480": a second kiosk unit with a different real panel size -
+#   see qo100datv.cpp's QO100_DISPLAY handling. Always fullscreen either way
+#   (that flag only goes windowed if QO100_WINDOWED is also set, which this
+#   script never does - autostart is always the real kiosk, never a preview).
+#
 # Safe to re-run: the desktop shortcut is left alone if present, the
 # service unit is always rewritten to match this script.
 set -e
 
+DISPLAY_RES="$1"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="$REPO_DIR/qo100_lvgl/build/qo100datv"
 APP_ICON="$REPO_DIR/assets/qo100datv-icon.png"
@@ -54,6 +62,7 @@ After=default.target
 [Service]
 Type=simple
 Environment=DISPLAY=:0.0
+$([ -n "$DISPLAY_RES" ] && echo "Environment=QO100_DISPLAY=$DISPLAY_RES")
 WorkingDirectory=$REPO_DIR/qo100_lvgl
 # labwc starts XWayland on demand; at boot this service can otherwise race
 # ahead of it and connect to a DISPLAY that isn't ready yet. The app then
