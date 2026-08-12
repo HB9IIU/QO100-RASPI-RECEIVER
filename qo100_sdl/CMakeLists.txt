@@ -10,16 +10,20 @@ pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(SDL2_TTF REQUIRED IMPORTED_TARGET SDL2_ttf)
 pkg_check_modules(WEBSOCKETS REQUIRED IMPORTED_TARGET libwebsockets)
 pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat libavcodec libavutil libswscale)
 
 add_executable(qo100sdl
     src/main.cpp
-    src/receiver.cpp)
+    src/receiver.cpp
+    src/video_decoder.cpp)
 target_compile_options(qo100sdl PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(qo100sdl PRIVATE
     PkgConfig::SDL2
     PkgConfig::SDL2_TTF
     PkgConfig::WEBSOCKETS
     PkgConfig::JSONC
+    PkgConfig::FFMPEG
     pthread)
 
 set(QO100_FONT_SOURCE

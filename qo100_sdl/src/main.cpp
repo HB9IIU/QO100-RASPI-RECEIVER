@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include "receiver.h"
+#include "video_decoder.h"
 
 namespace {
 
@@ -191,25 +192,30 @@ private:
     std::unordered_map<std::string, CachedText> textures_;
 };
 
-struct VideoFrame {
-    std::vector<uint16_t> pixels;
-    int width = 0;
-    int height = 0;
-    int64_t pts_us = 0;
-};
+using VideoFrame = qo100::VideoFrame;
 
 class VideoScheduler {
 public:
     void push(VideoFrame frame)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         if(queue_.empty()) first_queued_at_ = Clock::now();
         if(!queue_.empty() && frame.pts_us <= queue_.back().pts_us) {
             frame.pts_us = queue_.back().pts_us + 1;
         }
-        while(queue_.size() >= kVideoQueueCapacity) {
-            queue_.pop_front();
-            ++queue_drops_;
+        if(queue_.size() >= kVideoQueueCapacity) {
+            // A short bounded wait preserves a contiguous PTS sequence when
+            // FFmpeg releases a probe/decode burst. Its UDP FIFO continues
+            // receiving while this decoder thread waits. If presentation is
+            // genuinely behind after one frame interval, reject the arrival.
+            const bool space_available = space_available_.wait_for(lock,
+                std::chrono::milliseconds(25), [this] {
+                    return queue_.size() < kVideoQueueCapacity;
+                });
+            if(!space_available) {
+                ++queue_drops_;
+                return;
+            }
         }
         queue_.push_back(std::move(frame));
     }
@@ -250,6 +256,7 @@ public:
             ++late_drops_;
         }
         ++presented_;
+        space_available_.notify_one();
         return selected;
     }
 
@@ -258,6 +265,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         queue_.clear();
         clock_started_ = false;
+        space_available_.notify_all();
     }
 
     struct Stats {
@@ -276,6 +284,7 @@ public:
 
 private:
     mutable std::mutex mutex_;
+    std::condition_variable space_available_;
     std::deque<VideoFrame> queue_;
     Clock::time_point first_queued_at_{};
     Clock::time_point anchor_wall_{};
@@ -875,7 +884,7 @@ struct StatusField {
 
 void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layout,
                  int volume_percent, const qo100::ReceiverStatus & receiver,
-                 bool monitor_connected)
+                 bool monitor_connected, const std::string & video_codec)
 {
     fill_panel(renderer, layout.status_panel);
     const bool locked = receiver.locked();
@@ -935,7 +944,8 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     };
     const StatusField right[] = {
         {locked && !service.empty() ? service : "---", locked && !service.empty() ? kGreen : kTextDim},
-        {"---", kTextDim}, {"---", kTextDim},
+        {video_codec.empty() ? "---" : video_codec, video_codec.empty() ? kTextDim : kText},
+        {"---", kTextDim},
         {ber_text, locked ? kText : kTextDim},
         {ldpc_text, locked && receiver.demod_state == 4 ? kText : kTextDim},
         {frame_type, locked && receiver.demod_state == 4 ? kText : kTextDim},
@@ -993,19 +1003,45 @@ VideoFrame make_demo_frame(int width, int height, uint64_t index, int64_t pts_us
     VideoFrame frame;
     frame.width = width;
     frame.height = height;
+    frame.y_pitch = width;
+    frame.uv_pitch = (width + 1) / 2;
+    const int chroma_height = (height + 1) / 2;
+    const size_t y_size = static_cast<size_t>(frame.y_pitch) * height;
+    const size_t uv_size = static_cast<size_t>(frame.uv_pitch) * chroma_height;
+    frame.u_offset = y_size;
+    frame.v_offset = y_size + uv_size;
     frame.pts_us = pts_us;
-    frame.pixels.resize(static_cast<size_t>(width) * height);
+    frame.yuv420.resize(y_size + uv_size * 2U);
     const int bar = static_cast<int>((index * 4) % std::max(1, width));
     for(int y = 0; y < height; ++y) {
         for(int x = 0; x < width; ++x) {
-            const uint8_t red = static_cast<uint8_t>(25 + 80 * x / std::max(1, width));
-            const uint8_t green = static_cast<uint8_t>(25 + 60 * y / std::max(1, height));
             const bool highlight = std::abs(x - bar) < 10;
-            frame.pixels[static_cast<size_t>(y) * width + x] =
-                highlight ? rgb565(0x39, 0xd6, 0xff) : rgb565(red, green, 90);
+            frame.yuv420[static_cast<size_t>(y) * frame.y_pitch + x] =
+                highlight ? 190 : static_cast<uint8_t>(40 + 80 * x / std::max(1, width));
         }
     }
+    std::fill(frame.yuv420.begin() + static_cast<ptrdiff_t>(frame.u_offset),
+              frame.yuv420.begin() + static_cast<ptrdiff_t>(frame.v_offset), 150);
+    std::fill(frame.yuv420.begin() + static_cast<ptrdiff_t>(frame.v_offset),
+              frame.yuv420.end(), 90);
     return frame;
+}
+
+SDL_Rect aspect_fit(int source_width, int source_height, const SDL_Rect & bounds)
+{
+    if(source_width <= 0 || source_height <= 0) return bounds;
+    const double source_aspect = static_cast<double>(source_width) / source_height;
+    const double target_aspect = static_cast<double>(bounds.w) / bounds.h;
+    SDL_Rect result = bounds;
+    if(source_aspect > target_aspect) {
+        result.h = std::max(1, static_cast<int>(bounds.w / source_aspect));
+        result.y += (bounds.h - result.h) / 2;
+    }
+    else {
+        result.w = std::max(1, static_cast<int>(bounds.h * source_aspect));
+        result.x += (bounds.w - result.w) / 2;
+    }
+    return result;
 }
 
 bool save_screenshot(SDL_Renderer * renderer, int width, int height, const std::string & path)
@@ -1132,20 +1168,23 @@ int main(int argc, char ** argv)
         spectrum_feed.start();
     }
 
-    SDL_Texture * video_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB565,
-        SDL_TEXTUREACCESS_STREAMING, layout.video_content.w, layout.video_content.h);
-    if(video_texture == nullptr) {
-        std::fprintf(stderr, "[VIDEO] texture failed: %s\n", SDL_GetError());
-        return 1;
-    }
-    SDL_SetTextureScaleMode(video_texture, SDL_ScaleModeLinear);
+    SDL_Texture * video_texture = nullptr;
+    int video_source_width = 0;
+    int video_source_height = 0;
+
+    VideoScheduler scheduler;
+    const bool use_tuner = !options.no_tuner && !options.demo;
+    qo100::VideoDecoder video_decoder([&scheduler](VideoFrame && frame) {
+        scheduler.push(std::move(frame));
+    });
+    if(use_tuner) video_decoder.start();
 
     constexpr long beacon_frequency_khz = 741474;
     constexpr long beacon_symbol_rate_ksps = 1500;
     auto longmynd = std::make_unique<qo100::LongmyndProcess>(repository_root);
     qo100::LongmyndClient receiver_client;
     bool receiver_enabled = false;
-    if(!options.no_tuner) {
+    if(use_tuner) {
         receiver_enabled = longmynd->start(beacon_frequency_khz, beacon_symbol_rate_ksps);
         if(receiver_enabled) {
             receiver_client.start();
@@ -1157,7 +1196,6 @@ int main(int argc, char ** argv)
     bool receiver_was_locked = false;
     auto last_tune = Clock::time_point{};
 
-    VideoScheduler scheduler;
     std::atomic<bool> producer_running{options.demo};
     std::thread producer;
     if(options.demo) {
@@ -1182,7 +1220,14 @@ int main(int argc, char ** argv)
                                     beacon_frequency_khz / 1000.0;
     const auto run_started = Clock::now();
     auto last_stats = run_started;
+    auto last_present_wall = Clock::time_point{};
+    int64_t interval_max_gap_us = 0;
+    uint64_t interval_stalls = 0;
+    uint64_t previous_presented = 0;
+    uint64_t previous_queue_drops = 0;
+    uint64_t previous_late_drops = 0;
     while(running) {
+        bool uploaded_frame_this_loop = false;
         SDL_Event event{};
         while(SDL_PollEvent(&event)) {
             if(event.type == SDL_QUIT ||
@@ -1228,6 +1273,8 @@ int main(int argc, char ** argv)
                         const long symbol_rate_ksps = std::lround(
                             selected_signal->symbol_rate_ms * 1000.0F);
                         receiver_status.reset();
+                        scheduler.reset();
+                        have_video_frame = false;
                         receiver_client.send_tune(if_khz, symbol_rate_ksps);
                         std::fprintf(stderr,
                             "[TUNE] %.3fMHz -> IF=%ldkHz SR=%ldkS/s\n",
@@ -1256,6 +1303,9 @@ int main(int argc, char ** argv)
         if(receiver_enabled && receiver_client.consume_status(receiver_status)) {
             const bool locked_now = receiver_status.locked();
             if(locked_now && !receiver_was_locked) {
+                scheduler.reset();
+                have_video_frame = false;
+                video_decoder.request_reset();
                 const std::string service = !receiver_status.service_name.empty()
                     ? receiver_status.service_name : receiver_status.service_provider;
                 std::fprintf(stderr,
@@ -1272,17 +1322,43 @@ int main(int argc, char ** argv)
         }
 
         if(auto frame = scheduler.take_due(Clock::now())) {
-            if(frame->width == layout.video_content.w && frame->height == layout.video_content.h) {
-                SDL_UpdateTexture(video_texture, nullptr, frame->pixels.data(),
-                                  frame->width * static_cast<int>(sizeof(uint16_t)));
+            if(video_texture == nullptr || frame->width != video_source_width ||
+               frame->height != video_source_height) {
+                SDL_DestroyTexture(video_texture);
+                video_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_IYUV,
+                    SDL_TEXTUREACCESS_STREAMING, frame->width, frame->height);
+                if(video_texture != nullptr) {
+                    SDL_SetTextureScaleMode(video_texture, SDL_ScaleModeLinear);
+                    video_source_width = frame->width;
+                    video_source_height = frame->height;
+                    std::fprintf(stderr, "[VIDEO] texture=%dx%d IYUV\n",
+                                 video_source_width, video_source_height);
+                }
+                else {
+                    std::fprintf(stderr, "[VIDEO] texture failed: %s\n", SDL_GetError());
+                    video_source_width = 0;
+                    video_source_height = 0;
+                }
+            }
+            if(video_texture != nullptr &&
+               SDL_UpdateYUVTexture(video_texture, nullptr,
+                   frame->y_plane(), frame->y_pitch,
+                   frame->u_plane(), frame->uv_pitch,
+                   frame->v_plane(), frame->uv_pitch) == 0) {
                 have_video_frame = true;
+                uploaded_frame_this_loop = true;
             }
         }
 
         set_colour(renderer, kBackground);
         SDL_RenderClear(renderer);
         if(fullscreen_video) {
-            if(have_video_frame) SDL_RenderCopy(renderer, video_texture, nullptr, nullptr);
+            if(have_video_frame) {
+                const SDL_Rect screen_bounds{0, 0, display.width, display.height};
+                const SDL_Rect destination = aspect_fit(
+                    video_source_width, video_source_height, screen_bounds);
+                SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
+            }
         }
         else {
             draw_spectrum(renderer, text, layout, *spectrum_texture,
@@ -1290,29 +1366,59 @@ int main(int argc, char ** argv)
             fill_panel(renderer, layout.video_panel);
             set_colour(renderer, {0, 0, 0});
             SDL_RenderFillRect(renderer, &layout.video_content);
-            if(have_video_frame)
-                SDL_RenderCopy(renderer, video_texture, nullptr, &layout.video_content);
+            if(have_video_frame) {
+                const SDL_Rect destination = aspect_fit(
+                    video_source_width, video_source_height, layout.video_content);
+                SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
+            }
+            const std::string video_codec = options.demo ? "DEMO" : video_decoder.codec_name();
             draw_status(renderer, text, layout, volume_percent, receiver_status,
-                        receiver_client.monitor_connected());
+                        receiver_client.monitor_connected(), video_codec);
         }
         SDL_RenderPresent(renderer);
 
         const auto now = Clock::now();
+        if(uploaded_frame_this_loop) {
+            if(last_present_wall.time_since_epoch().count() != 0) {
+                const int64_t gap_us = std::chrono::duration_cast<Microseconds>(
+                    now - last_present_wall).count();
+                interval_max_gap_us = std::max(interval_max_gap_us, gap_us);
+                if(gap_us > 60000) ++interval_stalls;
+            }
+            last_present_wall = now;
+        }
         if(now - last_stats >= std::chrono::seconds(5)) {
             const auto stats = scheduler.stats();
+            const double window_seconds = std::chrono::duration<double>(now - last_stats).count();
+            const uint64_t presented_delta = stats.presented - previous_presented;
+            const uint64_t queue_drop_delta = stats.queue_drops - previous_queue_drops;
+            const uint64_t late_drop_delta = stats.late_drops - previous_late_drops;
             std::fprintf(stderr,
-                "[PRESENT] shown=%llu queue_drops=%llu late_drops=%llu rebases=%llu depth=%zu "
-                "spectrum=%llu replaced=%llu receiver=%llu/%llu link=%s/%s\n",
+                "[PRESENT] fps=%.1f drop=%llu late=%llu max_gap=%.1fms stalls=%llu "
+                "shown=%llu rebases=%llu depth=%zu "
+                "spectrum=%llu replaced=%llu receiver=%llu/%llu link=%s/%s "
+                "decode=%llu reopen=%llu errors=%llu\n",
+                presented_delta / window_seconds,
+                static_cast<unsigned long long>(queue_drop_delta),
+                static_cast<unsigned long long>(late_drop_delta),
+                interval_max_gap_us / 1000.0,
+                static_cast<unsigned long long>(interval_stalls),
                 static_cast<unsigned long long>(stats.presented),
-                static_cast<unsigned long long>(stats.queue_drops),
-                static_cast<unsigned long long>(stats.late_drops),
                 static_cast<unsigned long long>(stats.rebases), stats.depth,
                 static_cast<unsigned long long>(spectrum_feed.received_frames()),
                 static_cast<unsigned long long>(spectrum_feed.replaced_frames()),
                 static_cast<unsigned long long>(receiver_client.received_updates()),
                 static_cast<unsigned long long>(receiver_client.replaced_updates()),
                 receiver_client.monitor_connected() ? "monitor" : "---",
-                receiver_client.control_connected() ? "control" : "---");
+                receiver_client.control_connected() ? "control" : "---",
+                static_cast<unsigned long long>(video_decoder.decoded_frames()),
+                static_cast<unsigned long long>(video_decoder.reopen_count()),
+                static_cast<unsigned long long>(video_decoder.decode_errors()));
+            previous_presented = stats.presented;
+            previous_queue_drops = stats.queue_drops;
+            previous_late_drops = stats.late_drops;
+            interval_max_gap_us = 0;
+            interval_stalls = 0;
             last_stats = now;
         }
 
@@ -1326,6 +1432,7 @@ int main(int argc, char ** argv)
     }
 
     spectrum_feed.stop();
+    video_decoder.stop();
     receiver_client.stop();
     longmynd->stop();
 
@@ -1337,9 +1444,14 @@ int main(int argc, char ** argv)
         fill_panel(renderer, layout.video_panel);
         set_colour(renderer, {0, 0, 0});
         SDL_RenderFillRect(renderer, &layout.video_content);
-        if(have_video_frame) SDL_RenderCopy(renderer, video_texture, nullptr, &layout.video_content);
+        if(have_video_frame) {
+            const SDL_Rect destination = aspect_fit(
+                video_source_width, video_source_height, layout.video_content);
+            SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
+        }
+        const std::string video_codec = options.demo ? "DEMO" : video_decoder.codec_name();
         draw_status(renderer, text, layout, volume_percent, receiver_status,
-                    receiver_client.monitor_connected());
+                    receiver_client.monitor_connected(), video_codec);
         SDL_RenderPresent(renderer);
         if(!save_screenshot(renderer, display.width, display.height, options.screenshot))
             std::fprintf(stderr, "[SCREENSHOT] failed to save %s\n", options.screenshot.c_str());

@@ -14,13 +14,14 @@ The current milestone provides:
   frequency marker;
 - owned Longmynd startup/shutdown, live monitor/control websocket links,
   click-to-tune and receiver status/quality fields;
+- direct FFmpeg UDP ingestion with an interruptible decoder, native YUV420
+  handoff, timestamp scheduling and a persistent SDL YUV texture;
 - a synthetic 50 fps video source for exercising the handoff independently of
   UDP and FFmpeg;
 - a deterministic screenshot mode for visual regression checks.
 
-It does not yet receive/decode the live transport stream. Longmynd already
-sends that stream to UDP port 5600; the FFmpeg video/audio consumer is the
-next backend to move over.
+Live video decoding is connected. Audio decode/output is the next backend to
+move over; until then the Audio status remains `---`.
 
 ## Build
 
