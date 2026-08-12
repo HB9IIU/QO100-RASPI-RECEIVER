@@ -27,6 +27,8 @@
 #include <limits.h>
 #include <unistd.h>
 
+#include "receiver.h"
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -79,6 +81,13 @@ std::string executable_directory()
     std::string result(path);
     const size_t slash = result.find_last_of('/');
     return slash == std::string::npos ? "." : result.substr(0, slash);
+}
+
+std::string repository_directory()
+{
+    const std::string candidate = executable_directory() + "/../..";
+    char resolved[PATH_MAX]{};
+    return realpath(candidate.c_str(), resolved) != nullptr ? resolved : candidate;
 }
 
 struct DisplayConfig {
@@ -818,27 +827,131 @@ void draw_button(SDL_Renderer * renderer, TextCache & text, SDL_Rect rect,
               colour, font_size, true);
 }
 
+struct ModcodEntry { const char * modulation; const char * fec; };
+
+const ModcodEntry kDvbsModcod[] = {
+    {"QPSK", "1/2"}, {"QPSK", "2/3"}, {"QPSK", "3/4"},
+    {"QPSK", "5/6"}, {"QPSK", "6/7"}, {"QPSK", "7/8"}
+};
+
+const ModcodEntry kDvbs2Modcod[] = {
+    {"---", "---"}, {"QPSK", "1/4"}, {"QPSK", "1/3"}, {"QPSK", "2/5"},
+    {"QPSK", "1/2"}, {"QPSK", "3/5"}, {"QPSK", "2/3"}, {"QPSK", "3/4"},
+    {"QPSK", "4/5"}, {"QPSK", "5/6"}, {"QPSK", "8/9"}, {"QPSK", "9/10"},
+    {"8PSK", "3/5"}, {"8PSK", "2/3"}, {"8PSK", "3/4"}, {"8PSK", "5/6"},
+    {"8PSK", "8/9"}, {"8PSK", "9/10"}, {"16APSK", "2/3"}, {"16APSK", "3/4"},
+    {"16APSK", "4/5"}, {"16APSK", "5/6"}, {"16APSK", "8/9"}, {"16APSK", "9/10"},
+    {"32APSK", "3/4"}, {"32APSK", "4/5"}, {"32APSK", "5/6"},
+    {"32APSK", "8/9"}, {"32APSK", "9/10"}
+};
+
+const double kDvbsRequiredMer[] = {1.7, 3.3, 4.2, 5.1, 5.5, 5.8};
+const double kDvbs2RequiredMer[] = {
+    0.0, -2.35, -1.24, -0.30, 1.00, 2.23, 3.10, 4.03, 4.68, 5.18,
+    6.20, 6.42, 5.50, 6.62, 7.91, 9.35, 10.69, 10.98, 8.97, 10.21,
+    11.03, 11.61, 12.89, 13.13, 12.73, 13.64, 14.28, 15.69, 16.05
+};
+
+bool required_mer(const qo100::ReceiverStatus & status, double & value)
+{
+    if(status.modcod < 0) return false;
+    if(status.demod_state == 4 && status.modcod > 0 &&
+       static_cast<size_t>(status.modcod) < sizeof(kDvbs2RequiredMer) / sizeof(double)) {
+        value = kDvbs2RequiredMer[status.modcod];
+        return true;
+    }
+    if(status.demod_state == 3 &&
+       static_cast<size_t>(status.modcod) < sizeof(kDvbsRequiredMer) / sizeof(double)) {
+        value = kDvbsRequiredMer[status.modcod];
+        return true;
+    }
+    return false;
+}
+
+struct StatusField {
+    std::string value;
+    Colour colour = kTextDim;
+};
+
 void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layout,
-                 int volume_percent)
+                 int volume_percent, const qo100::ReceiverStatus & receiver,
+                 bool monitor_connected)
 {
     fill_panel(renderer, layout.status_panel);
-    static const char * left[][2] = {
-        {"Mode", "---"}, {"MER", "---"}, {"Quality", "---"},
-        {"Margin", "---"}, {"AGC", "---"}, {"FEC", "---"}, {"MOD", "---"}
+    const bool locked = receiver.locked();
+    double threshold = 0.0;
+    const bool have_threshold = locked && required_mer(receiver, threshold);
+    const double mer_margin = receiver.mer_x10 / 10.0 - threshold;
+    Colour quality_colour = kTextDim;
+    std::string quality = "---";
+    if(have_threshold) {
+        if(mer_margin >= 4.0) { quality = "Excellent"; quality_colour = kGreen; }
+        else if(mer_margin >= 2.0) { quality = "Good"; quality_colour = kGreen; }
+        else if(mer_margin >= 0.5) { quality = "Marginal"; quality_colour = kYellow; }
+        else { quality = "Poor"; quality_colour = kRed; }
+    }
+
+    const ModcodEntry * modcod = nullptr;
+    if(locked && receiver.modcod >= 0) {
+        if(receiver.demod_state == 4 &&
+           static_cast<size_t>(receiver.modcod) < sizeof(kDvbs2Modcod) / sizeof(kDvbs2Modcod[0]))
+            modcod = &kDvbs2Modcod[receiver.modcod];
+        else if(receiver.demod_state == 3 &&
+                static_cast<size_t>(receiver.modcod) < sizeof(kDvbsModcod) / sizeof(kDvbsModcod[0]))
+            modcod = &kDvbsModcod[receiver.modcod];
+    }
+
+    char mer_text[24] = "---";
+    char margin_text[24] = "---";
+    char agc_text[24] = "---";
+    char ber_text[24] = "---";
+    char ldpc_text[24] = "---";
+    if(locked) {
+        std::snprintf(mer_text, sizeof(mer_text), "%.1f dB", receiver.mer_x10 / 10.0);
+        const double agc_percent = ((receiver.agc1 + receiver.agc2) / 2.0) / 65535.0 * 100.0;
+        std::snprintf(agc_text, sizeof(agc_text), "%.0f%%", agc_percent);
+        std::snprintf(ber_text, sizeof(ber_text), "%.2f%%", receiver.ber_x100 / 100.0);
+        if(receiver.demod_state == 4)
+            std::snprintf(ldpc_text, sizeof(ldpc_text), "%ld", receiver.ldpc_errors);
+    }
+    if(have_threshold) std::snprintf(margin_text, sizeof(margin_text), "%+.1f dB", mer_margin);
+
+    const std::string service = !receiver.service_name.empty()
+        ? receiver.service_name : receiver.service_provider;
+    const char * frame_type = locked && receiver.demod_state == 4 && receiver.short_frames >= 0
+        ? (receiver.short_frames ? "Short" : "Normal") : "---";
+    const char * pilots = locked && receiver.demod_state == 4 && receiver.pilots >= 0
+        ? (receiver.pilots ? "On" : "Off") : "---";
+
+    const StatusField left[] = {
+        {locked ? (receiver.demod_state == 4 ? "DVB-S2" : "DVB-S")
+                : (monitor_connected ? "---" : "NO LINK"), locked ? kText : (monitor_connected ? kTextDim : kRed)},
+        {mer_text, locked ? (have_threshold ? quality_colour : kText) : kTextDim},
+        {quality, quality_colour},
+        {margin_text, have_threshold ? quality_colour : kTextDim},
+        {agc_text, locked ? kGreen : kTextDim},
+        {modcod != nullptr ? modcod->fec : "---", modcod != nullptr ? kText : kTextDim},
+        {modcod != nullptr ? modcod->modulation : "---", modcod != nullptr ? kText : kTextDim}
     };
-    static const char * right[][2] = {
-        {"Service", "---"}, {"Video", "---"}, {"Audio", "---"},
-        {"BER", "---"}, {"LDPC", "---"}, {"Frames", "---"}, {"Pilots", "---"}
+    const StatusField right[] = {
+        {locked && !service.empty() ? service : "---", locked && !service.empty() ? kGreen : kTextDim},
+        {"---", kTextDim}, {"---", kTextDim},
+        {ber_text, locked ? kText : kTextDim},
+        {ldpc_text, locked && receiver.demod_state == 4 ? kText : kTextDim},
+        {frame_type, locked && receiver.demod_state == 4 ? kText : kTextDim},
+        {pilots, locked && receiver.demod_state == 4 ? kText : kTextDim}
     };
+    static const char * left_labels[] = {"Mode", "MER", "Quality", "Margin", "AGC", "FEC", "MOD"};
+    static const char * right_labels[] = {"Service", "Video", "Audio", "BER", "LDPC", "Frames", "Pilots"};
     const int row_height = std::clamp(layout.status_panel.h * 24 / 301, 18, 24);
     const int left_x = layout.status_panel.x + 10;
     const int right_x = layout.status_panel.x + layout.status_panel.w / 2 + 8;
     for(int i = 0; i < 7; ++i) {
         const int y = layout.status_panel.y + 8 + i * row_height;
-        text.draw(left[i][0], left_x, y, kTextDim);
-        text.draw(left[i][1], left_x + 90, y, kTextDim);
-        text.draw(right[i][0], right_x, y, kTextDim);
-        text.draw(right[i][1], right_x + 90, y, kTextDim);
+        text.draw(left_labels[i], left_x, y, kTextDim);
+        text.draw(left[i].value, left_x + 90, y, left[i].colour);
+        text.draw(right_labels[i], right_x, y, kTextDim);
+        text.draw(right[i].value, right_x + 90, y, right[i].colour);
     }
 
     const int grid_bottom = layout.status_panel.y + 8 + 7 * row_height;
@@ -911,6 +1024,7 @@ bool save_screenshot(SDL_Renderer * renderer, int width, int height, const std::
 struct Options {
     bool demo = false;
     bool offline_spectrum = false;
+    bool no_tuner = false;
     int seconds = 0;
     std::string screenshot;
 };
@@ -922,6 +1036,8 @@ Options parse_options(int argc, char ** argv)
         if(std::strcmp(argv[i], "--demo") == 0) options.demo = true;
         else if(std::strcmp(argv[i], "--offline-spectrum") == 0)
             options.offline_spectrum = true;
+        else if(std::strcmp(argv[i], "--no-tuner") == 0)
+            options.no_tuner = true;
         else if(std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc)
             options.seconds = std::max(0, std::atoi(argv[++i]));
         else if(std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
@@ -992,6 +1108,9 @@ int main(int argc, char ** argv)
     }
 
     const Layout layout(display.width, display.height);
+    const std::string repository_root = repository_directory();
+    const qo100::ReceiverSettings receiver_settings =
+        qo100::load_receiver_settings(repository_root);
     auto spectrum_texture = std::make_unique<SpectrumTexture>(
         renderer, layout.spectrum_plot.w, layout.spectrum_plot.h);
     if(!spectrum_texture->valid()) {
@@ -1021,6 +1140,23 @@ int main(int argc, char ** argv)
     }
     SDL_SetTextureScaleMode(video_texture, SDL_ScaleModeLinear);
 
+    constexpr long beacon_frequency_khz = 741474;
+    constexpr long beacon_symbol_rate_ksps = 1500;
+    auto longmynd = std::make_unique<qo100::LongmyndProcess>(repository_root);
+    qo100::LongmyndClient receiver_client;
+    bool receiver_enabled = false;
+    if(!options.no_tuner) {
+        receiver_enabled = longmynd->start(beacon_frequency_khz, beacon_symbol_rate_ksps);
+        if(receiver_enabled) {
+            receiver_client.start();
+            receiver_client.send_voltage(receiver_settings.lnb_voltage_enabled,
+                                         receiver_settings.lnb_voltage_horizontal);
+        }
+    }
+    qo100::ReceiverStatus receiver_status;
+    bool receiver_was_locked = false;
+    auto last_tune = Clock::time_point{};
+
     VideoScheduler scheduler;
     std::atomic<bool> producer_running{options.demo};
     std::thread producer;
@@ -1040,9 +1176,10 @@ int main(int argc, char ** argv)
 
     bool running = true;
     bool fullscreen_video = false;
-    int volume_percent = 100;
+    int volume_percent = std::clamp(receiver_settings.audio_volume_percent, 0, 100);
     bool have_video_frame = false;
-    double selected_frequency_mhz = 10491.525;
+    double selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
+                                    beacon_frequency_khz / 1000.0;
     const auto run_started = Clock::now();
     auto last_stats = run_started;
     while(running) {
@@ -1062,17 +1199,40 @@ int main(int argc, char ** argv)
                     const double clicked = kSpectrumStartMhz +
                         static_cast<double>(x - layout.spectrum_plot.x) /
                         layout.spectrum_plot.w * kSpectrumSpanMhz;
-                    selected_frequency_mhz = clicked;
+                    const DetectedSignal * selected_signal = nullptr;
                     for(const auto & signal : spectrum_texture->signals()) {
                         const double half_width = std::max(0.02,
                             static_cast<double>(signal.measured_width_mhz) / 2.0);
                         if(std::abs(clicked - signal.frequency_mhz) <= half_width) {
                             selected_frequency_mhz = signal.frequency_mhz;
+                            selected_signal = &signal;
                             break;
                         }
                     }
-                    std::fprintf(stderr, "[SPECTRUM] selected %.3f MHz\n",
-                                 selected_frequency_mhz);
+                    if(selected_signal == nullptr) {
+                        selected_frequency_mhz = clicked;
+                        std::fprintf(stderr, "[TUNE] no detected signal at %.3fMHz; not tuning\n",
+                                     clicked);
+                    }
+                    else if(!receiver_enabled || !receiver_client.control_connected()) {
+                        std::fprintf(stderr, "[TUNE] selected %.3fMHz but control link is not ready\n",
+                                     selected_frequency_mhz);
+                    }
+                    else if(Clock::now() - last_tune < std::chrono::milliseconds(1500)) {
+                        std::fprintf(stderr, "[TUNE] selection ignored inside debounce window\n");
+                    }
+                    else {
+                        last_tune = Clock::now();
+                        const long if_khz = std::lround(
+                            (selected_frequency_mhz - receiver_settings.lnb_lo_mhz) * 1000.0);
+                        const long symbol_rate_ksps = std::lround(
+                            selected_signal->symbol_rate_ms * 1000.0F);
+                        receiver_status.reset();
+                        receiver_client.send_tune(if_khz, symbol_rate_ksps);
+                        std::fprintf(stderr,
+                            "[TUNE] %.3fMHz -> IF=%ldkHz SR=%ldkS/s\n",
+                            selected_frequency_mhz, if_khz, symbol_rate_ksps);
+                    }
                 }
                 if(x >= layout.video_panel.x && x < layout.video_panel.x + layout.video_panel.w &&
                    y >= layout.video_panel.y && y < layout.video_panel.y + layout.video_panel.h)
@@ -1091,6 +1251,24 @@ int main(int argc, char ** argv)
            spectrum_feed.consume(spectrum_bins, spectrum_status)) {
             spectrum_texture->update(spectrum_bins);
             spectrum_ready = true;
+        }
+
+        if(receiver_enabled && receiver_client.consume_status(receiver_status)) {
+            const bool locked_now = receiver_status.locked();
+            if(locked_now && !receiver_was_locked) {
+                const std::string service = !receiver_status.service_name.empty()
+                    ? receiver_status.service_name : receiver_status.service_provider;
+                std::fprintf(stderr,
+                    "[TUNE] lock: %s IF=%ldkHz SR=%ldkS/s MER=%.1fdB service=%s\n",
+                    receiver_status.demod_state == 4 ? "DVB-S2" : "DVB-S",
+                    receiver_status.carrier_khz, receiver_status.symbol_rate_ksps,
+                    receiver_status.mer_x10 / 10.0,
+                    service.empty() ? "---" : service.c_str());
+            }
+            else if(!locked_now && receiver_was_locked) {
+                std::fprintf(stderr, "[TUNE] lock lost\n");
+            }
+            receiver_was_locked = locked_now;
         }
 
         if(auto frame = scheduler.take_due(Clock::now())) {
@@ -1114,7 +1292,8 @@ int main(int argc, char ** argv)
             SDL_RenderFillRect(renderer, &layout.video_content);
             if(have_video_frame)
                 SDL_RenderCopy(renderer, video_texture, nullptr, &layout.video_content);
-            draw_status(renderer, text, layout, volume_percent);
+            draw_status(renderer, text, layout, volume_percent, receiver_status,
+                        receiver_client.monitor_connected());
         }
         SDL_RenderPresent(renderer);
 
@@ -1123,19 +1302,23 @@ int main(int argc, char ** argv)
             const auto stats = scheduler.stats();
             std::fprintf(stderr,
                 "[PRESENT] shown=%llu queue_drops=%llu late_drops=%llu rebases=%llu depth=%zu "
-                "spectrum=%llu replaced=%llu\n",
+                "spectrum=%llu replaced=%llu receiver=%llu/%llu link=%s/%s\n",
                 static_cast<unsigned long long>(stats.presented),
                 static_cast<unsigned long long>(stats.queue_drops),
                 static_cast<unsigned long long>(stats.late_drops),
                 static_cast<unsigned long long>(stats.rebases), stats.depth,
                 static_cast<unsigned long long>(spectrum_feed.received_frames()),
-                static_cast<unsigned long long>(spectrum_feed.replaced_frames()));
+                static_cast<unsigned long long>(spectrum_feed.replaced_frames()),
+                static_cast<unsigned long long>(receiver_client.received_updates()),
+                static_cast<unsigned long long>(receiver_client.replaced_updates()),
+                receiver_client.monitor_connected() ? "monitor" : "---",
+                receiver_client.control_connected() ? "control" : "---");
             last_stats = now;
         }
 
         if(options.seconds > 0 && now - run_started >= std::chrono::seconds(options.seconds))
             running = false;
-        if(!options.screenshot.empty() &&
+        if(!options.screenshot.empty() && options.seconds == 0 &&
            ((spectrum_ready && (!options.demo || have_video_frame)) ||
             now - run_started >= std::chrono::seconds(5)))
             running = false;
@@ -1143,6 +1326,8 @@ int main(int argc, char ** argv)
     }
 
     spectrum_feed.stop();
+    receiver_client.stop();
+    longmynd->stop();
 
     if(!options.screenshot.empty()) {
         set_colour(renderer, kBackground);
@@ -1153,7 +1338,8 @@ int main(int argc, char ** argv)
         set_colour(renderer, {0, 0, 0});
         SDL_RenderFillRect(renderer, &layout.video_content);
         if(have_video_frame) SDL_RenderCopy(renderer, video_texture, nullptr, &layout.video_content);
-        draw_status(renderer, text, layout, volume_percent);
+        draw_status(renderer, text, layout, volume_percent, receiver_status,
+                    receiver_client.monitor_connected());
         SDL_RenderPresent(renderer);
         if(!save_screenshot(renderer, display.width, display.height, options.screenshot))
             std::fprintf(stderr, "[SCREENSHOT] failed to save %s\n", options.screenshot.c_str());

@@ -12,13 +12,15 @@ The current milestone provides:
 - a timestamp clock, six-frame bounded queue and controlled stale-frame drops;
 - the live BATC wideband FFT websocket feed, signal detection and selectable
   frequency marker;
+- owned Longmynd startup/shutdown, live monitor/control websocket links,
+  click-to-tune and receiver status/quality fields;
 - a synthetic 50 fps video source for exercising the handoff independently of
   UDP and FFmpeg;
 - a deterministic screenshot mode for visual regression checks.
 
-It does not yet start Longmynd or receive/decode the live transport stream.
-Those backends will be moved over after the spectrum and presentation paths
-are validated.
+It does not yet receive/decode the live transport stream. Longmynd already
+sends that stream to UDP port 5600; the FFmpeg video/audio consumer is the
+next backend to move over.
 
 ## Build
 
@@ -34,7 +36,8 @@ QO100_WINDOWED=1 qo100_sdl/build/qo100sdl --demo
 ```
 
 The spectrum is live by default. Add `--offline-spectrum` to use deterministic
-test data without a network connection.
+test data without a network connection. Add `--no-tuner` for a renderer-only
+test that does not start Longmynd or access the MiniTiouner.
 
 For a headless visual check:
 
