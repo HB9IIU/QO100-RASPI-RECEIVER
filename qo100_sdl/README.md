@@ -4,18 +4,21 @@ This is the non-LVGL successor to `qo100_lvgl`. It deliberately lives beside
 the current application so the installed receiver remains available while the
 new pipeline is developed and measured.
 
-The first milestone provides:
+The current milestone provides:
 
 - the same 1024x600 panel geometry, colours, Montserrat text and controls;
 - one SDL accelerated renderer with vertical sync;
 - a streaming RGB565 video texture (only a selected video frame is uploaded);
 - a timestamp clock, six-frame bounded queue and controlled stale-frame drops;
-- a synthetic 50 fps source for exercising the handoff independently of UDP
-  and FFmpeg;
+- the live BATC wideband FFT websocket feed, signal detection and selectable
+  frequency marker;
+- a synthetic 50 fps video source for exercising the handoff independently of
+  UDP and FFmpeg;
 - a deterministic screenshot mode for visual regression checks.
 
 It does not yet start Longmynd or receive/decode the live transport stream.
-Those backends will be moved over after this presentation path is validated.
+Those backends will be moved over after the spectrum and presentation paths
+are validated.
 
 ## Build
 
@@ -30,9 +33,12 @@ cmake --build qo100_sdl/build -j2
 QO100_WINDOWED=1 qo100_sdl/build/qo100sdl --demo
 ```
 
+The spectrum is live by default. Add `--offline-spectrum` to use deterministic
+test data without a network connection.
+
 For a headless visual check:
 
 ```sh
 SDL_VIDEODRIVER=dummy qo100_sdl/build/qo100sdl \
-  --demo --seconds 1 --screenshot /tmp/qo100-sdl.bmp
+  --demo --offline-spectrum --seconds 1 --screenshot /tmp/qo100-sdl.bmp
 ```

@@ -8,10 +8,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(SDL2_TTF REQUIRED IMPORTED_TARGET SDL2_ttf)
+pkg_check_modules(WEBSOCKETS REQUIRED IMPORTED_TARGET libwebsockets)
 
 add_executable(qo100sdl src/main.cpp)
 target_compile_options(qo100sdl PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(qo100sdl PRIVATE PkgConfig::SDL2 PkgConfig::SDL2_TTF pthread)
+target_link_libraries(qo100sdl PRIVATE
+    PkgConfig::SDL2
+    PkgConfig::SDL2_TTF
+    PkgConfig::WEBSOCKETS
+    pthread)
 
 set(QO100_FONT_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/../qo100_lvgl/lvgl/scripts/built_in_font/Montserrat-Medium.ttf")

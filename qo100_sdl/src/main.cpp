@@ -1,5 +1,9 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <libwebsockets.h>
+#ifndef LWS_PROTOCOL_LIST_TERM
+#define LWS_PROTOCOL_LIST_TERM {nullptr, nullptr, 0, 0, 0, nullptr, 0}
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -156,6 +160,16 @@ public:
         SDL_RenderCopy(renderer_, found->second.texture, nullptr, &destination);
     }
 
+    std::pair<int, int> measure(const std::string & text, int size = 14) const
+    {
+        const auto font = fonts_.find(size);
+        if(font == fonts_.end()) return {0, 0};
+        int width = 0;
+        int height = 0;
+        if(TTF_SizeUTF8(font->second, text.c_str(), &width, &height) != 0) return {0, 0};
+        return {width, height};
+    }
+
 private:
     struct CachedText {
         SDL_Texture * texture = nullptr;
@@ -298,72 +312,493 @@ void fill_panel(SDL_Renderer * renderer, const SDL_Rect & rect)
     SDL_RenderDrawRect(renderer, &rect);
 }
 
-Colour spectrum_colour(float value)
+constexpr double kSpectrumStartMhz = 10490.5;
+constexpr double kSpectrumSpanMhz = 9.0;
+constexpr float kServerUnitsPerDb = 3276.8F;
+constexpr float kDisplayZeroOffsetDb = 20.0F / 6.0F;
+constexpr float kDisplayMaxDb = 10.0F;
+
+uint8_t mix_channel(uint8_t start, uint8_t end, float amount)
 {
-    value = std::clamp(value, 0.0F, 1.0F);
-    if(value < 0.2F) return {0, static_cast<uint8_t>(40 + value * 500), 170};
-    if(value < 0.4F) return {0, 185, static_cast<uint8_t>(220 - (value - 0.2F) * 700)};
-    if(value < 0.6F) return {static_cast<uint8_t>((value - 0.4F) * 900), 210, 40};
-    if(value < 0.8F) return {255, static_cast<uint8_t>(210 - (value - 0.6F) * 500), 20};
-    return {255, static_cast<uint8_t>(110 - (value - 0.8F) * 300), 30};
+    return static_cast<uint8_t>(start + (static_cast<float>(end) - start) * amount);
 }
 
-float synthetic_spectrum(double frequency)
+Colour mix_colour(Colour start, Colour end, float amount)
 {
+    return {mix_channel(start.r, end.r, amount),
+            mix_channel(start.g, end.g, amount),
+            mix_channel(start.b, end.b, amount)};
+}
+
+Colour spectrum_gradient(float db)
+{
+    db = std::clamp(db, 0.0F, kDisplayMaxDb);
+    if(db < 2.0F) return mix_colour({0, 18, 105}, {0, 145, 220}, db / 2.0F);
+    if(db < 4.0F) return mix_colour({0, 145, 220}, {0, 190, 55}, (db - 2.0F) / 2.0F);
+    if(db < 5.5F) return mix_colour({0, 190, 55}, {245, 225, 0}, (db - 4.0F) / 1.5F);
+    if(db < 7.0F) return mix_colour({245, 225, 0}, {255, 82, 0}, (db - 5.5F) / 1.5F);
+    if(db < 8.5F) return mix_colour({255, 82, 0}, {245, 0, 35}, (db - 7.0F) / 1.5F);
+    return mix_colour({245, 0, 35}, {255, 35, 155}, (db - 8.5F) / 1.5F);
+}
+
+struct DetectedSignal {
+    size_t start_bin = 0;
+    size_t end_bin = 0;
+    float middle_bin = 0.0F;
+    float strength = 0.0F;
+    float measured_width_mhz = 0.0F;
+    float symbol_rate_ms = 0.0F;
+    double frequency_mhz = 0.0;
+};
+
+float align_symbol_rate(float width_mhz)
+{
+    if(width_mhz < 0.022F) return 0.0F;
+    if(width_mhz < 0.060F) return 0.035F;
+    if(width_mhz < 0.086F) return 0.066F;
+    if(width_mhz < 0.185F) return 0.125F;
+    if(width_mhz < 0.277F) return 0.250F;
+    if(width_mhz < 0.388F) return 0.333F;
+    if(width_mhz < 0.700F) return 0.500F;
+    if(width_mhz < 1.200F) return 1.000F;
+    if(width_mhz < 1.600F) return 1.500F;
+    if(width_mhz < 2.200F) return 2.000F;
+    return std::round(width_mhz * 5.0F) / 5.0F;
+}
+
+std::vector<DetectedSignal> detect_signals(const std::vector<uint16_t> & bins)
+{
+    constexpr float noise_level = 11000.0F;
+    constexpr float signal_threshold = 16000.0F;
+    std::vector<DetectedSignal> detected;
+    if(bins.size() < 3) return detected;
+
+    bool in_signal = false;
+    size_t initial_start = 0;
+    for(size_t index = 2; index < bins.size(); ++index) {
+        const float average = (bins[index] + bins[index - 1] + bins[index - 2]) / 3.0F;
+        if(!in_signal && average > signal_threshold) {
+            in_signal = true;
+            initial_start = index;
+            continue;
+        }
+        if(!in_signal || average >= signal_threshold) continue;
+        in_signal = false;
+        const size_t initial_end = index;
+        if(initial_end <= initial_start + 2) continue;
+
+        const size_t middle_start = initial_start +
+            static_cast<size_t>(0.3F * (initial_end - initial_start));
+        const size_t middle_end = initial_start +
+            static_cast<size_t>(0.7F * (initial_end - initial_start));
+        if(middle_end <= middle_start) continue;
+        uint64_t sum = 0;
+        for(size_t bin = middle_start; bin < middle_end; ++bin) sum += bins[bin];
+        const float strength = static_cast<float>(sum) / (middle_end - middle_start);
+        const float edge_level = noise_level + 0.75F * (strength - noise_level);
+
+        size_t refined_start = initial_start;
+        while(refined_start < initial_end && bins[refined_start] < edge_level) ++refined_start;
+        size_t refined_end = std::min(initial_end, bins.size() - 1);
+        while(refined_end > refined_start && bins[refined_end] < edge_level) --refined_end;
+        if(refined_end <= refined_start) continue;
+
+        const float middle_bin = refined_start + (refined_end - refined_start) / 2.0F;
+        const float width_mhz = (refined_end - refined_start) *
+            static_cast<float>(kSpectrumSpanMhz / bins.size());
+        const float symbol_rate_ms = align_symbol_rate(width_mhz);
+        if(symbol_rate_ms == 0.0F) continue;
+        const double frequency_mhz = kSpectrumStartMhz +
+            ((middle_bin + 1.0) / bins.size()) * kSpectrumSpanMhz;
+        detected.push_back({refined_start, refined_end, middle_bin, strength,
+                            width_mhz, symbol_rate_ms, frequency_mhz});
+    }
+    return detected;
+}
+
+enum class SpectrumStatus { Connecting, Waiting, Live, ConnectionError, Disconnected };
+
+const char * spectrum_status_text(SpectrumStatus status)
+{
+    switch(status) {
+        case SpectrumStatus::Connecting: return "CONNECTING...";
+        case SpectrumStatus::Waiting: return "WAITING FOR FFT...";
+        case SpectrumStatus::Live: return "";
+        case SpectrumStatus::ConnectionError: return "CONNECTION ERROR - RETRYING...";
+        case SpectrumStatus::Disconnected: return "DISCONNECTED - RETRYING...";
+    }
+    return "";
+}
+
+class SpectrumFeed {
+public:
+    ~SpectrumFeed() { stop(); }
+
+    void start()
+    {
+        if(running_.exchange(true)) return;
+        thread_ = std::thread([this] { run(); });
+    }
+
+    void stop()
+    {
+        if(!running_.exchange(false)) return;
+        if(thread_.joinable()) thread_.join();
+    }
+
+    bool consume(std::vector<uint16_t> & bins, SpectrumStatus & status)
+    {
+        std::vector<uint8_t> message;
+        {
+            std::lock_guard<std::mutex> lock(handoff_mutex_);
+            message.swap(pending_message_);
+            status = pending_status_;
+        }
+        if(message.empty() || message.size() % 2U != 0U) return false;
+        bins.resize(message.size() / 2U);
+        for(size_t index = 0; index < bins.size(); ++index) {
+            bins[index] = static_cast<uint16_t>(message[index * 2U]) |
+                static_cast<uint16_t>(message[index * 2U + 1U] << 8U);
+        }
+        return true;
+    }
+
+    uint64_t received_frames() const { return received_frames_.load(); }
+    uint64_t replaced_frames() const { return replaced_frames_.load(); }
+
+private:
+    static int callback(lws * websocket, lws_callback_reasons reason,
+                        void *, void * data, size_t length)
+    {
+        auto * self = static_cast<SpectrumFeed *>(
+            lws_context_user(lws_get_context(websocket)));
+        return self != nullptr ? self->on_event(websocket, reason, data, length) : 0;
+    }
+
+    int on_event(lws * websocket, lws_callback_reasons reason, void * data, size_t length)
+    {
+        switch(reason) {
+            case LWS_CALLBACK_CLIENT_ESTABLISHED:
+                websocket_ = websocket;
+                set_status(SpectrumStatus::Waiting);
+                std::fprintf(stderr, "[SPECTRUM] connected to BATC\n");
+                break;
+            case LWS_CALLBACK_CLIENT_RECEIVE: {
+                if(lws_is_first_fragment(websocket)) {
+                    message_buffer_.clear();
+                    message_is_binary_ = lws_frame_is_binary(websocket) != 0;
+                }
+                const auto * bytes = static_cast<const uint8_t *>(data);
+                message_buffer_.insert(message_buffer_.end(), bytes, bytes + length);
+                if(lws_is_final_fragment(websocket) &&
+                   lws_remaining_packet_payload(websocket) == 0U) {
+                    if(message_is_binary_) {
+                        std::lock_guard<std::mutex> lock(handoff_mutex_);
+                        if(!pending_message_.empty()) ++replaced_frames_;
+                        pending_message_ = message_buffer_;
+                        pending_status_ = SpectrumStatus::Live;
+                        ++received_frames_;
+                    }
+                    message_buffer_.clear();
+                }
+                break;
+            }
+            case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+                websocket_ = nullptr;
+                set_status(SpectrumStatus::ConnectionError);
+                std::fprintf(stderr, "[SPECTRUM] connection error: %.*s\n",
+                    static_cast<int>(length), data != nullptr ? static_cast<const char *>(data) : "");
+                break;
+            case LWS_CALLBACK_CLIENT_CLOSED:
+                websocket_ = nullptr;
+                set_status(SpectrumStatus::Disconnected);
+                std::fprintf(stderr, "[SPECTRUM] disconnected\n");
+                break;
+            default:
+                break;
+        }
+        return 0;
+    }
+
+    void set_status(SpectrumStatus status)
+    {
+        std::lock_guard<std::mutex> lock(handoff_mutex_);
+        pending_status_ = status;
+    }
+
+    void connect(lws_context * context, const char * protocol_name)
+    {
+        lws_client_connect_info info{};
+        info.context = context;
+        info.address = "eshail.batc.org.uk";
+        info.port = 443;
+        info.path = "/wb/fft";
+        info.host = info.address;
+        info.origin = "https://eshail.batc.org.uk";
+        info.ssl_connection = LCCSCF_USE_SSL;
+        info.local_protocol_name = protocol_name;
+        info.protocol = protocol_name;
+        info.alpn = "http/1.1";
+        websocket_ = lws_client_connect_via_info(&info);
+    }
+
+    void run()
+    {
+        lws_set_log_level(LLL_ERR | LLL_WARN, nullptr);
+        static const lws_protocols protocols[] = {
+            {"fft_m0dtslivetune", &SpectrumFeed::callback, 0, 64 * 1024, 0, nullptr, 0},
+            LWS_PROTOCOL_LIST_TERM
+        };
+        lws_context_creation_info info{};
+        info.port = CONTEXT_PORT_NO_LISTEN;
+        info.protocols = protocols;
+        info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+        info.user = this;
+        lws_context * context = lws_create_context(&info);
+        if(context == nullptr) {
+            set_status(SpectrumStatus::ConnectionError);
+            return;
+        }
+
+        connect(context, protocols[0].name);
+        auto last_attempt = Clock::now();
+        while(running_.load(std::memory_order_relaxed)) {
+            lws_service(context, 50);
+            const auto now = Clock::now();
+            if(websocket_ == nullptr && now - last_attempt > std::chrono::seconds(3)) {
+                last_attempt = now;
+                set_status(SpectrumStatus::Connecting);
+                connect(context, protocols[0].name);
+            }
+        }
+        lws_context_destroy(context);
+        websocket_ = nullptr;
+    }
+
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+    lws * websocket_ = nullptr;
+    std::vector<uint8_t> message_buffer_;
+    bool message_is_binary_ = false;
+    mutable std::mutex handoff_mutex_;
+    std::vector<uint8_t> pending_message_;
+    SpectrumStatus pending_status_ = SpectrumStatus::Connecting;
+    std::atomic<uint64_t> received_frames_{0};
+    std::atomic<uint64_t> replaced_frames_{0};
+};
+
+std::vector<uint16_t> make_offline_spectrum(size_t count)
+{
+    std::vector<uint16_t> bins(count);
     const auto plateau = [](double x, double left, double right, double edge) {
         const double rise = 1.0 / (1.0 + std::exp(-(x - left) / edge));
         const double fall = 1.0 / (1.0 + std::exp((x - right) / edge));
         return rise * fall;
     };
-    const double beacon = 0.93 * plateau(frequency, 10490.72, 10492.25, 0.04);
-    const double signal = 0.75 * plateau(frequency, 10497.10, 10497.45, 0.018);
-    const double floor = 0.035 + 0.015 * std::sin(frequency * 44.0) +
-                         0.01 * std::sin(frequency * 117.0);
-    return static_cast<float>(std::clamp(beacon + signal + floor, 0.0, 1.0));
+    for(size_t index = 0; index < count; ++index) {
+        const double fraction = static_cast<double>(index) / std::max<size_t>(1, count - 1);
+        const double frequency = kSpectrumStartMhz + kSpectrumSpanMhz * fraction;
+        const double beacon = 25000.0 * plateau(frequency, 10490.72, 10492.25, 0.04);
+        const double signal = 20000.0 * plateau(frequency, 10497.10, 10497.45, 0.018);
+        const double noise = 10800.0 + 300.0 * std::sin(frequency * 44.0) +
+                             180.0 * std::sin(frequency * 117.0);
+        bins[index] = static_cast<uint16_t>(std::clamp(noise + beacon + signal, 0.0, 65535.0));
+    }
+    return bins;
 }
 
-void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & layout)
+class SpectrumTexture {
+public:
+    SpectrumTexture(SDL_Renderer * renderer, int width, int height)
+        : renderer_(renderer), width_(width), height_(height),
+          pixels_(static_cast<size_t>(width) * height)
+    {
+        texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB565,
+                                     SDL_TEXTUREACCESS_STREAMING, width_, height_);
+        if(texture_ != nullptr) SDL_SetTextureScaleMode(texture_, SDL_ScaleModeLinear);
+    }
+
+    ~SpectrumTexture() { SDL_DestroyTexture(texture_); }
+
+    bool valid() const { return texture_ != nullptr; }
+    const std::vector<DetectedSignal> & signals() const { return signals_; }
+
+    void update(const std::vector<uint16_t> & bins)
+    {
+        if(texture_ == nullptr || bins.empty()) return;
+        const uint16_t black = rgb565(0, 0, 0);
+        const uint16_t grid = rgb565(45, 56, 66);
+        const uint16_t trace = rgb565(255, 225, 235);
+        std::fill(pixels_.begin(), pixels_.end(), black);
+        for(int division = 0; division <= 2; ++division) {
+            const int y = division * (height_ - 1) / 2;
+            for(int x = 0; x < width_; ++x)
+                if((x % 8) < 4) pixels_[static_cast<size_t>(y) * width_ + x] = grid;
+        }
+        for(int division = 1; division <= 9; ++division) {
+            const int x = static_cast<int>(((division - 0.5) / 9.0) * (width_ - 1));
+            for(int y = 0; y < height_; ++y)
+                if((y % 8) < 4) pixels_[static_cast<size_t>(y) * width_ + x] = grid;
+        }
+
+        std::vector<uint16_t> palette(height_);
+        for(int y = 0; y < height_; ++y) {
+            const float db = static_cast<float>(height_ - 1 - y) /
+                             std::max(1, height_ - 1) * kDisplayMaxDb;
+            const Colour colour = spectrum_gradient(db);
+            palette[y] = rgb565(colour.r, colour.g, colour.b);
+        }
+        for(int x = 0; x < width_; ++x) {
+            const float position = static_cast<float>(x) * bins.size() / width_;
+            const size_t first = std::min(static_cast<size_t>(position), bins.size() - 1);
+            const size_t second = std::min(first + 1, bins.size() - 1);
+            const float fraction = position - static_cast<float>(first);
+            const float server_value = bins[first] + fraction * (bins[second] - bins[first]);
+            const float displayed_db = server_value / kServerUnitsPerDb - kDisplayZeroOffsetDb;
+            const float limited_db = std::clamp(displayed_db, 0.0F, kDisplayMaxDb);
+            const int height = static_cast<int>(limited_db / kDisplayMaxDb * (height_ - 1));
+            const int top = height_ - 1 - height;
+            for(int y = top + 1; y < height_; ++y)
+                pixels_[static_cast<size_t>(y) * width_ + x] = palette[y];
+            pixels_[static_cast<size_t>(top) * width_ + x] = trace;
+        }
+        SDL_UpdateTexture(texture_, nullptr, pixels_.data(), width_ * sizeof(uint16_t));
+        signals_ = detect_signals(bins);
+    }
+
+    void draw(const SDL_Rect & destination) const
+    {
+        if(texture_ != nullptr) SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+    }
+
+private:
+    SDL_Renderer * renderer_ = nullptr;
+    SDL_Texture * texture_ = nullptr;
+    int width_ = 0;
+    int height_ = 0;
+    std::vector<uint16_t> pixels_;
+    std::vector<DetectedSignal> signals_;
+};
+
+void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & layout,
+                   const SpectrumTexture & texture, SpectrumStatus status,
+                   double selected_frequency_mhz)
 {
     fill_panel(renderer, layout.spectrum_panel);
     set_colour(renderer, {0, 0, 0});
     SDL_RenderFillRect(renderer, &layout.spectrum_plot);
+    texture.draw(layout.spectrum_plot);
 
-    set_colour(renderer, {30, 55, 70});
-    for(int i = 1; i < 9; ++i) {
-        const int x = layout.spectrum_plot.x + i * layout.spectrum_plot.w / 9;
-        SDL_RenderDrawLine(renderer, x, layout.spectrum_plot.y, x,
-                           layout.spectrum_plot.y + layout.spectrum_plot.h);
-    }
-    for(int i = 1; i < 2; ++i) {
-        const int y = layout.spectrum_plot.y + i * layout.spectrum_plot.h / 2;
-        SDL_RenderDrawLine(renderer, layout.spectrum_plot.x, y,
-                           layout.spectrum_plot.x + layout.spectrum_plot.w, y);
-    }
-
-    const int baseline = layout.spectrum_plot.y + layout.spectrum_plot.h - 1;
-    for(int px = 0; px < layout.spectrum_plot.w; ++px) {
-        const double fraction = static_cast<double>(px) / std::max(1, layout.spectrum_plot.w - 1);
-        const double frequency = 10490.5 + 9.0 * fraction;
-        const float level = synthetic_spectrum(frequency);
-        const int top = baseline - static_cast<int>(level * (layout.spectrum_plot.h - 10));
-        for(int y = top; y <= baseline; ++y) {
-            const float vertical = static_cast<float>(baseline - y) /
-                                   std::max(1, baseline - top);
-            set_colour(renderer, spectrum_colour(vertical));
-            SDL_RenderDrawPoint(renderer, layout.spectrum_plot.x + px, y);
+    float beacon_strength = 0.0F;
+    for(const auto & signal : texture.signals()) {
+        if(signal.frequency_mhz < 10492.0 && signal.symbol_rate_ms >= 1.0F) {
+            beacon_strength = signal.strength;
+            break;
         }
     }
+    struct LabelArea { int x; int y; int width; int height; };
+    const auto overlaps = [](const LabelArea & first, const LabelArea & second) {
+        constexpr int gap = 4;
+        return first.x < second.x + second.width + gap &&
+               first.x + first.width + gap > second.x &&
+               first.y < second.y + second.height + gap &&
+               first.y + first.height + gap > second.y;
+    };
+    std::vector<LabelArea> occupied;
+    size_t label_count = 0;
+    for(const auto & signal : texture.signals()) {
+        const bool beacon = signal.frequency_mhz < 10492.0 && signal.symbol_rate_ms >= 1.0F;
+        if(beacon || label_count++ >= 16) continue;
+        char first_line[48];
+        if(signal.symbol_rate_ms < 0.7F)
+            std::snprintf(first_line, sizeof(first_line), "%.0fKS %.3f",
+                          signal.symbol_rate_ms * 1000.0F, signal.frequency_mhz);
+        else
+            std::snprintf(first_line, sizeof(first_line), "%.1fMS %.3f",
+                          signal.symbol_rate_ms, signal.frequency_mhz);
+        char second_line[32];
+        if(beacon_strength > 0.0F)
+            std::snprintf(second_line, sizeof(second_line), "%+.2f dB BCN",
+                          (signal.strength - beacon_strength) / kServerUnitsPerDb);
+        else
+            std::snprintf(second_line, sizeof(second_line), "-- dB BCN");
 
-    set_colour(renderer, kCyan);
-    const int marker_x = layout.spectrum_plot.x + static_cast<int>(
-        (10491.525 - 10490.5) / 9.0 * layout.spectrum_plot.w);
-    SDL_RenderDrawLine(renderer, marker_x, layout.spectrum_plot.y + 18,
-                       marker_x, baseline);
-    text.draw("10491.525", marker_x, layout.spectrum_plot.y - 3, kCyan, 14, true);
-    text.draw("333KS 10497.262", layout.spectrum_plot.x +
-              static_cast<int>((10497.262 - 10490.5) / 9.0 * layout.spectrum_plot.w),
-              layout.spectrum_plot.y + 39, kText, 14, true);
+        const double fraction = (signal.frequency_mhz - kSpectrumStartMhz) / kSpectrumSpanMhz;
+        const int centre_x = layout.spectrum_plot.x +
+            static_cast<int>(fraction * layout.spectrum_plot.w);
+        const float displayed_db = signal.strength / kServerUnitsPerDb - kDisplayZeroOffsetDb;
+        const int trace_y = layout.spectrum_plot.y + layout.spectrum_plot.h - 1 -
+            static_cast<int>(std::clamp(displayed_db, 0.0F, kDisplayMaxDb) /
+                             kDisplayMaxDb * (layout.spectrum_plot.h - 1));
+        const auto [first_width, line_height] = text.measure(first_line);
+        const auto [second_width, ignored_height] = text.measure(second_line);
+        (void)ignored_height;
+        const int label_width = std::max(first_width, second_width);
+        const int label_height = line_height * 2;
+        const int natural_x = std::clamp(centre_x - label_width / 2,
+            layout.spectrum_plot.x + 2,
+            layout.spectrum_plot.x + layout.spectrum_plot.w - label_width - 2);
+        const int natural_y = std::clamp(trace_y - label_height - 5,
+            layout.spectrum_plot.y + 4,
+            layout.spectrum_plot.y + layout.spectrum_plot.h - label_height - 3);
 
+        LabelArea chosen{natural_x, natural_y, label_width, label_height};
+        const int row = label_height + 5;
+        const int y_offsets[] = {0, -row, row, -2 * row, 2 * row};
+        const int x_offsets[] = {0, -label_width / 2, label_width / 2,
+                                  -label_width, label_width};
+        bool found_position = false;
+        for(int x_offset : x_offsets) {
+            for(int y_offset : y_offsets) {
+                LabelArea candidate{
+                    std::clamp(natural_x + x_offset,
+                        layout.spectrum_plot.x + 2,
+                        layout.spectrum_plot.x + layout.spectrum_plot.w - label_width - 2),
+                    std::clamp(natural_y + y_offset,
+                        layout.spectrum_plot.y + 4,
+                        layout.spectrum_plot.y + layout.spectrum_plot.h - label_height - 3),
+                    label_width, label_height
+                };
+                bool collision = false;
+                for(const LabelArea & used : occupied) {
+                    if(overlaps(candidate, used)) {
+                        collision = true;
+                        break;
+                    }
+                }
+                if(!collision) {
+                    chosen = candidate;
+                    found_position = true;
+                    break;
+                }
+            }
+            if(found_position) break;
+        }
+        occupied.push_back(chosen);
+        text.draw(first_line, chosen.x + (label_width - first_width) / 2,
+                  chosen.y, kText);
+        text.draw(second_line, chosen.x + (label_width - second_width) / 2,
+                  chosen.y + line_height, kText);
+    }
+
+    if(selected_frequency_mhz >= kSpectrumStartMhz &&
+       selected_frequency_mhz <= kSpectrumStartMhz + kSpectrumSpanMhz) {
+        const int marker_x = layout.spectrum_plot.x + static_cast<int>(
+            (selected_frequency_mhz - kSpectrumStartMhz) / kSpectrumSpanMhz *
+            layout.spectrum_plot.w);
+        set_colour(renderer, kCyan);
+        SDL_RenderDrawLine(renderer, marker_x, layout.spectrum_plot.y + 18,
+                           marker_x, layout.spectrum_plot.y + layout.spectrum_plot.h - 1);
+        char marker[32];
+        std::snprintf(marker, sizeof(marker), "%.3f", selected_frequency_mhz);
+        text.draw(marker, marker_x, layout.spectrum_plot.y - 3, kCyan, 14, true);
+    }
+
+    if(status != SpectrumStatus::Live) {
+        const Colour status_colour = status == SpectrumStatus::ConnectionError ? kRed : kYellow;
+        text.draw(spectrum_status_text(status), layout.spectrum_plot.x + 8,
+                  layout.spectrum_plot.y + 8, status_colour);
+    }
     for(int number = 1; number <= 9; ++number) {
         const int x = layout.spectrum_plot.x + number * layout.spectrum_plot.w / 9;
         text.draw(std::to_string(10490 + number), x,
@@ -475,6 +910,7 @@ bool save_screenshot(SDL_Renderer * renderer, int width, int height, const std::
 
 struct Options {
     bool demo = false;
+    bool offline_spectrum = false;
     int seconds = 0;
     std::string screenshot;
 };
@@ -484,6 +920,8 @@ Options parse_options(int argc, char ** argv)
     Options options;
     for(int i = 1; i < argc; ++i) {
         if(std::strcmp(argv[i], "--demo") == 0) options.demo = true;
+        else if(std::strcmp(argv[i], "--offline-spectrum") == 0)
+            options.offline_spectrum = true;
         else if(std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc)
             options.seconds = std::max(0, std::atoi(argv[++i]));
         else if(std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
@@ -554,6 +992,27 @@ int main(int argc, char ** argv)
     }
 
     const Layout layout(display.width, display.height);
+    auto spectrum_texture = std::make_unique<SpectrumTexture>(
+        renderer, layout.spectrum_plot.w, layout.spectrum_plot.h);
+    if(!spectrum_texture->valid()) {
+        std::fprintf(stderr, "[SPECTRUM] texture failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    SpectrumFeed spectrum_feed;
+    SpectrumStatus spectrum_status = SpectrumStatus::Connecting;
+    std::vector<uint16_t> spectrum_bins;
+    bool spectrum_ready = false;
+    if(options.offline_spectrum) {
+        spectrum_bins = make_offline_spectrum(2048);
+        spectrum_texture->update(spectrum_bins);
+        spectrum_status = SpectrumStatus::Live;
+        spectrum_ready = true;
+    }
+    else {
+        spectrum_feed.start();
+    }
+
     SDL_Texture * video_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB565,
         SDL_TEXTUREACCESS_STREAMING, layout.video_content.w, layout.video_content.h);
     if(video_texture == nullptr) {
@@ -583,6 +1042,7 @@ int main(int argc, char ** argv)
     bool fullscreen_video = false;
     int volume_percent = 100;
     bool have_video_frame = false;
+    double selected_frequency_mhz = 10491.525;
     const auto run_started = Clock::now();
     auto last_stats = run_started;
     while(running) {
@@ -595,6 +1055,25 @@ int main(int argc, char ** argv)
             if(event.type == SDL_MOUSEBUTTONUP) {
                 const int x = event.button.x;
                 const int y = event.button.y;
+                if(x >= layout.spectrum_plot.x &&
+                   x < layout.spectrum_plot.x + layout.spectrum_plot.w &&
+                   y >= layout.spectrum_plot.y &&
+                   y < layout.spectrum_plot.y + layout.spectrum_plot.h) {
+                    const double clicked = kSpectrumStartMhz +
+                        static_cast<double>(x - layout.spectrum_plot.x) /
+                        layout.spectrum_plot.w * kSpectrumSpanMhz;
+                    selected_frequency_mhz = clicked;
+                    for(const auto & signal : spectrum_texture->signals()) {
+                        const double half_width = std::max(0.02,
+                            static_cast<double>(signal.measured_width_mhz) / 2.0);
+                        if(std::abs(clicked - signal.frequency_mhz) <= half_width) {
+                            selected_frequency_mhz = signal.frequency_mhz;
+                            break;
+                        }
+                    }
+                    std::fprintf(stderr, "[SPECTRUM] selected %.3f MHz\n",
+                                 selected_frequency_mhz);
+                }
                 if(x >= layout.video_panel.x && x < layout.video_panel.x + layout.video_panel.w &&
                    y >= layout.video_panel.y && y < layout.video_panel.y + layout.video_panel.h)
                     fullscreen_video = !fullscreen_video;
@@ -606,6 +1085,12 @@ int main(int argc, char ** argv)
                    x >= slider_x && x <= slider_x + slider_w)
                     volume_percent = std::clamp((x - slider_x) * 100 / slider_w, 0, 100);
             }
+        }
+
+        if(!options.offline_spectrum &&
+           spectrum_feed.consume(spectrum_bins, spectrum_status)) {
+            spectrum_texture->update(spectrum_bins);
+            spectrum_ready = true;
         }
 
         if(auto frame = scheduler.take_due(Clock::now())) {
@@ -622,7 +1107,8 @@ int main(int argc, char ** argv)
             if(have_video_frame) SDL_RenderCopy(renderer, video_texture, nullptr, nullptr);
         }
         else {
-            draw_spectrum(renderer, text, layout);
+            draw_spectrum(renderer, text, layout, *spectrum_texture,
+                          spectrum_status, selected_frequency_mhz);
             fill_panel(renderer, layout.video_panel);
             set_colour(renderer, {0, 0, 0});
             SDL_RenderFillRect(renderer, &layout.video_content);
@@ -636,24 +1122,33 @@ int main(int argc, char ** argv)
         if(now - last_stats >= std::chrono::seconds(5)) {
             const auto stats = scheduler.stats();
             std::fprintf(stderr,
-                "[PRESENT] shown=%llu queue_drops=%llu late_drops=%llu rebases=%llu depth=%zu\n",
+                "[PRESENT] shown=%llu queue_drops=%llu late_drops=%llu rebases=%llu depth=%zu "
+                "spectrum=%llu replaced=%llu\n",
                 static_cast<unsigned long long>(stats.presented),
                 static_cast<unsigned long long>(stats.queue_drops),
                 static_cast<unsigned long long>(stats.late_drops),
-                static_cast<unsigned long long>(stats.rebases), stats.depth);
+                static_cast<unsigned long long>(stats.rebases), stats.depth,
+                static_cast<unsigned long long>(spectrum_feed.received_frames()),
+                static_cast<unsigned long long>(spectrum_feed.replaced_frames()));
             last_stats = now;
         }
 
         if(options.seconds > 0 && now - run_started >= std::chrono::seconds(options.seconds))
             running = false;
-        if(!options.screenshot.empty() && have_video_frame) running = false;
+        if(!options.screenshot.empty() &&
+           ((spectrum_ready && (!options.demo || have_video_frame)) ||
+            now - run_started >= std::chrono::seconds(5)))
+            running = false;
         if((renderer_info.flags & SDL_RENDERER_PRESENTVSYNC) == 0) SDL_Delay(2);
     }
+
+    spectrum_feed.stop();
 
     if(!options.screenshot.empty()) {
         set_colour(renderer, kBackground);
         SDL_RenderClear(renderer);
-        draw_spectrum(renderer, text, layout);
+        draw_spectrum(renderer, text, layout, *spectrum_texture,
+                      spectrum_status, selected_frequency_mhz);
         fill_panel(renderer, layout.video_panel);
         set_colour(renderer, {0, 0, 0});
         SDL_RenderFillRect(renderer, &layout.video_content);
@@ -677,6 +1172,7 @@ int main(int argc, char ** argv)
         static_cast<unsigned long long>(stats.rebases), stats.depth);
 
     SDL_DestroyTexture(video_texture);
+    spectrum_texture.reset();
     text.clear();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
