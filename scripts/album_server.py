@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Static file server for the QO-100 DATV screenshot album, plus one
-dynamic route: POST /snap runs screenshot.sh (grim capture of the whole
-display + album_update.sh reindex) then redirects back to the gallery.
+"""Static file server for the QO-100 DATV screenshot album, plus two
+dynamic routes:
+  POST /snap    runs screenshot.sh (grim capture of the whole display +
+                album_update.sh reindex) then redirects back to the gallery.
+  POST /delete  deletes one or more screenshots (repeated "name" fields -
+                the same route handles single-photo and bulk delete) then
+                reindexes.
 
-This lets the "Take Screenshot" button on the web page trigger a capture
-without any IPC into the running qo100sdl process - grim grabs the whole
-physical display regardless of which app currently has focus, so the web
-page doesn't need to talk to the app at all.
+POST /snap lets the "Take Screenshot" button on the web page trigger a
+capture without any IPC into the running qo100sdl process - grim grabs the
+whole physical display regardless of which app currently has focus, so the
+web page doesn't need to talk to the app at all.
 
 No authentication - LAN-only hobby use, matches the rest of the album.
 """
@@ -14,11 +18,21 @@ import http.server
 import os
 import subprocess
 import sys
+from urllib.parse import parse_qs
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(SCRIPT_DIR)
 ALBUM_DIR = os.path.join(REPO_DIR, "screenshots", "album")
+THUMB_DIR = os.path.join(ALBUM_DIR, "thumbs")
 SCREENSHOT_SCRIPT = os.path.join(SCRIPT_DIR, "screenshot.sh")
+ALBUM_UPDATE_SCRIPT = os.path.join(SCRIPT_DIR, "album_update.sh")
+
+
+def is_safe_photo_name(name):
+    """Bare filename only (no path components) and the extension
+    album_update.sh actually writes - rejects anything trying to escape
+    ALBUM_DIR (e.g. "../../etc/passwd")."""
+    return name == os.path.basename(name) and name.endswith(".png") and name != ".png"
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -32,6 +46,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if result.returncode != 0:
                 sys.stderr.write(
                     "[ALBUM] screenshot.sh failed: %s\n" % result.stderr.strip())
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+        elif self.path == "/delete":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8", "replace")
+            names = parse_qs(body).get("name", [])
+            deleted = 0
+            for name in names:
+                if not is_safe_photo_name(name):
+                    continue
+                for path in (os.path.join(ALBUM_DIR, name), os.path.join(THUMB_DIR, name)):
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        pass
+                deleted += 1
+            if deleted:
+                subprocess.run([ALBUM_UPDATE_SCRIPT], capture_output=True, check=False)
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
