@@ -1,65 +1,149 @@
 # QO-100 DATV Receiver (Raspberry Pi 5)
 
-A standalone QO-100 (Es'hail-2) digital amateur TV receiver: a **Raspberry Pi 5** driving a **MiniTiouner Pro TS2** tuner, with a custom fullscreen touchscreen UI built on SDL2.
+A standalone QO-100 (Es'hail-2) digital amateur TV receiver. Runs on a
+**Raspberry Pi 5**, driving a **MiniTiouner** tuner, with a fullscreen
+touchscreen app that shows the spectrum, decodes the video, and lets you tap
+to tune.
 
-## Hardware
+## What you need
 
-- Raspberry Pi 5
-- A MiniTiouner (FTDI FT2232H, USB `0403:6010`). Tested with the **Pro TS2** (reports as `MiniTiouner_Pro_TS2`) and the **S** (reports as `MiniTiouner`) — detection is by USB VID:PID, not model, so other variants (Express, original) likely work too but haven't been tried.
-- A touchscreen — either a 1024x600 DSI panel or the official 800x480 Raspberry Pi touchscreen. Switch between them from the app's **SET** page (Display Resolution), or see [HOWTO.md](HOWTO.md#5-choose-your-screen-resolution).
+- Raspberry Pi 5, running Raspberry Pi OS (Bookworm or newer) with a desktop.
+- A MiniTiouner tuner (USB `0403:6010`). Tested with the **Pro TS2** and the
+  **S** — other variants (Express, original) likely work too but haven't
+  been tried.
+- A touchscreen — either a 1024x600 DSI panel or the official 800x480
+  Raspberry Pi touchscreen (switchable any time from the app itself, see
+  Step 5 below).
+- Internet access on the Pi, at least for the setup steps below.
 
-## Repo layout
+## Setup, step by step
 
-| Path | What it is |
-|---|---|
-| `longmynd_ws/` | Vendored [philcrump/longmynd](https://github.com/philcrump/longmynd) fork — the tuner driver, extended with a websocket server (`-W <port>`) for JSON status and retune commands. |
-| `qo100_sdl/` | The actual application (`src/main.cpp`). Custom SDL2 touchscreen UI; forks `longmynd_ws/longmynd` itself at startup and talks to it locally over websocket. |
-| `screenshots/` | UI screenshots, captured via the app's on-screen **SNAP** button (or `scripts/screenshot.sh`). |
-| `scripts/` | Standalone helper scripts. |
+### 1. Get the code
 
-Default tuning at startup is the QO-100 beacon: **741474 kHz, 1500 ksps**.
+```bash
+git clone https://github.com/HB9IIU/QO100-RASPI-RECEIVER.git DATVreceiver
+cd DATVreceiver
+```
 
-## Setup (fresh Pi)
+This is a **private** repo, so `git` will ask you to log in to GitHub
+(a personal access token, or an SSH key if you'd rather use that).
 
-See **[HOWTO.md](HOWTO.md)** for the full step-by-step walkthrough. The short version:
+### 2. Run the setup script
 
 ```bash
 scripts/initialSetup.sh
 ```
 
-This one script installs everything needed (build tools, `SDL2`/`SDL2_ttf`,
-FFmpeg, `libwebsockets`, `json-c`, `grim`, `imagemagick`...), fetches the one
-vendored dependency not included in this repo (`libwebsockets`), installs
-the MiniTiouner udev rule, and builds both `longmynd_ws` and `qo100_sdl`.
-Safe to re-run.
+This one script does everything: installs all the software this app needs,
+downloads one small third-party library it depends on, sets up the tuner so
+it works without needing admin rights every time, and builds the app. It
+will ask for your password (for the parts that need it). Safe to run more
+than once if something goes wrong partway through.
 
-## Rebuilding after a code change
+### 3. Plug in the tuner
+
+Plug the MiniTiouner into a USB port now, if it isn't already. Check it's
+recognized:
+
+```bash
+lsusb | grep 0403:6010
+```
+
+You should see a line show up.
+
+### 4. Try it out
+
+```bash
+cd qo100_sdl
+./build_and_run.sh
+```
+
+A window should open showing the spectrum display, video, and status
+panel. If the antenna is pointed at QO-100, it should lock onto the beacon
+signal within a couple of seconds. Tap **EXIT** (or close the window) when
+you're done checking.
+
+If it doesn't lock: make sure the antenna/LNB is actually pointed at
+QO-100, and check the **SET** page in the app for the LNB settings (LO
+offset, bias voltage) match your hardware.
+
+### 5. Pick your screen size
+
+The app defaults to 1024x600. If your touchscreen is the smaller 800x480
+official Raspberry Pi one instead: open **SET** in the app, choose
+**800 x 480** under Display Resolution, and tap **SAVE** — the app restarts
+itself in the new size automatically. You can change this again any time.
+
+### 6. Make it start automatically
+
+```bash
+scripts/setup_autostart.sh
+```
+
+This makes the app start by itself every time the Pi boots up and you log
+in, fullscreen, ready to go. To start it right now without rebooting:
+
+```bash
+systemctl --user start qo100datv.service
+```
+
+### 7. Reboot and check
+
+```bash
+sudo reboot
+```
+
+Once the Pi is back up and you're logged in, the receiver should appear on
+its own, fullscreen, tuned to the QO-100 beacon. If it doesn't:
+
+```bash
+systemctl --user status qo100datv.service
+```
+
+This shows whether it's running, and if not, why.
+
+## Using the app
+
+- **Tap anywhere on the spectrum display** to tune to that signal.
+- **SNAP** — takes a screenshot (saved to `screenshots/`, also added to the
+  photo album if you set that up — see below).
+- **CHAT** — opens the QO-100 wideband chat.
+- **SET** — LNB settings (local oscillator offset, bias voltage) and screen
+  resolution.
+- **SCAN** — automatically hops between detected signals.
+- **EXIT** — closes the app; it restarts itself a few seconds later.
+
+## Optional: photo album on your LAN
+
+Every screenshot (from **SNAP**, or running `scripts/screenshot.sh`) is
+kept as a small gallery you can browse from any device on your home
+network. To turn it on:
+
+```bash
+scripts/setup_photo_album.sh
+```
+
+This prints a web address to open in a browser (e.g. `http://<pi's IP
+address>:8090/`). Keeps the most recent 300 screenshots by default.
+
+## Making code changes
+
+After editing the source, rebuild with:
 
 ```bash
 cd qo100_sdl && ./build_and_run.sh
 ```
 
-Or `cd longmynd_ws && make` if you touched the tuner driver instead.
+(Or `cd longmynd_ws && make` if you changed the tuner driver instead of the
+app itself.)
 
-## Screenshots
+## Repo layout
 
-See `screenshots/` — includes the live spectrum/alignment view and the BATC wideband chat panel.
+| Path | What it is |
+|---|---|
+| `longmynd_ws/` | The tuner driver (a modified version of an existing open-source project), talks to the MiniTiouner over USB. |
+| `qo100_sdl/` | The actual app — the touchscreen UI you see and use. |
+| `screenshots/` | Where **SNAP** saves screenshots. |
+| `scripts/` | The setup scripts described above. |
 
-## Photo album (LAN screenshot gallery)
-
-Every screenshot — from the in-app **SNAP** button or `scripts/screenshot.sh` — is
-also archived into `screenshots/album/` (timestamped PNG + thumbnail) with an
-auto-regenerated `index.html` gallery. Requires `imagemagick` (installed by
-`scripts/initialSetup.sh`). Keeps the most recent 300 by default; override
-with `ALBUM_KEEP=<n>`.
-
-To serve that gallery on your LAN as a systemd `--user` service:
-
-```bash
-scripts/setup_photo_album.sh [PORT]   # default port 8090
-```
-
-Installs `~/.config/systemd/user/qo100album.service` (Python's built-in
-`http.server`, no extra dependency), enables it, and prints the URL to browse
-from any device on the LAN. Safe to re-run — the unit is always rewritten to
-match the script. Check status with `systemctl --user status qo100album.service`.
+Default tuning at startup is the QO-100 beacon: 741474 kHz, 1500 ksps.
