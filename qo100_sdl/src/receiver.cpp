@@ -1,4 +1,5 @@
 #include "receiver.h"
+#include "app_log.h"
 
 #include <json-c/json.h>
 #include <libwebsockets.h>
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
@@ -25,12 +27,46 @@
 #include <utility>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
 namespace qo100 {
 namespace {
 
 constexpr int kWebsocketPort = 8765;
-constexpr auto kReconnectInterval = std::chrono::milliseconds(1000);
+constexpr auto kReconnectInterval = std::chrono::milliseconds(250);
 constexpr size_t kMaxPendingCommands = 16;
+
+/* Destination the transport stream is sent to. Defaults to a multicast
+ * group so a second device on the LAN can watch the same feed in VLC
+ * (udp://@<addr>:<port>); override via env if that clashes with something
+ * else on the network, or set back to 127.0.0.1 for loopback-only. Must
+ * match video_decoder.cpp's kInputUrl on the receiving end. */
+std::string ts_destination_address()
+{
+    const char * value = std::getenv("QO100_TS_ADDR");
+    return value != nullptr ? value : "239.1.1.1";
+}
+
+int ts_destination_port()
+{
+    const char * value = std::getenv("QO100_TS_PORT");
+    return value != nullptr ? std::atoi(value) : 5600;
+}
+
+bool websocket_server_ready()
+{
+    const int descriptor = socket(AF_INET, SOCK_STREAM, 0);
+    if(descriptor < 0) return false;
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(kWebsocketPort);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const bool ready = connect(descriptor,
+        reinterpret_cast<const sockaddr *>(&address), sizeof(address)) == 0;
+    close(descriptor);
+    return ready;
+}
 
 int json_int(json_object * object, const char * key, int fallback)
 {
@@ -91,6 +127,20 @@ bool parse_monitor_json(const std::string & text, ReceiverStatus & status)
     if(ts != nullptr) {
         status.service_name = json_string(ts, "service_name", status.service_name);
         status.service_provider = json_string(ts, "service_provider_name", status.service_provider);
+        /* longmynd recomputes this fresh from scratch on every ~54-packet
+         * window (see ts_parse() resetting its counters each call) with no
+         * smoothing at all, so the raw reading jumps around a lot for a
+         * given signal. Settle it with an EMA rather than showing that
+         * noise directly - first sample seeds it outright. */
+        const int raw_null_percent = json_int(ts, "null_ratio", -1);
+        if(raw_null_percent >= 0) {
+            constexpr double kNullPercentEmaAlpha = 0.2;
+            status.null_packet_percent = status.null_packet_percent < 0
+                ? raw_null_percent
+                : static_cast<int>(std::lround(
+                      kNullPercentEmaAlpha * raw_null_percent +
+                      (1.0 - kNullPercentEmaAlpha) * status.null_packet_percent));
+        }
     }
     json_object_put(root);
     return rx != nullptr || ts != nullptr;
@@ -109,13 +159,19 @@ bool pid_matches_binary(int pid, const std::string & expected_binary)
 
 } // namespace
 
+std::string ts_stream_vlc_url()
+{
+    return "udp://@" + ts_destination_address() + ":" +
+        std::to_string(ts_destination_port());
+}
+
 ReceiverSettings load_receiver_settings(const std::string & repository_root)
 {
     ReceiverSettings settings;
-    const std::string path = repository_root + "/qo100_lvgl/settings.json";
+    const std::string path = repository_root + "/qo100_sdl/settings.json";
     json_object * root = json_object_from_file(path.c_str());
     if(root == nullptr) {
-        std::fprintf(stderr, "[SETTINGS] using defaults; could not read %s\n", path.c_str());
+        qo100::log( "[SETTINGS] using defaults; could not read %s\n", path.c_str());
         return settings;
     }
     json_object * value = nullptr;
@@ -127,11 +183,37 @@ ReceiverSettings load_receiver_settings(const std::string & repository_root)
         settings.lnb_voltage_horizontal = json_object_get_boolean(value);
     if(json_object_object_get_ex(root, "audio_volume_percent", &value))
         settings.audio_volume_percent = json_object_get_int(value);
+    if(json_object_object_get_ex(root, "display_800x480", &value))
+        settings.display_800x480 = json_object_get_boolean(value);
     json_object_put(root);
-    std::fprintf(stderr, "[SETTINGS] LO=%.1fMHz voltage=%s/%s volume=%d%%\n",
+    qo100::log( "[SETTINGS] LO=%.1fMHz voltage=%s/%s volume=%d%% display=%s\n",
         settings.lnb_lo_mhz, settings.lnb_voltage_enabled ? "on" : "off",
-        settings.lnb_voltage_horizontal ? "18V" : "13V", settings.audio_volume_percent);
+        settings.lnb_voltage_horizontal ? "18V" : "13V", settings.audio_volume_percent,
+        settings.display_800x480 ? "800x480" : "1024x600");
     return settings;
+}
+
+bool save_receiver_settings(const std::string & repository_root,
+                            const ReceiverSettings & settings)
+{
+    const std::string path = repository_root + "/qo100_sdl/settings.json";
+    json_object * root = json_object_new_object();
+    if(root == nullptr) return false;
+    json_object_object_add(root, "lnb_lo_mhz",
+                           json_object_new_double(settings.lnb_lo_mhz));
+    json_object_object_add(root, "lnb_voltage_enabled",
+                           json_object_new_boolean(settings.lnb_voltage_enabled));
+    json_object_object_add(root, "lnb_voltage_horizontal",
+                           json_object_new_boolean(settings.lnb_voltage_horizontal));
+    json_object_object_add(root, "audio_volume_percent",
+                           json_object_new_int(settings.audio_volume_percent));
+    json_object_object_add(root, "display_800x480",
+                           json_object_new_boolean(settings.display_800x480));
+    const bool saved = json_object_to_file_ext(
+        path.c_str(), root, JSON_C_TO_STRING_PRETTY) == 0;
+    json_object_put(root);
+    qo100::log("[SETTINGS] %s %s\n", saved ? "saved" : "could not save", path.c_str());
+    return saved;
 }
 
 void ReceiverStatus::reset()
@@ -156,7 +238,7 @@ bool LongmyndProcess::start(long frequency_khz, long symbol_rate_ksps)
 {
     if(running()) return true;
     if(access(binary_.c_str(), X_OK) != 0) {
-        std::fprintf(stderr, "[LONGMYND] binary is not executable: %s\n", binary_.c_str());
+        qo100::log( "[LONGMYND] binary is not executable: %s\n", binary_.c_str());
         return false;
     }
 
@@ -166,15 +248,18 @@ bool LongmyndProcess::start(long frequency_khz, long symbol_rate_ksps)
         const bool read_pid = std::fscanf(stale_file, "%d", &stale_pid) == 1;
         std::fclose(stale_file);
         if(read_pid && stale_pid > 0 && pid_matches_binary(stale_pid, binary_)) {
-            std::fprintf(stderr, "[LONGMYND] stopping stale owned process %d\n", stale_pid);
+            qo100::log( "[LONGMYND] stopping stale owned process %d\n", stale_pid);
             kill(stale_pid, SIGTERM);
         }
         std::remove(pid_path_.c_str());
     }
 
+    const std::string ts_address = ts_destination_address();
+    const int ts_port = ts_destination_port();
+
     const pid_t child = fork();
     if(child < 0) {
-        std::fprintf(stderr, "[LONGMYND] fork failed: %s\n", std::strerror(errno));
+        qo100::log( "[LONGMYND] fork failed: %s\n", std::strerror(errno));
         return false;
     }
     if(child == 0) {
@@ -190,14 +275,15 @@ bool LongmyndProcess::start(long frequency_khz, long symbol_rate_ksps)
         char frequency[24]{};
         char symbol_rate[24]{};
         std::snprintf(port, sizeof(port), "%d", kWebsocketPort);
-        std::snprintf(udp_port, sizeof(udp_port), "%d", 5600);
+        std::snprintf(udp_port, sizeof(udp_port), "%d", ts_port);
         std::snprintf(frequency, sizeof(frequency), "%ld", frequency_khz);
         std::snprintf(symbol_rate, sizeof(symbol_rate), "%ld", symbol_rate_ksps);
         execl("/usr/bin/stdbuf", "stdbuf", "-oL", "-eL", binary_.c_str(),
-              "-W", port, "-i", "127.0.0.1", udp_port,
+              "-W", port, "-i", ts_address.c_str(), udp_port,
               frequency, symbol_rate, static_cast<char *>(nullptr));
         _exit(127);
     }
+    qo100::log("[LONGMYND] TS destination=%s:%d\n", ts_address.c_str(), ts_port);
 
     pid_ = static_cast<int>(child);
     FILE * pid_file = std::fopen(pid_path_.c_str(), "w");
@@ -205,7 +291,7 @@ bool LongmyndProcess::start(long frequency_khz, long symbol_rate_ksps)
         std::fprintf(pid_file, "%d\n", pid_);
         std::fclose(pid_file);
     }
-    std::fprintf(stderr, "[LONGMYND] started pid=%d frequency=%ldkHz sr=%ldkS/s\n",
+    qo100::log( "[LONGMYND] started pid=%d frequency=%ldkHz sr=%ldkS/s\n",
                  pid_, frequency_khz, symbol_rate_ksps);
     return true;
 }
@@ -221,12 +307,12 @@ void LongmyndProcess::stop()
         const pid_t result = waitpid(child, &status, WNOHANG);
         if(result == child || result < 0) {
             std::remove(pid_path_.c_str());
-            std::fprintf(stderr, "[LONGMYND] stopped pid=%d\n", child);
+            qo100::log( "[LONGMYND] stopped pid=%d\n", child);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    std::fprintf(stderr, "[LONGMYND] pid=%d did not stop in time; terminating\n", child);
+    qo100::log( "[LONGMYND] pid=%d did not stop in time; terminating\n", child);
     kill(child, SIGKILL);
     waitpid(child, nullptr, 0);
     std::remove(pid_path_.c_str());
@@ -245,6 +331,8 @@ struct LongmyndClient::Impl {
     lws * control_wsi = nullptr;
     std::atomic<bool> monitor_is_connected{false};
     std::atomic<bool> control_is_connected{false};
+    uint32_t monitor_connect_attempts = 0;
+    uint32_t control_connect_attempts = 0;
 
     std::mutex handoff_mutex;
     std::string pending_json;
@@ -269,10 +357,8 @@ struct LongmyndClient::Impl {
     static int control_callback(lws * websocket, lws_callback_reasons reason,
                                 void *, void * data, size_t length)
     {
-        (void)data;
-        (void)length;
         Impl * self = from(websocket);
-        return self != nullptr ? self->on_control(websocket, reason) : 0;
+        return self != nullptr ? self->on_control(websocket, reason, data, length) : 0;
     }
 
     static const lws_protocols * protocols()
@@ -291,7 +377,9 @@ struct LongmyndClient::Impl {
             case LWS_CALLBACK_CLIENT_ESTABLISHED:
                 monitor_wsi = websocket;
                 monitor_is_connected = true;
-                std::fprintf(stderr, "[LONGMYND-WS] monitor connected\n");
+                qo100::log( "[LONGMYND-WS] monitor connected after %u attempt%s\n",
+                            monitor_connect_attempts,
+                            monitor_connect_attempts == 1 ? "" : "s");
                 break;
             case LWS_CALLBACK_CLIENT_RECEIVE: {
                 if(lws_is_first_fragment(websocket)) {
@@ -313,6 +401,14 @@ struct LongmyndClient::Impl {
                 break;
             }
             case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+                if(monitor_connect_attempts == 1 || monitor_connect_attempts % 20 == 0) {
+                    qo100::log( "[LONGMYND-WS] monitor connection failed: %.*s\n",
+                                static_cast<int>(length),
+                                data != nullptr ? static_cast<const char *>(data) : "unknown");
+                }
+                if(monitor_wsi == websocket) monitor_wsi = nullptr;
+                monitor_is_connected = false;
+                break;
             case LWS_CALLBACK_CLIENT_CLOSED:
                 if(monitor_wsi == websocket) monitor_wsi = nullptr;
                 monitor_is_connected = false;
@@ -323,13 +419,16 @@ struct LongmyndClient::Impl {
         return 0;
     }
 
-    int on_control(lws * websocket, lws_callback_reasons reason)
+    int on_control(lws * websocket, lws_callback_reasons reason,
+                   void * data, size_t length)
     {
         switch(reason) {
             case LWS_CALLBACK_CLIENT_ESTABLISHED: {
                 control_wsi = websocket;
                 control_is_connected = true;
-                std::fprintf(stderr, "[LONGMYND-WS] control connected\n");
+                qo100::log( "[LONGMYND-WS] control connected after %u attempt%s\n",
+                            control_connect_attempts,
+                            control_connect_attempts == 1 ? "" : "s");
                 std::lock_guard<std::mutex> lock(handoff_mutex);
                 if(!pending_commands.empty()) lws_callback_on_writable(websocket);
                 break;
@@ -350,13 +449,21 @@ struct LongmyndClient::Impl {
                     std::memcpy(buffer.data() + LWS_PRE, command.data(), command.size());
                     const int written = lws_write(websocket, buffer.data() + LWS_PRE,
                                                   command.size(), LWS_WRITE_TEXT);
-                    if(written < 0) std::fprintf(stderr, "[LONGMYND-WS] control write failed\n");
-                    else std::fprintf(stderr, "[LONGMYND-WS] sent %s\n", command.c_str());
+                    if(written < 0) qo100::log( "[LONGMYND-WS] control write failed\n");
+                    else qo100::log( "[LONGMYND-WS] sent %s\n", command.c_str());
                 }
                 if(more) lws_callback_on_writable(websocket);
                 break;
             }
             case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+                if(control_connect_attempts == 1 || control_connect_attempts % 20 == 0) {
+                    qo100::log( "[LONGMYND-WS] control connection failed: %.*s\n",
+                                static_cast<int>(length),
+                                data != nullptr ? static_cast<const char *>(data) : "unknown");
+                }
+                if(control_wsi == websocket) control_wsi = nullptr;
+                control_is_connected = false;
+                break;
             case LWS_CALLBACK_CLIENT_CLOSED:
                 if(control_wsi == websocket) control_wsi = nullptr;
                 control_is_connected = false;
@@ -369,6 +476,7 @@ struct LongmyndClient::Impl {
 
     void connect_monitor(lws_context * active_context)
     {
+        ++monitor_connect_attempts;
         lws_client_connect_info info{};
         info.context = active_context;
         info.address = "127.0.0.1";
@@ -378,11 +486,13 @@ struct LongmyndClient::Impl {
         info.origin = info.address;
         info.local_protocol_name = "monitor";
         info.protocol = "monitor";
-        lws_client_connect_via_info(&info);
+        info.pwsi = &monitor_wsi;
+        monitor_wsi = lws_client_connect_via_info(&info);
     }
 
     void connect_control(lws_context * active_context)
     {
+        ++control_connect_attempts;
         lws_client_connect_info info{};
         info.context = active_context;
         info.address = "127.0.0.1";
@@ -392,7 +502,8 @@ struct LongmyndClient::Impl {
         info.origin = info.address;
         info.local_protocol_name = "control";
         info.protocol = "control";
-        lws_client_connect_via_info(&info);
+        info.pwsi = &control_wsi;
+        control_wsi = lws_client_connect_via_info(&info);
     }
 
     void run()
@@ -401,19 +512,36 @@ struct LongmyndClient::Impl {
         info.port = CONTEXT_PORT_NO_LISTEN;
         info.protocols = protocols();
         info.user = this;
+        info.timeout_secs = 1;
+        info.connect_timeout_secs = 1;
         lws_context * active_context = lws_create_context(&info);
         if(active_context == nullptr) return;
         context = active_context;
-        connect_monitor(active_context);
-        connect_control(active_context);
-        auto last_attempt = std::chrono::steady_clock::now();
+        const auto wait_started = std::chrono::steady_clock::now();
+        qo100::log( "[LONGMYND-WS] waiting for server port %d\n", kWebsocketPort);
+        auto last_attempt = wait_started - kReconnectInterval;
+        auto last_wait_report = wait_started;
+        bool server_ready_reported = false;
         while(running.load(std::memory_order_relaxed)) {
-            lws_service(active_context, 50);
             const auto now = std::chrono::steady_clock::now();
-            if(now - last_attempt >= kReconnectInterval) {
+            if((monitor_wsi == nullptr || control_wsi == nullptr) &&
+               now - last_attempt >= kReconnectInterval) {
                 last_attempt = now;
-                if(monitor_wsi == nullptr) connect_monitor(active_context);
-                if(control_wsi == nullptr) connect_control(active_context);
+                if(websocket_server_ready()) {
+                    if(!server_ready_reported) {
+                        const auto ready_ms = std::chrono::duration_cast<
+                            std::chrono::milliseconds>(now - wait_started).count();
+                        qo100::log( "[LONGMYND-WS] server ready after %lldms\n",
+                                    static_cast<long long>(ready_ms));
+                        server_ready_reported = true;
+                    }
+                    if(monitor_wsi == nullptr) connect_monitor(active_context);
+                    if(control_wsi == nullptr) connect_control(active_context);
+                }
+                else if(now - last_wait_report >= std::chrono::seconds(5)) {
+                    last_wait_report = now;
+                    qo100::log( "[LONGMYND-WS] still waiting for server\n");
+                }
             }
             bool command_waiting = false;
             {
@@ -422,6 +550,10 @@ struct LongmyndClient::Impl {
             }
             if(command_waiting && control_wsi != nullptr)
                 lws_callback_on_writable(control_wsi);
+            if(monitor_wsi != nullptr || control_wsi != nullptr)
+                lws_service(active_context, 50);
+            else
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         context = nullptr;
         lws_context_destroy(active_context);

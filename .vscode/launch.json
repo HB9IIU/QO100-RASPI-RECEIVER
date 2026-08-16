@@ -5,8 +5,8 @@
             "name": "Debug QO-100 DATV",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/qo100_lvgl/build-debug/qo100datv",
-            "cwd": "${workspaceFolder}/qo100_lvgl/build-debug",
+            "program": "${workspaceFolder}/qo100_sdl/build-debug/qo100sdl",
+            "cwd": "${workspaceFolder}/qo100_sdl/build-debug",
             "environment": [
                 {
                     "name": "DISPLAY",
@@ -16,7 +16,7 @@
             "MIMode": "gdb",
             "miDebuggerPath": "/usr/bin/gdb",
             "valuesFormatting": "parseText",
-            "preLaunchTask": "build-qo100-monitor-debug"
+            "preLaunchTask": "build-qo100-sdl-debug"
         }
     ]
 }

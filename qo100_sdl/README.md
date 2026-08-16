@@ -1,8 +1,7 @@
 # QO-100 SDL receiver
 
-This is the non-LVGL successor to `qo100_lvgl`. It deliberately lives beside
-the current application so the installed receiver remains available while the
-new pipeline is developed and measured.
+This is the current QO-100 DATV receiver application, superseding the earlier
+LVGL-based `qo100_lvgl` (removed 2026-08-13).
 
 The current milestone provides:
 
@@ -16,12 +15,14 @@ The current milestone provides:
   click-to-tune and receiver status/quality fields;
 - direct FFmpeg UDP ingestion with an interruptible decoder, native YUV420
   handoff, timestamp scheduling and a persistent SDL YUV texture;
+- audio decoded from the same transport stream and presented from an isolated,
+  bounded SDL PCM ring buffer with controlled rebuffering;
 - a synthetic 50 fps video source for exercising the handoff independently of
   UDP and FFmpeg;
 - a deterministic screenshot mode for visual regression checks.
 
-Live video decoding is connected. Audio decode/output is the next backend to
-move over; until then the Audio status remains `---`.
+The Audio status shows the detected codec when the selected transport stream
+contains a supported audio service.
 
 ## Build
 

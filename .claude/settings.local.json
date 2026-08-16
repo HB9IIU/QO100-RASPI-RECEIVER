@@ -7,9 +7,7 @@
       "Bash(DISPLAY=:0.0 scrot /tmp/claude-1000/-home-daniel-DATVreceiver/5c8bdcba-73d3-4dc8-98ad-f428d28bad38/scratchpad/qo100datv_skeleton.png)",
       "Bash(cat /tmp/qo100datv.log)",
       "Read(//tmp/**)",
-      "Bash(DISPLAY=:0.0 timeout 5 stdbuf -oL -eL /home/daniel/DATVreceiver/qo100_lvgl/build-debug/qo100datv)",
-      "Bash(echo \"exit code: $?\")",
-      "Bash(DISPLAY=:0.0 /home/daniel/DATVreceiver/qo100_lvgl/build-debug/qo100datv > /tmp/qo100datv2.log 2>&1)"
+      "Bash(echo \"exit code: $?\")"
     ],
     "additionalDirectories": [
       "/tmp"

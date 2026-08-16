@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -24,10 +27,18 @@
 #include <utility>
 #include <vector>
 
+#include <ctime>
+#include <fstream>
+
 #include <limits.h>
+#include <dirent.h>
+#include <sys/utsname.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "receiver.h"
+#include "app_log.h"
+#include "chat_client.h"
 #include "video_decoder.h"
 
 namespace {
@@ -91,6 +102,48 @@ std::string repository_directory()
     return realpath(candidate.c_str(), resolved) != nullptr ? resolved : candidate;
 }
 
+std::string detect_tuner_product_string()
+{
+    DIR * directory = opendir("/sys/bus/usb/devices");
+    if(directory == nullptr) return {};
+
+    std::string result;
+    while(const dirent * entry = readdir(directory)) {
+        const std::string path =
+            std::string("/sys/bus/usb/devices/") + entry->d_name;
+        char vendor[8]{};
+        FILE * vendor_file = std::fopen((path + "/idVendor").c_str(), "r");
+        if(vendor_file == nullptr) continue;
+        const bool have_vendor =
+            std::fgets(vendor, sizeof(vendor), vendor_file) != nullptr;
+        std::fclose(vendor_file);
+        if(!have_vendor || std::strncmp(vendor, "0403", 4) != 0) continue;
+
+        char product_id[8]{};
+        FILE * product_id_file =
+            std::fopen((path + "/idProduct").c_str(), "r");
+        if(product_id_file == nullptr) continue;
+        const bool have_product_id =
+            std::fgets(product_id, sizeof(product_id), product_id_file) != nullptr;
+        std::fclose(product_id_file);
+        if(!have_product_id || std::strncmp(product_id, "6010", 4) != 0) continue;
+
+        FILE * product_file = std::fopen((path + "/product").c_str(), "r");
+        if(product_file == nullptr) continue;
+        char product[128]{};
+        if(std::fgets(product, sizeof(product), product_file) != nullptr) {
+            result = product;
+            while(!result.empty() &&
+                  (result.back() == '\n' || result.back() == '\r'))
+                result.pop_back();
+        }
+        std::fclose(product_file);
+        break;
+    }
+    closedir(directory);
+    return result;
+}
+
 struct DisplayConfig {
     int width = kReferenceWidth;
     int height = kReferenceHeight;
@@ -112,6 +165,172 @@ DisplayConfig resolve_display_config(bool screenshot_mode)
     return config;
 }
 
+class AudioOutput {
+public:
+    ~AudioOutput() { close(); }
+
+    bool open(int volume_percent)
+    {
+        volume_ = std::clamp(volume_percent, 0, 100);
+        SDL_AudioSpec requested{};
+        requested.freq = kSampleRate;
+        requested.format = AUDIO_S16SYS;
+        requested.channels = kChannels;
+        requested.samples = 1024;
+        requested.callback = &AudioOutput::callback;
+        requested.userdata = this;
+        SDL_AudioSpec obtained{};
+        device_ = SDL_OpenAudioDevice(nullptr, 0, &requested, &obtained, 0);
+        if(device_ == 0) {
+            qo100::log("[AUDIO] output unavailable: %s\n", SDL_GetError());
+            return false;
+        }
+        bytes_per_second_ = obtained.freq * obtained.channels *
+                            static_cast<int>(sizeof(int16_t));
+        capacity_ = static_cast<size_t>(bytes_per_second_);
+        prebuffer_bytes_ = static_cast<size_t>(bytes_per_second_) / 4U;
+        ring_.resize(capacity_);
+        SDL_PauseAudioDevice(device_, 0);
+        qo100::log(
+            "[AUDIO] output driver=%s rate=%dHz channels=%u buffer=250-1000ms\n",
+            SDL_GetCurrentAudioDriver() != nullptr
+                ? SDL_GetCurrentAudioDriver() : "unknown",
+            obtained.freq, obtained.channels);
+        return true;
+    }
+
+    void close()
+    {
+        if(device_ == 0) return;
+        SDL_PauseAudioDevice(device_, 1);
+        SDL_CloseAudioDevice(device_);
+        device_ = 0;
+    }
+
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        read_ = 0;
+        write_ = 0;
+        size_ = 0;
+        buffering_ = true;
+        ++resets_;
+    }
+
+    void set_volume(int percent) { volume_ = std::clamp(percent, 0, 100); }
+
+    void push(qo100::AudioChunk && chunk)
+    {
+        if(device_ == 0 || chunk.pcm_s16.empty() ||
+           chunk.sample_rate != kSampleRate || chunk.channels != kChannels) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(chunk.pcm_s16.size() > capacity_ - size_) {
+            ++dropped_chunks_;
+            return;
+        }
+        const size_t first = std::min(chunk.pcm_s16.size(), capacity_ - write_);
+        std::memcpy(ring_.data() + write_, chunk.pcm_s16.data(), first);
+        const size_t remaining = chunk.pcm_s16.size() - first;
+        if(remaining > 0)
+            std::memcpy(ring_.data(), chunk.pcm_s16.data() + first, remaining);
+        write_ = (write_ + chunk.pcm_s16.size()) % capacity_;
+        size_ += chunk.pcm_s16.size();
+    }
+
+    uint32_t queued_ms() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return bytes_per_second_ > 0
+            ? static_cast<uint32_t>(size_ * 1000U /
+                                    static_cast<size_t>(bytes_per_second_))
+            : 0;
+    }
+    uint64_t dropped_chunks() const { return dropped_chunks_.load(); }
+    uint64_t underruns() const { return underruns_.load(); }
+    uint64_t rebuffers() const { return rebuffers_.load(); }
+    uint64_t resets() const { return resets_.load(); }
+    /* Peak of the last decoded audio buffer, measured before volume scaling
+     * (silence during underrun/buffering) - 0-100. */
+    int peak_percent() const { return peak_percent_.load(std::memory_order_relaxed); }
+
+private:
+    static constexpr int kSampleRate = 48000;
+    static constexpr int kChannels = 2;
+
+    static void callback(void * userdata, Uint8 * stream, int length)
+    {
+        static_cast<AudioOutput *>(userdata)->fill(stream, length);
+    }
+
+    void update_peak(const Uint8 * stream, int length)
+    {
+        const auto * samples = reinterpret_cast<const int16_t *>(stream);
+        const size_t count = static_cast<size_t>(length) / sizeof(int16_t);
+        int peak = 0;
+        for(size_t i = 0; i < count; ++i)
+            peak = std::max(peak, std::abs(static_cast<int>(samples[i])));
+        peak_percent_.store(std::min(100, peak * 100 / 32767), std::memory_order_relaxed);
+    }
+
+    void fill(Uint8 * stream, int length)
+    {
+        std::memset(stream, 0, static_cast<size_t>(length));
+        if(length <= 0) return;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(buffering_) {
+                if(size_ < prebuffer_bytes_) { update_peak(stream, length); return; }
+                buffering_ = false;
+                ++rebuffers_;
+            }
+            const size_t requested = static_cast<size_t>(length);
+            if(size_ < requested) {
+                read_ = write_;
+                size_ = 0;
+                buffering_ = true;
+                ++underruns_;
+                update_peak(stream, length);
+                return;
+            }
+            const size_t first = std::min(requested, capacity_ - read_);
+            std::memcpy(stream, ring_.data() + read_, first);
+            if(requested > first)
+                std::memcpy(stream + first, ring_.data(), requested - first);
+            read_ = (read_ + requested) % capacity_;
+            size_ -= requested;
+        }
+
+        /* Measured before volume scaling - reflects the actual decoded
+         * signal, not "how loud you've chosen to listen". */
+        update_peak(stream, length);
+
+        const int volume = volume_.load(std::memory_order_relaxed);
+        if(volume < 100) {
+            auto * samples = reinterpret_cast<int16_t *>(stream);
+            const size_t count = static_cast<size_t>(length) / sizeof(int16_t);
+            for(size_t i = 0; i < count; ++i)
+                samples[i] = static_cast<int16_t>(static_cast<int>(samples[i]) * volume / 100);
+        }
+    }
+
+    SDL_AudioDeviceID device_ = 0;
+    int bytes_per_second_ = 0;
+    size_t capacity_ = 0;
+    size_t prebuffer_bytes_ = 0;
+    mutable std::mutex mutex_;
+    std::vector<uint8_t> ring_;
+    size_t read_ = 0;
+    size_t write_ = 0;
+    size_t size_ = 0;
+    bool buffering_ = true;
+    std::atomic<int> volume_{100};
+    std::atomic<uint64_t> dropped_chunks_{0};
+    std::atomic<uint64_t> underruns_{0};
+    std::atomic<uint64_t> rebuffers_{0};
+    std::atomic<uint64_t> resets_{0};
+    std::atomic<int> peak_percent_{0};
+};
+
 class TextCache {
 public:
     explicit TextCache(SDL_Renderer * renderer) : renderer_(renderer) {}
@@ -126,6 +345,7 @@ public:
         for(auto & entry : textures_) SDL_DestroyTexture(entry.second.texture);
         for(auto & entry : fonts_) TTF_CloseFont(entry.second);
         textures_.clear();
+        lru_.clear();
         fonts_.clear();
     }
 
@@ -134,7 +354,7 @@ public:
         if(fonts_.count(size) != 0) return true;
         TTF_Font * font = TTF_OpenFont(path.c_str(), size);
         if(font == nullptr) {
-            std::fprintf(stderr, "[FONT] cannot open %s at %dpx: %s\n",
+            qo100::log( "[FONT] cannot open %s at %dpx: %s\n",
                          path.c_str(), size, TTF_GetError());
             return false;
         }
@@ -156,10 +376,19 @@ public:
             SDL_Surface * surface = TTF_RenderUTF8_Blended(font->second, text.c_str(), sdl_colour);
             if(surface == nullptr) return;
             SDL_Texture * texture = SDL_CreateTextureFromSurface(renderer_, surface);
-            CachedText cached{texture, surface->w, surface->h};
+            const int width = surface->w;
+            const int height = surface->h;
             SDL_FreeSurface(surface);
             if(texture == nullptr) return;
+            lru_.push_front(key);
+            CachedText cached{texture, width, height, lru_.begin()};
             found = textures_.emplace(key, cached).first;
+            evict_if_needed();
+        }
+        else if(found->second.lru_it != lru_.begin()) {
+            lru_.erase(found->second.lru_it);
+            lru_.push_front(key);
+            found->second.lru_it = lru_.begin();
         }
 
         SDL_Rect destination{x, y, found->second.width, found->second.height};
@@ -180,16 +409,39 @@ public:
         return {width, height};
     }
 
+    size_t texture_count() const { return textures_.size(); }
+
 private:
     struct CachedText {
         SDL_Texture * texture = nullptr;
         int width = 0;
         int height = 0;
+        std::list<std::string>::iterator lru_it;
     };
+
+    /* Most (text, colour, size) combinations recur every frame (labels,
+     * status values, chat timestamps), but some are one-off or slowly
+     * drift (elapsed-time counters, frequency readouts while tuning) - an
+     * unbounded cache leaks a texture per unique string forever on those.
+     * Cap it and evict the least-recently-used entry once full. */
+    static constexpr size_t kMaxCachedTextures = 512;
+
+    void evict_if_needed()
+    {
+        while(textures_.size() > kMaxCachedTextures) {
+            const auto found = textures_.find(lru_.back());
+            if(found != textures_.end()) {
+                SDL_DestroyTexture(found->second.texture);
+                textures_.erase(found);
+            }
+            lru_.pop_back();
+        }
+    }
 
     SDL_Renderer * renderer_ = nullptr;
     std::unordered_map<int, TTF_Font *> fonts_;
     std::unordered_map<std::string, CachedText> textures_;
+    std::list<std::string> lru_;
 };
 
 using VideoFrame = qo100::VideoFrame;
@@ -204,10 +456,6 @@ public:
             frame.pts_us = queue_.back().pts_us + 1;
         }
         if(queue_.size() >= kVideoQueueCapacity) {
-            // A short bounded wait preserves a contiguous PTS sequence when
-            // FFmpeg releases a probe/decode burst. Its UDP FIFO continues
-            // receiving while this decoder thread waits. If presentation is
-            // genuinely behind after one frame interval, reject the arrival.
             const bool space_available = space_available_.wait_for(lock,
                 std::chrono::milliseconds(25), [this] {
                     return queue_.size() < kVideoQueueCapacity;
@@ -316,7 +564,7 @@ struct Layout {
           spectrum_panel{4, 4, w - 8, spectrum_height},
           spectrum_plot{18, 18, w - 36, spectrum_height - 36},
           video_panel{4, bottom_y, video_width, bottom_height},
-          video_content{18, bottom_y + 1, video_width - 15, bottom_height - 15},
+          video_content{18, bottom_y + 14, video_width - 28, bottom_height - 28},
           status_panel{4 + video_width + 4, bottom_y,
                        w - (4 + video_width + 4) - 4, bottom_height}
     {}
@@ -499,7 +747,7 @@ private:
             case LWS_CALLBACK_CLIENT_ESTABLISHED:
                 websocket_ = websocket;
                 set_status(SpectrumStatus::Waiting);
-                std::fprintf(stderr, "[SPECTRUM] connected to BATC\n");
+                qo100::log( "[SPECTRUM] connected to BATC\n");
                 break;
             case LWS_CALLBACK_CLIENT_RECEIVE: {
                 if(lws_is_first_fragment(websocket)) {
@@ -524,13 +772,13 @@ private:
             case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
                 websocket_ = nullptr;
                 set_status(SpectrumStatus::ConnectionError);
-                std::fprintf(stderr, "[SPECTRUM] connection error: %.*s\n",
+                qo100::log( "[SPECTRUM] connection error: %.*s\n",
                     static_cast<int>(length), data != nullptr ? static_cast<const char *>(data) : "");
                 break;
             case LWS_CALLBACK_CLIENT_CLOSED:
                 websocket_ = nullptr;
                 set_status(SpectrumStatus::Disconnected);
-                std::fprintf(stderr, "[SPECTRUM] disconnected\n");
+                qo100::log( "[SPECTRUM] disconnected\n");
                 break;
             default:
                 break;
@@ -698,9 +946,25 @@ private:
     std::vector<DetectedSignal> signals_;
 };
 
+enum class SpectrumMarkerKind {
+    None, Tune, TuneQueued, AlreadyTuned, NoSignal, SpectrumNotReady
+};
+
+enum class VideoNotice {
+    None, WaitingForTuner, Tuning, NoVideoStream
+};
+
+struct SpectrumMarker {
+    SpectrumMarkerKind kind = SpectrumMarkerKind::None;
+    double frequency_mhz = 0.0;
+    Clock::time_point expires_at{};
+};
+
 void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & layout,
                    const SpectrumTexture & texture, SpectrumStatus status,
-                   double selected_frequency_mhz)
+                   const SpectrumMarker & marker,
+                   const qo100::ReceiverStatus & receiver,
+                   double tuned_frequency_mhz)
 {
     fill_panel(renderer, layout.spectrum_panel);
     set_colour(renderer, {0, 0, 0});
@@ -724,8 +988,14 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
     };
     std::vector<LabelArea> occupied;
     size_t label_count = 0;
+    const std::string tuned_service = !receiver.service_name.empty()
+        ? receiver.service_name : receiver.service_provider;
     for(const auto & signal : texture.signals()) {
         const bool beacon = signal.frequency_mhz < 10492.0 && signal.symbol_rate_ms >= 1.0F;
+        const double half_width_mhz = std::max(
+            0.02, static_cast<double>(signal.measured_width_mhz) / 2.0);
+        const bool tuned_signal = receiver.locked() && !tuned_service.empty() &&
+            std::abs(signal.frequency_mhz - tuned_frequency_mhz) <= half_width_mhz;
         if(beacon || label_count++ >= 16) continue;
         char first_line[48];
         if(signal.symbol_rate_ms < 0.7F)
@@ -751,8 +1021,9 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         const auto [first_width, line_height] = text.measure(first_line);
         const auto [second_width, ignored_height] = text.measure(second_line);
         (void)ignored_height;
-        const int label_width = std::max(first_width, second_width);
-        const int label_height = line_height * 2;
+        const int service_width = tuned_signal ? text.measure(tuned_service).first : 0;
+        const int label_width = std::max({first_width, second_width, service_width});
+        const int label_height = line_height * (tuned_signal ? 3 : 2);
         const int natural_x = std::clamp(centre_x - label_width / 2,
             layout.spectrum_plot.x + 2,
             layout.spectrum_plot.x + layout.spectrum_plot.w - label_width - 2);
@@ -793,23 +1064,50 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
             if(found_position) break;
         }
         occupied.push_back(chosen);
+        int text_y = chosen.y;
+        if(tuned_signal) {
+            text.draw(tuned_service, chosen.x + (label_width - service_width) / 2,
+                      text_y, kGreen);
+            text_y += line_height;
+        }
         text.draw(first_line, chosen.x + (label_width - first_width) / 2,
-                  chosen.y, kText);
+                  text_y, kText);
         text.draw(second_line, chosen.x + (label_width - second_width) / 2,
-                  chosen.y + line_height, kText);
+                  text_y + line_height, kText);
     }
 
-    if(selected_frequency_mhz >= kSpectrumStartMhz &&
-       selected_frequency_mhz <= kSpectrumStartMhz + kSpectrumSpanMhz) {
+    if(marker.kind != SpectrumMarkerKind::None &&
+       marker.frequency_mhz >= kSpectrumStartMhz &&
+       marker.frequency_mhz <= kSpectrumStartMhz + kSpectrumSpanMhz) {
         const int marker_x = layout.spectrum_plot.x + static_cast<int>(
-            (selected_frequency_mhz - kSpectrumStartMhz) / kSpectrumSpanMhz *
+            (marker.frequency_mhz - kSpectrumStartMhz) / kSpectrumSpanMhz *
             layout.spectrum_plot.w);
-        set_colour(renderer, kCyan);
+        const Colour marker_colour = marker.kind == SpectrumMarkerKind::Tune
+            ? kCyan : (marker.kind == SpectrumMarkerKind::TuneQueued
+                ? kYellow : (marker.kind == SpectrumMarkerKind::AlreadyTuned
+                    ? kGreen : (marker.kind == SpectrumMarkerKind::SpectrumNotReady
+                        ? kYellow : kTextDim)));
+        set_colour(renderer, marker_colour);
         SDL_RenderDrawLine(renderer, marker_x, layout.spectrum_plot.y + 18,
                            marker_x, layout.spectrum_plot.y + layout.spectrum_plot.h - 1);
-        char marker[32];
-        std::snprintf(marker, sizeof(marker), "%.3f", selected_frequency_mhz);
-        text.draw(marker, marker_x, layout.spectrum_plot.y - 3, kCyan, 14, true);
+        char marker_text[32];
+        if(marker.kind == SpectrumMarkerKind::Tune)
+            std::snprintf(marker_text, sizeof(marker_text), "%.3f", marker.frequency_mhz);
+        else if(marker.kind == SpectrumMarkerKind::TuneQueued)
+            std::snprintf(marker_text, sizeof(marker_text), "TUNE QUEUED");
+        else if(marker.kind == SpectrumMarkerKind::AlreadyTuned)
+            std::snprintf(marker_text, sizeof(marker_text), "ALREADY TUNED");
+        else if(marker.kind == SpectrumMarkerKind::NoSignal)
+            std::snprintf(marker_text, sizeof(marker_text), "NO SIGNAL");
+        else
+            std::snprintf(marker_text, sizeof(marker_text), "SPECTRUM NOT READY");
+        const auto [marker_width, marker_height] = text.measure(marker_text);
+        (void)marker_height;
+        const int marker_label_x = std::clamp(marker_x - marker_width / 2,
+            layout.spectrum_plot.x + 2,
+            layout.spectrum_plot.x + layout.spectrum_plot.w - marker_width - 2);
+        text.draw(marker_text, marker_label_x, layout.spectrum_plot.y - 3,
+                  marker_colour);
     }
 
     if(status != SpectrumStatus::Live) {
@@ -817,23 +1115,649 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         text.draw(spectrum_status_text(status), layout.spectrum_plot.x + 8,
                   layout.spectrum_plot.y + 8, status_colour);
     }
-    for(int number = 1; number <= 9; ++number) {
+    for(int number = 1; number <= 8; ++number) {
         const int x = layout.spectrum_plot.x + number * layout.spectrum_plot.w / 9;
         text.draw(std::to_string(10490 + number), x,
-                  layout.spectrum_plot.y + layout.spectrum_plot.h + 4,
+                  layout.spectrum_plot.y + layout.spectrum_plot.h + 12,
                   kTextDim, 14, true);
     }
 }
 
-void draw_button(SDL_Renderer * renderer, TextCache & text, SDL_Rect rect,
-                 const std::string & label, Colour colour, int font_size = 16)
+void fill_rounded_rect(SDL_Renderer * renderer, const SDL_Rect & rect,
+                       int radius, Colour colour)
 {
-    set_colour(renderer, kPanel);
-    SDL_RenderFillRect(renderer, &rect);
+    radius = std::min(radius, std::min(rect.w, rect.h) / 2);
     set_colour(renderer, colour);
-    SDL_RenderDrawRect(renderer, &rect);
+    const SDL_Rect middle{rect.x + radius, rect.y, rect.w - 2 * radius, rect.h};
+    SDL_RenderFillRect(renderer, &middle);
+    const SDL_Rect left{rect.x, rect.y + radius, radius, rect.h - 2 * radius};
+    SDL_RenderFillRect(renderer, &left);
+    const SDL_Rect right{
+        rect.x + rect.w - radius, rect.y + radius, radius, rect.h - 2 * radius};
+    SDL_RenderFillRect(renderer, &right);
+    for(int y = 0; y < radius; ++y) {
+        const int j = radius - y;
+        const int half = static_cast<int>(
+            std::sqrt(std::max(0, radius * radius - j * j)));
+        if(half <= 0) continue;
+        const SDL_Rect top_left{rect.x + radius - half, rect.y + y, half, 1};
+        SDL_RenderFillRect(renderer, &top_left);
+        const SDL_Rect top_right{rect.x + rect.w - radius, rect.y + y, half, 1};
+        SDL_RenderFillRect(renderer, &top_right);
+        const SDL_Rect bottom_left{
+            rect.x + radius - half, rect.y + rect.h - 1 - y, half, 1};
+        SDL_RenderFillRect(renderer, &bottom_left);
+        const SDL_Rect bottom_right{
+            rect.x + rect.w - radius, rect.y + rect.h - 1 - y, half, 1};
+        SDL_RenderFillRect(renderer, &bottom_right);
+    }
+}
+
+void draw_rounded_rect(SDL_Renderer * renderer, const SDL_Rect & rect,
+                       int radius, Colour colour)
+{
+    radius = std::min(radius, std::min(rect.w, rect.h) / 2);
+    set_colour(renderer, colour);
+    SDL_RenderDrawLine(renderer, rect.x + radius, rect.y,
+                       rect.x + rect.w - radius - 1, rect.y);
+    SDL_RenderDrawLine(renderer, rect.x + radius, rect.y + rect.h - 1,
+                       rect.x + rect.w - radius - 1, rect.y + rect.h - 1);
+    SDL_RenderDrawLine(renderer, rect.x, rect.y + radius,
+                       rect.x, rect.y + rect.h - radius - 1);
+    SDL_RenderDrawLine(renderer, rect.x + rect.w - 1, rect.y + radius,
+                       rect.x + rect.w - 1, rect.y + rect.h - radius - 1);
+    for(int angle = 0; angle <= 90; ++angle) {
+        const double rad = angle * M_PI / 180.0;
+        const int dx = static_cast<int>(std::round(radius * std::cos(rad)));
+        const int dy = static_cast<int>(std::round(radius * std::sin(rad)));
+        SDL_RenderDrawPoint(renderer, rect.x + radius - dx, rect.y + radius - dy);
+        SDL_RenderDrawPoint(renderer, rect.x + rect.w - 1 - radius + dx,
+                            rect.y + radius - dy);
+        SDL_RenderDrawPoint(renderer, rect.x + radius - dx,
+                            rect.y + rect.h - 1 - radius + dy);
+        SDL_RenderDrawPoint(renderer, rect.x + rect.w - 1 - radius + dx,
+                            rect.y + rect.h - 1 - radius + dy);
+    }
+}
+
+void draw_button(SDL_Renderer * renderer, TextCache & text, SDL_Rect rect,
+                 const std::string & label, Colour colour, int font_size = 16,
+                 bool active = false)
+{
+    constexpr int kButtonRadius = 10;
+    fill_rounded_rect(renderer, rect, kButtonRadius, active ? colour : kPanel);
+    draw_rounded_rect(renderer, rect, kButtonRadius, colour);
     text.draw(label, rect.x + rect.w / 2, rect.y + rect.h / 2,
-              colour, font_size, true);
+              active ? kBackground : colour, font_size, true);
+}
+
+enum class TunerPopupKind { None, Detected, NotFound };
+
+SDL_Rect tuner_popup_rect(int screen_width, int screen_height,
+                          TunerPopupKind kind)
+{
+    const int width = std::min(600, screen_width - 80);
+    const int height = kind == TunerPopupKind::NotFound ? 230 : 170;
+    return {(screen_width - width) / 2, (screen_height - height) / 2,
+            width, height};
+}
+
+SDL_Rect tuner_popup_close_rect(int screen_width, int screen_height)
+{
+    const SDL_Rect popup = tuner_popup_rect(
+        screen_width, screen_height, TunerPopupKind::NotFound);
+    return {popup.x + (popup.w - 150) / 2, popup.y + popup.h - 62, 150, 44};
+}
+
+void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
+                      int screen_width, int screen_height,
+                      TunerPopupKind kind, const std::string & product)
+{
+    if(kind == TunerPopupKind::None) return;
+
+    const SDL_Rect screen{0, 0, screen_width, screen_height};
+    set_colour(renderer, {0, 0, 0, 180});
+    SDL_RenderFillRect(renderer, &screen);
+
+    const SDL_Rect popup = tuner_popup_rect(screen_width, screen_height, kind);
+    constexpr int kPopupRadius = 16;
+    fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
+    draw_rounded_rect(renderer, popup, kPopupRadius,
+                      kind == TunerPopupKind::Detected ? kGreen : kRed);
+
+    const int centre_x = popup.x + popup.w / 2;
+    if(kind == TunerPopupKind::Detected) {
+        text.draw("TUNER DETECTED", centre_x, popup.y + 45, kGreen, 32, true);
+        text.draw(product, centre_x, popup.y + 112, kText, 20, true);
+    }
+    else {
+        text.draw("NO TUNER FOUND", centre_x, popup.y + 40, kRed, 32, true);
+        text.draw("No MiniTiouner detected on USB.", centre_x,
+                  popup.y + 92, kText, 20, true);
+        text.draw("Check the cable and power, then restart the app.", centre_x,
+                  popup.y + 122, kText, 20, true);
+        draw_button(renderer, text,
+                    tuner_popup_close_rect(screen_width, screen_height),
+                    "CLOSE", kRed, 16);
+    }
+}
+
+enum class AppPage { Main, Settings, Chat };
+enum class ChatInput { None, Nick, Message };
+
+bool point_in_rect(int x, int y, const SDL_Rect & rect)
+{
+    return x >= rect.x && x < rect.x + rect.w &&
+           y >= rect.y && y < rect.y + rect.h;
+}
+
+SDL_Rect page_back_rect(int width)
+{
+    return {width - 114, 6, 106, 40};
+}
+
+SDL_Rect settings_receiver_card_rect(int)
+{
+    return {40, 70, 460, 260};
+}
+
+SDL_Rect settings_display_card_rect(int)
+{
+    const SDL_Rect receiver = settings_receiver_card_rect(0);
+    return {receiver.x, receiver.y + receiver.h + 20, receiver.w, 140};
+}
+
+SDL_Rect settings_diagnostics_card_rect(int width)
+{
+    const SDL_Rect receiver = settings_receiver_card_rect(0);
+    const int x = receiver.x + receiver.w + 24;
+    return {x, receiver.y, width - x - 40, 300};
+}
+
+SDL_Rect settings_lo_button_rect(int width, bool increment)
+{
+    const SDL_Rect card = settings_receiver_card_rect(width);
+    return {card.x + (increment ? 228 : 24), card.y + 88, 48, 48};
+}
+
+SDL_Rect settings_voltage_rect(int width, int index)
+{
+    const SDL_Rect card = settings_receiver_card_rect(width);
+    return {card.x + 24 + index * 116, card.y + 188, 104, 50};
+}
+
+SDL_Rect settings_display_res_rect(int width, int index)
+{
+    const SDL_Rect card = settings_display_card_rect(width);
+    return {card.x + 24 + index * 216, card.y + 56, 200, 50};
+}
+
+SDL_Rect settings_save_rect(int width)
+{
+    const SDL_Rect card = settings_display_card_rect(width);
+    return {card.x + 24, card.y + card.h + 20, 140, 50};
+}
+
+void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
+                        const SDL_Rect & card, const std::string & title)
+{
+    fill_panel(renderer, card);
+    set_colour(renderer, kBorder);
+    SDL_RenderDrawRect(renderer, &card);
+    text.draw(title, card.x + 24, card.y + 16, kCyan, 14);
+    const SDL_Rect rule{card.x + 24, card.y + 40, card.w - 48, 1};
+    set_colour(renderer, kBorder);
+    SDL_RenderFillRect(renderer, &rule);
+}
+
+void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
+                        int width, int height, int lo_mhz,
+                        int voltage_choice, int display_choice, bool saved,
+                        const std::string & tuner_product,
+                        bool longmynd_connected)
+{
+    set_colour(renderer, kBackground);
+    const SDL_Rect screen{0, 0, width, height};
+    SDL_RenderFillRect(renderer, &screen);
+    text.draw("SETTINGS", 12, 12, kCyan, 20);
+    draw_button(renderer, text, page_back_rect(width), "BACK", kCyan);
+
+    const SDL_Rect receiver_card = settings_receiver_card_rect(width);
+    draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING");
+    text.draw("LNB LO Offset (MHz)", receiver_card.x + 24, receiver_card.y + 56, kText, 16);
+    draw_button(renderer, text, settings_lo_button_rect(width, false), "-", kText, 20);
+    const SDL_Rect lo_value{receiver_card.x + 80, receiver_card.y + 88, 140, 48};
+    set_colour(renderer, kBackground);
+    SDL_RenderFillRect(renderer, &lo_value);
+    set_colour(renderer, kBorder);
+    SDL_RenderDrawRect(renderer, &lo_value);
+    text.draw(std::to_string(lo_mhz), lo_value.x + lo_value.w / 2,
+              lo_value.y + lo_value.h / 2, kText, 20, true);
+    draw_button(renderer, text, settings_lo_button_rect(width, true), "+", kText, 20);
+
+    text.draw("LNB Bias Voltage", receiver_card.x + 24, receiver_card.y + 156, kText, 16);
+    const char * voltage_labels[] = {"OFF", "13V", "18V"};
+    for(int index = 0; index < 3; ++index) {
+        const SDL_Rect button = settings_voltage_rect(width, index);
+        set_colour(renderer, index == voltage_choice ? Colour{0x1f, 0x4d, 0x33} : kPanel);
+        SDL_RenderFillRect(renderer, &button);
+        set_colour(renderer, index == voltage_choice ? kGreen : kBorder);
+        SDL_RenderDrawRect(renderer, &button);
+        text.draw(voltage_labels[index], button.x + button.w / 2,
+                  button.y + button.h / 2,
+                  index == voltage_choice ? kGreen : kText, 16, true);
+    }
+
+    const SDL_Rect display_card = settings_display_card_rect(width);
+    draw_settings_card(renderer, text, display_card, "DISPLAY RESOLUTION");
+    const char * display_labels[] = {"1024 x 600", "800 x 480"};
+    for(int index = 0; index < 2; ++index) {
+        const SDL_Rect button = settings_display_res_rect(width, index);
+        const bool selected = index == display_choice;
+        set_colour(renderer, selected ? Colour{0x1f, 0x4d, 0x33} : kPanel);
+        SDL_RenderFillRect(renderer, &button);
+        set_colour(renderer, selected ? kGreen : kBorder);
+        SDL_RenderDrawRect(renderer, &button);
+        text.draw(display_labels[index], button.x + button.w / 2,
+                  button.y + button.h / 2,
+                  selected ? kGreen : kText, 16, true);
+    }
+    text.draw("Applies on next release - no effect yet",
+              display_card.x + 24, display_card.y + display_card.h - 24, kTextDim, 14);
+
+    draw_button(renderer, text, settings_save_rect(width), "SAVE", kGreen);
+    if(saved)
+        text.draw("Saved", settings_save_rect(width).x + 160,
+                  settings_save_rect(width).y + 17, kGreen, 16);
+
+    const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
+    draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS");
+    const int diagnostic_x = diagnostics_card.x + 24;
+    text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 56, kText, 16);
+    text.draw(tuner_product.empty() ? "Not detected" : tuner_product,
+              diagnostic_x, diagnostics_card.y + 88,
+              tuner_product.empty() ? kRed : kText, 16);
+    text.draw("Longmynd Link", diagnostic_x, diagnostics_card.y + 148, kText, 16);
+    text.draw(longmynd_connected ? "Connected" : "Not connected",
+              diagnostic_x, diagnostics_card.y + 180,
+              longmynd_connected ? kGreen : kRed, 16);
+
+    text.draw("Watch in VLC (same network)", diagnostic_x, diagnostics_card.y + 220, kText, 16);
+    text.draw("Media > Open Network Stream:", diagnostic_x, diagnostics_card.y + 250, kTextDim, 14);
+    text.draw(qo100::ts_stream_vlc_url(), diagnostic_x, diagnostics_card.y + 274, kCyan, 16);
+}
+
+struct KeyboardKey {
+    SDL_Rect rect;
+    std::string label;
+};
+
+void add_keyboard_row(std::vector<KeyboardKey> & keys,
+                      const std::vector<std::string> & labels,
+                      int y, int screen_width, int key_height,
+                      int side_margin = 8)
+{
+    constexpr int gap = 5;
+    const int available = screen_width - side_margin * 2 -
+                          gap * static_cast<int>(labels.size() - 1);
+    const int key_width = available / static_cast<int>(labels.size());
+    int x = side_margin;
+    for(size_t index = 0; index < labels.size(); ++index) {
+        const int width = index + 1 == labels.size()
+            ? screen_width - side_margin - x : key_width;
+        keys.push_back({{x, y, width, key_height}, labels[index]});
+        x += width + gap;
+    }
+}
+
+std::vector<KeyboardKey> keyboard_keys(int screen_width, int screen_height,
+                                       bool symbols, bool shifted)
+{
+    const int top = screen_height - 250;
+    constexpr int height = 54;
+    constexpr int row_gap = 6;
+    std::vector<KeyboardKey> keys;
+    if(!symbols) {
+        std::vector<std::string> row1{"q","w","e","r","t","y","u","i","o","p"};
+        std::vector<std::string> row2{"a","s","d","f","g","h","j","k","l"};
+        std::vector<std::string> row3{"SHIFT","z","x","c","v","b","n","m","BACK"};
+        if(shifted) {
+            for(auto * row : {&row1, &row2, &row3}) {
+                for(std::string & label : *row) {
+                    if(label.size() == 1)
+                        label[0] = static_cast<char>(std::toupper(label[0]));
+                }
+            }
+        }
+        add_keyboard_row(keys, row1, top, screen_width, height);
+        add_keyboard_row(keys, row2, top + height + row_gap, screen_width, height, 38);
+        add_keyboard_row(keys, row3, top + 2 * (height + row_gap), screen_width, height);
+    }
+    else {
+        add_keyboard_row(keys, {"1","2","3","4","5","6","7","8","9","0"},
+                         top, screen_width, height);
+        add_keyboard_row(keys, {"!","@","#","$","%","&","*","(",")"},
+                         top + height + row_gap, screen_width, height, 38);
+        add_keyboard_row(keys, {"ABC",".",",","?","!","'","\"","/","BACK"},
+                         top + 2 * (height + row_gap), screen_width, height);
+    }
+    add_keyboard_row(keys, {symbols ? "ABC" : "SYM", "SPACE", "-", "CANCEL", "ENTER"},
+                     top + 3 * (height + row_gap), screen_width, height);
+    return keys;
+}
+
+void draw_keyboard(SDL_Renderer * renderer, TextCache & text,
+                   int width, int height, bool symbols, bool shifted)
+{
+    const SDL_Rect background{0, height - 258, width, 258};
+    set_colour(renderer, kPanel);
+    SDL_RenderFillRect(renderer, &background);
+    set_colour(renderer, kBorder);
+    SDL_RenderDrawLine(renderer, 0, background.y, width, background.y);
+    for(const KeyboardKey & key : keyboard_keys(width, height, symbols, shifted)) {
+        Colour colour = kText;
+        if(key.label == "ENTER") colour = kGreen;
+        else if(key.label == "CANCEL" || key.label == "BACK") colour = kRed;
+        else if(key.label == "SYM" || key.label == "ABC" || key.label == "SHIFT")
+            colour = kYellow;
+        draw_button(renderer, text, key.rect, key.label, colour, 16);
+    }
+}
+
+std::string tail_that_fits(TextCache & text, const std::string & value, int width)
+{
+    if(text.measure(value, 16).first <= width) return value;
+    size_t start = 0;
+    while(start < value.size() && text.measure(value.substr(start), 16).first > width) {
+        ++start;
+        while(start < value.size() &&
+              (static_cast<unsigned char>(value[start]) & 0xc0U) == 0x80U) ++start;
+    }
+    return value.substr(start);
+}
+
+void draw_text_input(SDL_Renderer * renderer, TextCache & text,
+                     const SDL_Rect & rect, const std::string & value,
+                     const char * placeholder, bool active)
+{
+    set_colour(renderer, kBackground);
+    SDL_RenderFillRect(renderer, &rect);
+    set_colour(renderer, active ? kCyan : kBorder);
+    SDL_RenderDrawRect(renderer, &rect);
+    const std::string shown = value.empty()
+        ? std::string(placeholder) : tail_that_fits(text, value, rect.w - 16);
+    const SDL_Rect clip{rect.x + 6, rect.y + 2, rect.w - 12, rect.h - 4};
+    SDL_RenderSetClipRect(renderer, &clip);
+    text.draw(shown, rect.x + 8, rect.y + (rect.h - 16) / 2,
+              value.empty() ? kTextDim : kText, 16, false);
+    SDL_RenderSetClipRect(renderer, nullptr);
+}
+
+std::vector<std::string> wrap_chat_text(TextCache & text,
+                                        const std::string & message, int width,
+                                        int font_size)
+{
+    std::vector<std::string> lines;
+    std::string line;
+    size_t position = 0;
+    while(position < message.size()) {
+        while(position < message.size() && message[position] == ' ') ++position;
+        size_t end = message.find(' ', position);
+        if(end == std::string::npos) end = message.size();
+        const std::string word = message.substr(position, end - position);
+        const std::string candidate = line.empty() ? word : line + " " + word;
+        if(!line.empty() && text.measure(candidate, font_size).first > width) {
+            lines.push_back(line);
+            line = word;
+        }
+        else line = candidate;
+        position = end;
+    }
+    if(!line.empty()) lines.push_back(line);
+    if(lines.empty()) lines.emplace_back();
+    return lines;
+}
+
+void draw_chat_history(SDL_Renderer * renderer, TextCache & text,
+                       const SDL_Rect & box, const qo100::ChatState & state,
+                       size_t & first_visible, size_t & last_visible,
+                       bool & follow_latest)
+{
+    set_colour(renderer, {0x3f, 0x46, 0x4c});
+    SDL_RenderFillRect(renderer, &box);
+    set_colour(renderer, kBorder);
+    SDL_RenderDrawRect(renderer, &box);
+    constexpr int kChatFontSize = 16;
+    if(state.lines.empty()) {
+        text.draw("Waiting for chat history...", box.x + 10, box.y + 10, kText, kChatFontSize);
+        first_visible = 0;
+        last_visible = 0;
+        follow_latest = true;
+        return;
+    }
+
+    constexpr int line_height = 22;
+    const int message_x = box.x + 245;
+    const int message_width = box.x + box.w - message_x - 10;
+    const int available_height = box.h - 16;
+    struct Visible {
+        size_t index;
+        std::vector<std::string> lines;
+        int height;
+    };
+    std::vector<Visible> visible;
+    int used_height = 0;
+
+    if(follow_latest) {
+        for(size_t index = state.lines.size(); index > 0; --index) {
+            auto wrapped = wrap_chat_text(
+                text, state.lines[index - 1].message, message_width, kChatFontSize);
+            const int needed = static_cast<int>(wrapped.size()) * line_height + 3;
+            if(!visible.empty() && used_height + needed > available_height) break;
+            visible.insert(visible.begin(),
+                           {index - 1, std::move(wrapped), needed});
+            used_height += needed;
+        }
+    }
+    else {
+        first_visible = std::min(first_visible, state.lines.size() - 1);
+        for(size_t index = first_visible; index < state.lines.size(); ++index) {
+            auto wrapped = wrap_chat_text(
+                text, state.lines[index].message, message_width, kChatFontSize);
+            const int needed = static_cast<int>(wrapped.size()) * line_height + 3;
+            if(!visible.empty() && used_height + needed > available_height) break;
+            visible.push_back({index, std::move(wrapped), needed});
+            used_height += needed;
+        }
+    }
+
+    if(visible.empty()) return;
+    first_visible = visible.front().index;
+    last_visible = visible.back().index;
+    if(!follow_latest && last_visible + 1 >= state.lines.size()) follow_latest = true;
+    int y = follow_latest ? box.y + box.h - 8 - used_height : box.y + 8;
+    const SDL_Rect clip{box.x + 1, box.y + 1, box.w - 2, box.h - 2};
+    SDL_RenderSetClipRect(renderer, &clip);
+    for(const Visible & item : visible) {
+        const qo100::ChatLine & source = state.lines[item.index];
+        text.draw(source.time, box.x + 10, y, {0x9a, 0xa0, 0xa6}, kChatFontSize);
+        text.draw(source.name, box.x + 68, y, kYellow, kChatFontSize);
+        for(size_t line = 0; line < item.lines.size(); ++line)
+            text.draw(item.lines[line], message_x,
+                      y + static_cast<int>(line) * line_height, kText, kChatFontSize);
+        y += item.height;
+    }
+    SDL_RenderSetClipRect(renderer, nullptr);
+    if(!follow_latest)
+        text.draw("SCROLLED", box.x + box.w - 82, box.y + 7, kYellow, kChatFontSize);
+}
+
+SDL_Rect chat_history_rect(int width, int height, bool keyboard_open)
+{
+    const int content_bottom = keyboard_open ? height - 316 : height - 68;
+    return {8, 48, width - 234, content_bottom - 48};
+}
+
+SDL_Rect chat_nick_rect(int height, bool keyboard_open)
+{
+    return {8, keyboard_open ? height - 306 : height - 58, 150, 48};
+}
+
+SDL_Rect chat_set_rect(int height, bool keyboard_open)
+{
+    return {164, keyboard_open ? height - 306 : height - 58, 76, 48};
+}
+
+SDL_Rect chat_message_rect(int width, int height, bool keyboard_open)
+{
+    return {248, keyboard_open ? height - 306 : height - 58, width - 370, 48};
+}
+
+SDL_Rect chat_send_rect(int width, int height, bool keyboard_open)
+{
+    return {width - 114, keyboard_open ? height - 306 : height - 58, 106, 48};
+}
+
+void draw_chat_page(SDL_Renderer * renderer, TextCache & text,
+                    int width, int height, const qo100::ChatState & state,
+                    const std::string & nick, const std::string & message,
+                    ChatInput active_input, bool symbols, bool shifted,
+                    size_t & first_visible, size_t & last_visible,
+                    bool & follow_latest)
+{
+    set_colour(renderer, kBackground);
+    const SDL_Rect screen{0, 0, width, height};
+    SDL_RenderFillRect(renderer, &screen);
+    text.draw("QO-100 WIDEBAND CHAT", 12, 12, kCyan, 20);
+    const char * status = state.connection == qo100::ChatState::Connection::Connected
+        ? "CONNECTED" : (state.connection == qo100::ChatState::Connection::Reconnecting
+            ? "RECONNECTING..." : "CONNECTING...");
+    const Colour status_colour = state.connection == qo100::ChatState::Connection::Connected
+        ? kGreen : kYellow;
+    text.draw(status, 330, 17, status_colour, 14);
+    text.draw("VIEWERS: " + state.viewers, width - 260, 17, kTextDim, 14);
+    draw_button(renderer, text, page_back_rect(width), "BACK", kCyan);
+
+    const bool keyboard_open = active_input != ChatInput::None;
+    const int content_bottom = keyboard_open ? height - 316 : height - 68;
+    const SDL_Rect history = chat_history_rect(width, height, keyboard_open);
+    const SDL_Rect users{width - 218, 48, 210, content_bottom - 48};
+    draw_chat_history(renderer, text, history, state,
+                      first_visible, last_visible, follow_latest);
+    set_colour(renderer, {0x3f, 0x46, 0x4c});
+    SDL_RenderFillRect(renderer, &users);
+    set_colour(renderer, kBorder);
+    SDL_RenderDrawRect(renderer, &users);
+    text.draw("ONLINE", users.x + 10, users.y + 8, kYellow, 16);
+    const size_t max_users = users.h > 40 ? static_cast<size_t>((users.h - 40) / 22) : 0U;
+    for(size_t index = 0; index < std::min(max_users, state.users.size()); ++index)
+        text.draw(state.users[index], users.x + 10, users.y + 34 +
+                  static_cast<int>(index) * 22, kText, 16);
+
+    draw_text_input(renderer, text, chat_nick_rect(height, keyboard_open),
+                    nick, "CALLSIGN", active_input == ChatInput::Nick);
+    draw_button(renderer, text, chat_set_rect(height, keyboard_open), "SET", kYellow);
+    draw_text_input(renderer, text, chat_message_rect(width, height, keyboard_open),
+                    message, "Type a message...", active_input == ChatInput::Message);
+    draw_button(renderer, text, chat_send_rect(width, height, keyboard_open),
+                "SEND", kCyan);
+    if(keyboard_open) draw_keyboard(renderer, text, width, height, symbols, shifted);
+}
+
+void erase_last_utf8(std::string & value)
+{
+    if(value.empty()) return;
+    size_t position = value.size() - 1;
+    while(position > 0 &&
+          (static_cast<unsigned char>(value[position]) & 0xc0U) == 0x80U) --position;
+    value.erase(position);
+}
+
+void draw_video_notice(TextCache & text, const SDL_Rect & bounds, VideoNotice notice,
+                       double elapsed_seconds)
+{
+    const char * message = nullptr;
+    Colour colour = kYellow;
+    switch(notice) {
+        case VideoNotice::WaitingForTuner:
+            message = "WAITING FOR TUNER";
+            break;
+        case VideoNotice::Tuning:
+            message = "WAIT - TUNING";
+            break;
+        case VideoNotice::NoVideoStream:
+            message = "NO VIDEO STREAM";
+            colour = kRed;
+            break;
+        case VideoNotice::None:
+            return;
+    }
+
+    const int centre_x = bounds.x + bounds.w / 2;
+    const int centre_y = bounds.y + bounds.h / 2;
+    /* A steady message never visibly changes over a long search, which
+     * reads as "frozen" even though the app is fine underneath - so pulse
+     * the colour and show a running mm:ss so it's obvious time is passing
+     * and the app is still actively retrying, not hung. */
+    const float pulse = 0.5F + 0.5F * static_cast<float>(
+        std::sin(elapsed_seconds * 2.0));
+    const Colour pulsing_colour = mix_colour(colour, kTextDim, pulse * 0.5F);
+    text.draw(message, centre_x + 2, centre_y + 2, {0, 0, 0}, 20, true);
+    text.draw(message, centre_x, centre_y, pulsing_colour, 20, true);
+
+    const int elapsed_total = static_cast<int>(elapsed_seconds);
+    char elapsed_text[16];
+    std::snprintf(elapsed_text, sizeof(elapsed_text), "%d:%02d",
+                  elapsed_total / 60, elapsed_total % 60);
+    text.draw(elapsed_text, centre_x + 1, centre_y + 27, {0, 0, 0}, 14, true);
+    text.draw(elapsed_text, centre_x, centre_y + 26, kTextDim, 14, true);
+}
+
+/* Shared by status_button_rect and status_row_height so they can't drift
+ * apart - kStatusButtonBlockH is the button height plus the margin above
+ * it. Shrunk from 54/65 to free up room for a less-squeezed VU meter. */
+constexpr int kStatusButtonHeight = 46;
+constexpr int kStatusButtonBlockH = 57;
+constexpr int kVolRowH = 20;
+constexpr int kVuRowH = 22;
+
+SDL_Rect status_button_rect(const Layout & layout, int index)
+{
+    constexpr int gap = 8;
+    constexpr int margin = 8;
+    const int button_width = (layout.status_panel.w - 2 * margin - 4 * gap) / 5;
+    const int button_y = layout.status_panel.y + layout.status_panel.h - kStatusButtonBlockH;
+    return {layout.status_panel.x + margin + index * (button_width + gap),
+            button_y, button_width, kStatusButtonHeight};
+}
+
+/* The volume slider track - shared by drawing (draw_status) and hit-testing
+ * (touch/mouse handling), so they can't drift apart. */
+/* Status grid row height, sized to whatever's actually left in the panel
+ * after the fixed-height rows below it (VOL bar, VU meter, button block) -
+ * rather than a fixed formula that can outgrow the panel at smaller
+ * resolutions and push the button row off the bottom (observed at 800x480:
+ * the VU meter and SNAP/CHAT/... buttons overlapped by a few pixels). */
+int status_row_height(const Layout & layout)
+{
+    constexpr int kRowCount = 6;
+    constexpr int kTopPad = 8;
+    const int available = layout.status_panel.h - kTopPad - kVolRowH - kVuRowH - kStatusButtonBlockH;
+    return std::clamp(available / kRowCount, 16, 30);
+}
+
+SDL_Rect volume_track_rect(const Layout & layout)
+{
+    constexpr int kRowCount = 6;
+    const int row_height = status_row_height(layout);
+    const int grid_bottom = layout.status_panel.y + 8 + kRowCount * row_height;
+    return {layout.status_panel.x + 50, grid_bottom + 6,
+            layout.status_panel.w - 105, 7};
+}
+
+int volume_from_x(const SDL_Rect & track, int x)
+{
+    return std::clamp((x - track.x) * 100 / track.w, 0, 100);
 }
 
 struct ModcodEntry { const char * modulation; const char * fec; };
@@ -880,11 +1804,23 @@ bool required_mer(const qo100::ReceiverStatus & status, double & value)
 struct StatusField {
     std::string value;
     Colour colour = kTextDim;
+    std::string unit;
+    /* Only meaningful when unit is empty - right-align to the same edge as
+     * the numeric fields above/below it instead of the default flush-left,
+     * so e.g. "Quality" lines up with Freq/IF/SR/MER/Margin's right edge
+     * rather than drifting depending on word length ("Poor" vs "Excellent"). */
+    bool right_align = false;
 };
 
 void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layout,
-                 int volume_percent, const qo100::ReceiverStatus & receiver,
-                 bool monitor_connected, const std::string & video_codec)
+                 int volume_percent, int audio_peak_percent,
+                 const qo100::ReceiverStatus & receiver,
+                 bool monitor_connected, bool status_received,
+                 double tuned_frequency_mhz, long tuned_if_khz,
+                 long tuned_symbol_rate_ksps,
+                 const std::string & video_codec,
+                 const std::string & audio_codec,
+                 bool scan_active)
 {
     fill_panel(renderer, layout.status_panel);
     const bool locked = receiver.locked();
@@ -912,65 +1848,109 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
 
     char mer_text[24] = "---";
     char margin_text[24] = "---";
-    char agc_text[24] = "---";
     char ber_text[24] = "---";
-    char ldpc_text[24] = "---";
+    char modfec_text[24] = "---";
+    char null_text[24] = "---";
     if(locked) {
-        std::snprintf(mer_text, sizeof(mer_text), "%.1f dB", receiver.mer_x10 / 10.0);
-        const double agc_percent = ((receiver.agc1 + receiver.agc2) / 2.0) / 65535.0 * 100.0;
-        std::snprintf(agc_text, sizeof(agc_text), "%.0f%%", agc_percent);
+        std::snprintf(mer_text, sizeof(mer_text), "%.1f", receiver.mer_x10 / 10.0);
         std::snprintf(ber_text, sizeof(ber_text), "%.2f%%", receiver.ber_x100 / 100.0);
-        if(receiver.demod_state == 4)
-            std::snprintf(ldpc_text, sizeof(ldpc_text), "%ld", receiver.ldpc_errors);
     }
-    if(have_threshold) std::snprintf(margin_text, sizeof(margin_text), "%+.1f dB", mer_margin);
+    if(have_threshold) std::snprintf(margin_text, sizeof(margin_text), "%+.1f", mer_margin);
+    if(modcod != nullptr)
+        std::snprintf(modfec_text, sizeof(modfec_text), "%s %s", modcod->modulation, modcod->fec);
+    if(locked && receiver.null_packet_percent >= 0)
+        std::snprintf(null_text, sizeof(null_text), "%d%%", receiver.null_packet_percent);
 
     const std::string service = !receiver.service_name.empty()
         ? receiver.service_name : receiver.service_provider;
-    const char * frame_type = locked && receiver.demod_state == 4 && receiver.short_frames >= 0
-        ? (receiver.short_frames ? "Short" : "Normal") : "---";
-    const char * pilots = locked && receiver.demod_state == 4 && receiver.pilots >= 0
-        ? (receiver.pilots ? "On" : "Off") : "---";
+
+    char frequency_text[32];
+    char if_frequency_text[32];
+    char symbol_rate_text[24];
+    std::snprintf(frequency_text, sizeof(frequency_text), "%.3f", tuned_frequency_mhz);
+    const long displayed_if_khz = locked && receiver.carrier_khz > 0
+        ? receiver.carrier_khz : tuned_if_khz;
+    std::snprintf(if_frequency_text, sizeof(if_frequency_text), "%.3f",
+                  displayed_if_khz / 1000.0);
+    std::snprintf(symbol_rate_text, sizeof(symbol_rate_text), "%ld", tuned_symbol_rate_ksps);
+    (void)monitor_connected;
+    (void)status_received;
 
     const StatusField left[] = {
-        {locked ? (receiver.demod_state == 4 ? "DVB-S2" : "DVB-S")
-                : (monitor_connected ? "---" : "NO LINK"), locked ? kText : (monitor_connected ? kTextDim : kRed)},
-        {mer_text, locked ? (have_threshold ? quality_colour : kText) : kTextDim},
-        {quality, quality_colour},
-        {margin_text, have_threshold ? quality_colour : kTextDim},
-        {agc_text, locked ? kGreen : kTextDim},
-        {modcod != nullptr ? modcod->fec : "---", modcod != nullptr ? kText : kTextDim},
-        {modcod != nullptr ? modcod->modulation : "---", modcod != nullptr ? kText : kTextDim}
+        {frequency_text, kText, "MHz"},
+        {if_frequency_text, kText, "MHz"},
+        {symbol_rate_text, kText, "kS/s"},
+        {mer_text, locked ? (have_threshold ? quality_colour : kText) : kTextDim,
+            locked ? "dB" : ""},
+        {quality, quality_colour, "", true},
+        {margin_text, have_threshold ? quality_colour : kTextDim, have_threshold ? "dB" : ""}
     };
     const StatusField right[] = {
-        {locked && !service.empty() ? service : "---", locked && !service.empty() ? kGreen : kTextDim},
-        {video_codec.empty() ? "---" : video_codec, video_codec.empty() ? kTextDim : kText},
-        {"---", kTextDim},
-        {ber_text, locked ? kText : kTextDim},
-        {ldpc_text, locked && receiver.demod_state == 4 ? kText : kTextDim},
-        {frame_type, locked && receiver.demod_state == 4 ? kText : kTextDim},
-        {pilots, locked && receiver.demod_state == 4 ? kText : kTextDim}
+        {locked && !service.empty() ? service : "---", locked && !service.empty() ? kGreen : kTextDim, ""},
+        {video_codec.empty() ? "---" : video_codec, video_codec.empty() ? kTextDim : kText, ""},
+        {audio_codec.empty() ? "---" : audio_codec, audio_codec.empty() ? kTextDim : kText, ""},
+        {modfec_text, modcod != nullptr ? kText : kTextDim, ""},
+        {null_text, locked && receiver.null_packet_percent >= 0 ? kText : kTextDim, ""},
+        {ber_text, locked ? kText : kTextDim, ""}
     };
-    static const char * left_labels[] = {"Mode", "MER", "Quality", "Margin", "AGC", "FEC", "MOD"};
-    static const char * right_labels[] = {"Service", "Video", "Audio", "BER", "LDPC", "Frames", "Pilots"};
-    const int row_height = std::clamp(layout.status_panel.h * 24 / 301, 18, 24);
+    static const char * left_labels[] = {
+        "Freq", "IF", "SR", "MER", "Quality", "Margin"
+    };
+    static const char * right_labels[] = {
+        "Service", "Video", "Audio", "MOD/FEC", "Null", "BER"
+    };
+    const int row_height = status_row_height(layout);
     const int left_x = layout.status_panel.x + 10;
-    const int right_x = layout.status_panel.x + layout.status_panel.w / 2 + 8;
-    for(int i = 0; i < 7; ++i) {
+    /* Column x-positions and value-column widths scale with the panel's
+     * actual width rather than a fixed pixel layout - at 1024x600 this
+     * panel is ~475px wide (the reference these proportions were tuned
+     * against); at 800x480 it's only ~368px, and the old fixed offsets put
+     * the right column's labels on top of the left column's values. Only
+     * 14/16/20/32 are preloaded fonts (see TextCache::load_font calls), so
+     * the narrower size below has to be one of those, not something
+     * in-between. */
+    constexpr int kReferencePanelW = 475;
+    const bool narrow = layout.status_panel.w < 420;
+    const int kFontSize = narrow ? 14 : 16;
+    const int right_x = layout.status_panel.x +
+        layout.status_panel.w * 261 / kReferencePanelW;
+    constexpr int kRowCount = 6;
+    const int kValueX = layout.status_panel.w * 95 / kReferencePanelW;
+    const int kNumberColumnWidth = layout.status_panel.w * 82 / kReferencePanelW;
+    const int kUnitGap = std::max(4, layout.status_panel.w * 8 / kReferencePanelW);
+    const auto draw_value = [&](const StatusField & field, int column_x, int y) {
+        if(field.unit.empty()) {
+            if(field.right_align) {
+                const auto [text_w, text_h] = text.measure(field.value, kFontSize);
+                (void)text_h;
+                text.draw(field.value, column_x + kValueX + kNumberColumnWidth - text_w,
+                          y, field.colour, kFontSize);
+            }
+            else {
+                text.draw(field.value, column_x + kValueX, y, field.colour, kFontSize);
+            }
+            return;
+        }
+        const int number_right = column_x + kValueX + kNumberColumnWidth;
+        const auto [number_w, number_h] = text.measure(field.value, kFontSize);
+        (void)number_h;
+        text.draw(field.value, number_right - number_w, y, field.colour, kFontSize);
+        text.draw(field.unit, number_right + kUnitGap, y, kTextDim, kFontSize);
+    };
+    for(int i = 0; i < kRowCount; ++i) {
         const int y = layout.status_panel.y + 8 + i * row_height;
-        text.draw(left_labels[i], left_x, y, kTextDim);
-        text.draw(left[i].value, left_x + 90, y, left[i].colour);
-        text.draw(right_labels[i], right_x, y, kTextDim);
-        text.draw(right[i].value, right_x + 90, y, right[i].colour);
+        text.draw(left_labels[i], left_x, y, kTextDim, kFontSize);
+        draw_value(left[i], left_x, y);
+        text.draw(right_labels[i], right_x, y, kTextDim, kFontSize);
+        draw_value(right[i], right_x, y);
     }
 
-    const int grid_bottom = layout.status_panel.y + 8 + 7 * row_height;
+    const int grid_bottom = layout.status_panel.y + 8 + kRowCount * row_height;
     text.draw("VOL", left_x, grid_bottom, kTextDim);
     text.draw(std::to_string(volume_percent) + "%",
               layout.status_panel.x + layout.status_panel.w - 46,
               grid_bottom, kText);
-    SDL_Rect track{layout.status_panel.x + 50, grid_bottom + 6,
-                   layout.status_panel.w - 105, 7};
+    const SDL_Rect track = volume_track_rect(layout);
     set_colour(renderer, kBorder);
     SDL_RenderFillRect(renderer, &track);
     SDL_Rect filled = track;
@@ -978,23 +1958,45 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     set_colour(renderer, {0x2b, 0x8e, 0xa3});
     SDL_RenderFillRect(renderer, &filled);
     set_colour(renderer, {0x65, 0xb7, 0xc7});
+    constexpr int kVolumeKnobRadius = 7;
     const int knob_x = track.x + filled.w;
-    for(int y = -7; y <= 7; ++y) {
-        const int half = static_cast<int>(std::sqrt(49 - y * y));
+    for(int y = -kVolumeKnobRadius; y <= kVolumeKnobRadius; ++y) {
+        const int half = static_cast<int>(
+            std::sqrt(kVolumeKnobRadius * kVolumeKnobRadius - y * y));
         SDL_RenderDrawLine(renderer, knob_x - half, track.y + 3 + y,
                            knob_x + half, track.y + 3 + y);
     }
 
-    constexpr int gap = 8;
-    constexpr int margin = 8;
-    const int button_width = (layout.status_panel.w - 2 * margin - 4 * gap) / 5;
-    const int button_y = layout.status_panel.y + layout.status_panel.h - 65;
+    /* VU meter: fast attack (jumps straight to a new louder peak), slow
+     * release (decays a few points per frame) - a raw per-callback peak
+     * would just flicker. Its right edge tracks the volume knob's 3-o'clock
+     * edge rather than always spanning the full track, so it visually reads
+     * as "how loud, out of what the volume slider currently allows" instead
+     * of implying headroom past where the volume is actually set. */
+    static int displayed_peak = 0;
+    displayed_peak = std::max(audio_peak_percent, displayed_peak - 3);
+    const int vu_row_y = grid_bottom + kVolRowH;
+    text.draw("VU", left_x, vu_row_y, kTextDim);
+    constexpr int kVuSegments = 20;
+    constexpr int kVuGap = 3;
+    const int vu_row_w = std::min(track.w, filled.w + kVolumeKnobRadius);
+    const int vu_segment_w = (vu_row_w - (kVuSegments - 1) * kVuGap) / kVuSegments;
+    const SDL_Rect vu_row{track.x, vu_row_y, vu_row_w, 14};
+    const int lit_segments = (displayed_peak * kVuSegments + 99) / 100;
+    for(int i = 0; i < kVuSegments; ++i) {
+        const Colour segment_colour = i >= kVuSegments * 9 / 10 ? kRed
+            : i >= kVuSegments * 7 / 10 ? kYellow : kGreen;
+        set_colour(renderer, i < lit_segments ? segment_colour : kBorder);
+        const SDL_Rect segment{vu_row.x + i * (vu_segment_w + kVuGap), vu_row.y,
+                               vu_segment_w, vu_row.h};
+        SDL_RenderFillRect(renderer, &segment);
+    }
+
     const char * labels[] = {"SNAP", "CHAT", "SET", "SCAN", "EXIT"};
     const Colour colours[] = {kGreen, kCyan, kYellow, kPurple, kRed};
     for(int i = 0; i < 5; ++i) {
-        SDL_Rect button{layout.status_panel.x + margin + i * (button_width + gap),
-                        button_y, button_width, 54};
-        draw_button(renderer, text, button, labels[i], colours[i]);
+        draw_button(renderer, text, status_button_rect(layout, i),
+                    labels[i], colours[i], 16, i == 3 && scan_active);
     }
 }
 
@@ -1052,9 +2054,30 @@ bool save_screenshot(SDL_Renderer * renderer, int width, int height, const std::
     const int result = SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_ARGB8888,
                                             surface->pixels, surface->pitch);
     const bool saved = result == 0 && SDL_SaveBMP(surface, path.c_str()) == 0;
-    if(!saved) std::fprintf(stderr, "[SCREENSHOT] %s\n", SDL_GetError());
+    if(!saved) qo100::log("[SCREENSHOT] %s\n", SDL_GetError());
     SDL_FreeSurface(surface);
     return saved;
+}
+
+bool save_display_screenshot(const std::string & path)
+{
+    const pid_t child = fork();
+    if(child == 0) {
+        execlp("grim", "grim", path.c_str(), static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    if(child < 0) {
+        qo100::log("[SCREENSHOT] could not start grim: %s\n", std::strerror(errno));
+        return false;
+    }
+
+    int status = 0;
+    while(waitpid(child, &status, 0) < 0) {
+        if(errno == EINTR) continue;
+        qo100::log("[SCREENSHOT] could not wait for grim: %s\n", std::strerror(errno));
+        return false;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 struct Options {
@@ -1082,18 +2105,106 @@ Options parse_options(int argc, char ** argv)
     return options;
 }
 
+std::string read_first_line(const std::string & path)
+{
+    std::ifstream file(path);
+    std::string line;
+    if(file) std::getline(file, line);
+    while(!line.empty() && (line.back() == '\0' || line.back() == '\n'))
+        line.pop_back();
+    return line;
+}
+
+std::string read_proc_field(const std::string & path, const std::string & key)
+{
+    std::ifstream file(path);
+    std::string line;
+    while(file && std::getline(file, line))
+        if(line.rfind(key, 0) == 0) return line;
+    return {};
+}
+
+/* Resident memory of this process, for spotting a slow leak over a long
+ * unattended run (e.g. an unbounded cache) that a single boot-time
+ * snapshot can't show. */
+long process_rss_kb()
+{
+    const std::string field = read_proc_field("/proc/self/status", "VmRSS:");
+    long kb = 0;
+    std::sscanf(field.c_str(), "VmRSS: %ld", &kb);
+    return kb;
+}
+
+double cpu_temperature_c()
+{
+    std::ifstream file("/sys/class/thermal/thermal_zone0/temp");
+    long millidegrees = -1;
+    if(file) file >> millidegrees;
+    return millidegrees > 0 ? millidegrees / 1000.0 : -1.0;
+}
+
+void log_startup_banner()
+{
+    const std::time_t now = std::time(nullptr);
+    char time_buffer[64]{};
+    std::strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S %Z",
+                  std::localtime(&now));
+
+    utsname system_info{};
+    uname(&system_info);
+    char hostname[256]{};
+    gethostname(hostname, sizeof(hostname));
+
+    const std::string model = read_first_line("/proc/device-tree/model");
+    const std::string mem_total = read_proc_field("/proc/meminfo", "MemTotal");
+    const std::string rmem_max = read_first_line("/proc/sys/net/core/rmem_max");
+    const std::string rmem_default = read_first_line("/proc/sys/net/core/rmem_default");
+
+    double uptime_seconds = 0.0;
+    {
+        std::ifstream file("/proc/uptime");
+        if(file) file >> uptime_seconds;
+    }
+    long temp_millidegrees = -1;
+    {
+        std::ifstream file("/sys/class/thermal/thermal_zone0/temp");
+        if(file) file >> temp_millidegrees;
+    }
+
+    qo100::log(
+        "==================== QO-100 SDL RECEIVER ====================\n");
+    qo100::log("[BOOT] started %s  host=%s\n", time_buffer, hostname);
+    qo100::log("[BOOT] %s\n", model.empty() ? "board model unknown" : model.c_str());
+    qo100::log("[BOOT] kernel=%s %s arch=%s\n",
+        system_info.sysname, system_info.release, system_info.machine);
+    qo100::log("[BOOT] cpus=%ld  %s\n",
+        static_cast<long>(sysconf(_SC_NPROCESSORS_ONLN)),
+        mem_total.empty() ? "MemTotal unknown" : mem_total.c_str());
+    char temp_text[16] = "unknown";
+    if(temp_millidegrees > 0)
+        std::snprintf(temp_text, sizeof(temp_text), "%.1fC", temp_millidegrees / 1000.0);
+    qo100::log("[BOOT] system uptime=%.0fs  cpu_temp=%s\n", uptime_seconds, temp_text);
+    qo100::log("[BOOT] net.core.rmem_max=%s  rmem_default=%s\n",
+        rmem_max.empty() ? "?" : rmem_max.c_str(),
+        rmem_default.empty() ? "?" : rmem_default.c_str());
+    qo100::log(
+        "===============================================================\n");
+}
+
 } // namespace
 
 int main(int argc, char ** argv)
 {
+    qo100::reset_log_clock();
+    log_startup_banner();
     const Options options = parse_options(argc, argv);
     const DisplayConfig display = resolve_display_config(!options.screenshot.empty());
     if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
-        std::fprintf(stderr, "[SDL] init failed: %s\n", SDL_GetError());
+        qo100::log("[SDL] init failed: %s\n", SDL_GetError());
         return 1;
     }
     if(TTF_Init() != 0) {
-        std::fprintf(stderr, "[TTF] init failed: %s\n", TTF_GetError());
+        qo100::log("[TTF] init failed: %s\n", TTF_GetError());
         SDL_Quit();
         return 1;
     }
@@ -1104,7 +2215,7 @@ int main(int argc, char ** argv)
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         display.width, display.height, window_flags);
     if(window == nullptr) {
-        std::fprintf(stderr, "[SDL] window failed: %s\n", SDL_GetError());
+        qo100::log("[SDL] window failed: %s\n", SDL_GetError());
         TTF_Quit();
         SDL_Quit();
         return 1;
@@ -1116,16 +2227,17 @@ int main(int argc, char ** argv)
     if(renderer == nullptr && renderer_flags != SDL_RENDERER_SOFTWARE)
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if(renderer == nullptr) {
-        std::fprintf(stderr, "[SDL] renderer failed: %s\n", SDL_GetError());
+        qo100::log("[SDL] renderer failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(window);
         TTF_Quit();
         SDL_Quit();
         return 1;
     }
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     SDL_RendererInfo renderer_info{};
     SDL_GetRendererInfo(renderer, &renderer_info);
-    std::fprintf(stderr, "[SDL] renderer=%s accelerated=%s vsync=%s display=%dx%d\n",
+    qo100::log("[SDL] renderer=%s accelerated=%s vsync=%s display=%dx%d\n",
         renderer_info.name != nullptr ? renderer_info.name : "unknown",
         (renderer_info.flags & SDL_RENDERER_ACCELERATED) ? "yes" : "no",
         (renderer_info.flags & SDL_RENDERER_PRESENTVSYNC) ? "yes" : "no",
@@ -1145,12 +2257,12 @@ int main(int argc, char ** argv)
 
     const Layout layout(display.width, display.height);
     const std::string repository_root = repository_directory();
-    const qo100::ReceiverSettings receiver_settings =
+    qo100::ReceiverSettings receiver_settings =
         qo100::load_receiver_settings(repository_root);
     auto spectrum_texture = std::make_unique<SpectrumTexture>(
         renderer, layout.spectrum_plot.w, layout.spectrum_plot.h);
     if(!spectrum_texture->valid()) {
-        std::fprintf(stderr, "[SPECTRUM] texture failed: %s\n", SDL_GetError());
+        qo100::log("[SPECTRUM] texture failed: %s\n", SDL_GetError());
         return 1;
     }
 
@@ -1167,6 +2279,8 @@ int main(int argc, char ** argv)
     else {
         spectrum_feed.start();
     }
+    qo100::ChatClient chat_client;
+    chat_client.start();
 
     SDL_Texture * video_texture = nullptr;
     int video_source_width = 0;
@@ -1174,8 +2288,29 @@ int main(int argc, char ** argv)
 
     VideoScheduler scheduler;
     const bool use_tuner = !options.no_tuner && !options.demo;
+    std::string tuner_product = use_tuner
+        ? detect_tuner_product_string() : std::string{};
+    TunerPopupKind tuner_popup = !use_tuner
+        ? TunerPopupKind::None
+        : (tuner_product.empty()
+            ? TunerPopupKind::NotFound : TunerPopupKind::Detected);
+    if(use_tuner) {
+        if(tuner_product.empty())
+            qo100::log("[TUNER_USB] no MiniTiouner detected (VID:PID 0403:6010)\n");
+        else
+            qo100::log("[TUNER_USB] detected product=%s\n", tuner_product.c_str());
+    }
+    int volume_percent = std::clamp(receiver_settings.audio_volume_percent, 0, 100);
+    AudioOutput audio_output;
+    if(use_tuner) {
+        if(SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
+            qo100::log("[AUDIO] SDL initialization failed: %s\n", SDL_GetError());
+        else audio_output.open(volume_percent);
+    }
     qo100::VideoDecoder video_decoder([&scheduler](VideoFrame && frame) {
         scheduler.push(std::move(frame));
+    }, [&audio_output](qo100::AudioChunk && chunk) {
+        audio_output.push(std::move(chunk));
     });
     if(use_tuner) video_decoder.start();
 
@@ -1194,7 +2329,28 @@ int main(int argc, char ** argv)
     }
     qo100::ReceiverStatus receiver_status;
     bool receiver_was_locked = false;
+    /* longmynd's websocket status has only a single latest-message slot, not
+     * a queue (see LongmyndClient::on_monitor) - right after retuning, one
+     * message already in flight when the tune command landed can still
+     * describe the *previous* signal (still locked, old service name) and
+     * briefly overwrite the fresh reset() below before genuinely new status
+     * arrives. Discard any "still locked" report until we've seen at least
+     * one real unlocked report since the tune - that unlocked report proves
+     * we're finally seeing status generated after the retune took effect. */
+    bool awaiting_post_tune_unlock = false;
     auto last_tune = Clock::time_point{};
+    auto last_spectrum_click = Clock::time_point{};
+    bool beacon_return_armed = false;
+    auto beacon_return_deadline = Clock::time_point{};
+    constexpr auto kBeaconReturnDelay = std::chrono::milliseconds(2500);
+    long current_tune_if_khz = beacon_frequency_khz;
+    long current_tune_symbol_rate_ksps = beacon_symbol_rate_ksps;
+    struct PendingTune {
+        double frequency_mhz;
+        long if_khz;
+        long symbol_rate_ksps;
+    };
+    std::optional<PendingTune> pending_tune;
 
     std::atomic<bool> producer_running{options.demo};
     std::thread producer;
@@ -1213,12 +2369,94 @@ int main(int argc, char ** argv)
     }
 
     bool running = true;
+    AppPage app_page = AppPage::Main;
     bool fullscreen_video = false;
-    int volume_percent = std::clamp(receiver_settings.audio_volume_percent, 0, 100);
     bool have_video_frame = false;
+    int settings_lo_mhz = static_cast<int>(std::lround(receiver_settings.lnb_lo_mhz));
+    int settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
+        ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
+    int settings_display_choice = receiver_settings.display_800x480 ? 1 : 0;
+    bool settings_saved = false;
+    std::string chat_nick;
+    std::string chat_message;
+    ChatInput chat_input = ChatInput::None;
+    bool chat_symbols = false;
+    bool chat_shifted = false;
+    size_t chat_first_visible = 0;
+    size_t chat_last_visible = 0;
+    bool chat_follow_latest = true;
+    bool chat_history_dragging = false;
+    bool chat_history_drag_moved = false;
+    int chat_drag_start_y = 0;
+    bool volume_dragging = false;
+    size_t chat_drag_start_first = 0;
     double selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
                                     beacon_frequency_khz / 1000.0;
+    SpectrumMarker spectrum_marker{
+        SpectrumMarkerKind::Tune, selected_frequency_mhz, Clock::time_point{}};
+    bool scan_active = false;
+    bool scan_awaiting_signal = false;
+    bool scan_parked_on_beacon = false;
+    double scan_current_freq_mhz = selected_frequency_mhz;
+    auto scan_dwell_deadline = Clock::time_point{};
+    auto scan_idle_since = Clock::time_point{};
+    auto scan_locked_at = Clock::time_point{};
+    auto scan_tuned_at = Clock::time_point{};
+    constexpr auto kScanMaxDwell = std::chrono::seconds(30);
+    constexpr auto kScanBeaconReturnDelay = std::chrono::seconds(60);
+    constexpr double kScanBeaconGuardMhz = 0.1;
+    /* Some detected signals are too marginal to ever hold lock (narrowband
+     * QO-100 DATV stations right at the noise floor) - without this, scan
+     * revisits them at the same priority as everything else forever, so a
+     * handful of flickering signals can dominate scan time indefinitely
+     * (observed: one 3-hour trial spent ~94% of its time cycling the same
+     * ~10 frequencies). A frequency only cools down after repeatedly
+     * failing to hold, not on a single drop (could just be bad luck), and
+     * the cooldown is short enough that a genuinely new/better signal
+     * showing up on the same slot shortly after isn't locked out for long. */
+    struct ScanCooldown { double frequency_mhz; int fast_loss_streak; Clock::time_point cooldown_until; };
+    std::vector<ScanCooldown> scan_cooldowns;
+    constexpr double kScanCooldownMatchMhz = 0.05;
+    constexpr int kScanFastLossThreshold = 3;
+    constexpr auto kScanFastLossWindow = std::chrono::seconds(5);
+    constexpr auto kScanCooldownDuration = std::chrono::seconds(150);
+    const auto scan_note_lock_result = [&](double frequency_mhz, bool held_long_enough) {
+        auto entry = std::find_if(scan_cooldowns.begin(), scan_cooldowns.end(),
+            [&](const ScanCooldown & c) {
+                return std::abs(c.frequency_mhz - frequency_mhz) < kScanCooldownMatchMhz;
+            });
+        if(entry == scan_cooldowns.end()) {
+            if(held_long_enough) return;
+            scan_cooldowns.push_back({frequency_mhz, 1, Clock::time_point{}});
+            return;
+        }
+        if(held_long_enough) {
+            entry->fast_loss_streak = 0;
+            entry->cooldown_until = Clock::time_point{};
+            return;
+        }
+        ++entry->fast_loss_streak;
+        if(entry->fast_loss_streak >= kScanFastLossThreshold) {
+            entry->cooldown_until = Clock::now() + kScanCooldownDuration;
+            qo100::log("[SCAN] %.3fMHz failed to hold lock %d times in a row; "
+                       "cooling down for %llds\n", frequency_mhz,
+                       entry->fast_loss_streak,
+                       static_cast<long long>(kScanCooldownDuration.count()));
+        }
+    };
+    const auto scan_on_cooldown = [&](double frequency_mhz) {
+        const auto entry = std::find_if(scan_cooldowns.begin(), scan_cooldowns.end(),
+            [&](const ScanCooldown & c) {
+                return std::abs(c.frequency_mhz - frequency_mhz) < kScanCooldownMatchMhz;
+            });
+        return entry != scan_cooldowns.end() && Clock::now() < entry->cooldown_until;
+    };
     const auto run_started = Clock::now();
+    const auto tuner_popup_started_at = run_started;
+    VideoNotice video_notice = use_tuner ? VideoNotice::Tuning : VideoNotice::None;
+    auto video_notice_started_at = run_started;
+    auto last_video_frame_at = run_started;
+    uint64_t tune_reopen_before = 0;
     auto last_stats = run_started;
     auto last_present_wall = Clock::time_point{};
     int64_t interval_max_gap_us = 0;
@@ -1226,21 +2464,427 @@ int main(int argc, char ** argv)
     uint64_t previous_presented = 0;
     uint64_t previous_queue_drops = 0;
     uint64_t previous_late_drops = 0;
+    const auto apply_tune = [&](const PendingTune & tune, bool was_queued) {
+        last_tune = Clock::now();
+        scan_tuned_at = last_tune;
+        awaiting_post_tune_unlock = true;
+        beacon_return_armed = false;
+        selected_frequency_mhz = tune.frequency_mhz;
+        current_tune_if_khz = tune.if_khz;
+        current_tune_symbol_rate_ksps = tune.symbol_rate_ksps;
+        spectrum_marker = {
+            SpectrumMarkerKind::Tune,
+            selected_frequency_mhz,
+            Clock::time_point{}};
+        receiver_status.reset();
+        scheduler.reset();
+        have_video_frame = false;
+        video_notice = VideoNotice::Tuning;
+        video_notice_started_at = Clock::now();
+        tune_reopen_before = video_decoder.reopen_count();
+        video_decoder.request_reset();
+        audio_output.reset();
+        receiver_client.send_tune(tune.if_khz, tune.symbol_rate_ksps);
+        qo100::log(
+            "[TUNE] %s%.3fMHz -> IF=%ldkHz SR=%ldkS/s\n",
+            was_queued ? "sending queued " : "",
+            selected_frequency_mhz, tune.if_khz, tune.symbol_rate_ksps);
+    };
+    /* Steps through detected signals above the beacon, ascending, wrapping
+     * back to the lowest once nothing further up is currently detected.
+     * Re-reads spectrum_texture->signals() fresh each call rather than
+     * tracking an index, since detections can appear/disappear between
+     * scan steps. */
+    const auto scan_advance = [&] {
+        if(!scan_active) return;
+        const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+                                  beacon_frequency_khz / 1000.0;
+        /* Two passes: prefer signals that aren't cooling down, but if every
+         * detected signal currently is (a band full of marginal stations),
+         * fall back to considering all of them rather than sitting idle -
+         * by the time a full lap comes back around, the earliest cooldowns
+         * will likely have expired anyway. */
+        const DetectedSignal * target = nullptr;
+        for(const bool respect_cooldown : {true, false}) {
+            const DetectedSignal * next = nullptr;
+            const DetectedSignal * lowest = nullptr;
+            for(const auto & signal : spectrum_texture->signals()) {
+                if(signal.frequency_mhz <= beacon_mhz + kScanBeaconGuardMhz) continue;
+                if(respect_cooldown && scan_on_cooldown(signal.frequency_mhz)) continue;
+                if(lowest == nullptr || signal.frequency_mhz < lowest->frequency_mhz)
+                    lowest = &signal;
+                if(signal.frequency_mhz > scan_current_freq_mhz &&
+                   (next == nullptr || signal.frequency_mhz < next->frequency_mhz))
+                    next = &signal;
+            }
+            target = next != nullptr ? next : lowest;
+            if(target != nullptr) break;
+        }
+        if(target == nullptr) {
+            qo100::log(
+                "[SCAN] nothing detected above the beacon; retrying shortly\n");
+            scan_dwell_deadline = Clock::now() + std::chrono::seconds(2);
+            if(!scan_awaiting_signal) scan_idle_since = Clock::now();
+            scan_awaiting_signal = true;
+            /* Nothing to watch for a while - park on the always-on beacon
+             * instead of sitting on a dead frequency showing nothing, but
+             * keep scanning in the background so it jumps off as soon as
+             * a real signal reappears. */
+            if(!scan_parked_on_beacon &&
+               Clock::now() - scan_idle_since >= kScanBeaconReturnDelay) {
+                scan_parked_on_beacon = true;
+                qo100::log(
+                    "[SCAN] no signal for %llds; returning to beacon while still searching\n",
+                    static_cast<long long>(kScanBeaconReturnDelay.count()));
+                apply_tune(PendingTune{
+                    beacon_mhz, beacon_frequency_khz, beacon_symbol_rate_ksps}, false);
+            }
+            return;
+        }
+        scan_parked_on_beacon = false;
+        /* If we're still locked to this exact signal (the max-dwell cap
+         * fired but there's nothing else to move to - e.g. only one
+         * signal on the band), forcing a retune just interrupts otherwise
+         * fine reception for no benefit: it would only land back here.
+         * Extend the dwell window and stay put instead. */
+        if(receiver_status.locked() &&
+           std::abs(target->frequency_mhz - scan_current_freq_mhz) < 0.02) {
+            scan_dwell_deadline = Clock::now() + kScanMaxDwell;
+            qo100::log(
+                "[SCAN] still the only signal in range; staying tuned\n");
+            return;
+        }
+        scan_awaiting_signal = false;
+        scan_current_freq_mhz = target->frequency_mhz;
+        scan_dwell_deadline = Clock::now() + kScanMaxDwell;
+        const long target_if_khz = std::lround(
+            (target->frequency_mhz - receiver_settings.lnb_lo_mhz) * 1000.0);
+        const long target_symbol_rate_ksps = std::lround(
+            target->symbol_rate_ms * 1000.0F);
+        qo100::log("[SCAN] moving to %.3fMHz\n", target->frequency_mhz);
+        apply_tune(PendingTune{
+            target->frequency_mhz, target_if_khz, target_symbol_rate_ksps}, false);
+    };
+    const auto close_chat_keyboard = [&] {
+        chat_input = ChatInput::None;
+        chat_symbols = false;
+        chat_shifted = false;
+        SDL_StopTextInput();
+    };
+    const auto submit_chat_input = [&] {
+        if(chat_input == ChatInput::Nick) {
+            if(!chat_nick.empty()) {
+                chat_client.set_nick(chat_nick);
+                qo100::log("[CHAT_UI] callsign submitted: %s\n", chat_nick.c_str());
+            }
+        }
+        else if(chat_input == ChatInput::Message && !chat_message.empty()) {
+            chat_client.send_message(chat_message);
+            qo100::log("[CHAT_UI] message submitted (%zu characters)\n",
+                       chat_message.size());
+            chat_message.clear();
+        }
+        close_chat_keyboard();
+    };
+    const auto append_chat_text = [&](const std::string & value) {
+        if(chat_input == ChatInput::None) return;
+        std::string & target = chat_input == ChatInput::Nick ? chat_nick : chat_message;
+        const size_t maximum = chat_input == ChatInput::Nick ? 20U : 300U;
+        if(target.size() + value.size() <= maximum) target += value;
+    };
     while(running) {
         bool uploaded_frame_this_loop = false;
         SDL_Event event{};
         while(SDL_PollEvent(&event)) {
-            if(event.type == SDL_QUIT ||
-               (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)) {
+            if(event.type == SDL_QUIT) {
                 running = false;
+            }
+            if(event.type == SDL_TEXTINPUT && app_page == AppPage::Chat)
+                append_chat_text(event.text.text);
+            if(event.type == SDL_KEYDOWN) {
+                if(event.key.keysym.sym == SDLK_ESCAPE) {
+                    if(app_page == AppPage::Chat && chat_input != ChatInput::None)
+                        close_chat_keyboard();
+                    else if(app_page != AppPage::Main) app_page = AppPage::Main;
+                    else running = false;
+                    continue;
+                }
+                if(app_page == AppPage::Chat && chat_input != ChatInput::None) {
+                    if(event.key.keysym.sym == SDLK_BACKSPACE) {
+                        std::string & target = chat_input == ChatInput::Nick
+                            ? chat_nick : chat_message;
+                        erase_last_utf8(target);
+                    }
+                    else if(event.key.keysym.sym == SDLK_RETURN ||
+                            event.key.keysym.sym == SDLK_KP_ENTER) submit_chat_input();
+                }
+            }
+            if(event.type == SDL_MOUSEWHEEL && app_page == AppPage::Chat &&
+               !chat_client.state().lines.empty()) {
+                chat_follow_latest = false;
+                if(event.wheel.y > 0)
+                    chat_first_visible = chat_first_visible > 3
+                        ? chat_first_visible - 3 : 0;
+                else if(event.wheel.y < 0)
+                    chat_first_visible = std::min(
+                        chat_first_visible + 3,
+                        chat_client.state().lines.size() - 1);
+            }
+            if(event.type == SDL_MOUSEBUTTONDOWN &&
+               event.button.button == SDL_BUTTON_LEFT &&
+               app_page == AppPage::Chat) {
+                const bool keyboard_open = chat_input != ChatInput::None;
+                if(point_in_rect(event.button.x, event.button.y,
+                                 chat_history_rect(display.width, display.height,
+                                                   keyboard_open))) {
+                    chat_history_dragging = true;
+                    chat_history_drag_moved = false;
+                    chat_drag_start_y = event.button.y;
+                    chat_drag_start_first = chat_first_visible;
+                }
+            }
+            if(event.type == SDL_MOUSEMOTION && chat_history_dragging &&
+               !chat_client.state().lines.empty()) {
+                const int delta_y = event.motion.y - chat_drag_start_y;
+                if(std::abs(delta_y) >= 8) chat_history_drag_moved = true;
+                const int message_steps = delta_y / 28;
+                const int64_t requested = static_cast<int64_t>(chat_drag_start_first) -
+                                          message_steps;
+                chat_first_visible = static_cast<size_t>(std::clamp<int64_t>(
+                    requested, 0,
+                    static_cast<int64_t>(chat_client.state().lines.size() - 1)));
+                chat_follow_latest = false;
             }
             if(event.type == SDL_MOUSEBUTTONUP) {
                 const int x = event.button.x;
                 const int y = event.button.y;
+                const bool completed_chat_drag = chat_history_dragging &&
+                                                 chat_history_drag_moved;
+                chat_history_dragging = false;
+                if(tuner_popup != TunerPopupKind::None) {
+                    if(tuner_popup == TunerPopupKind::NotFound) {
+                        const SDL_Rect close_button =
+                            tuner_popup_close_rect(display.width, display.height);
+                        if(x >= close_button.x && x < close_button.x + close_button.w &&
+                           y >= close_button.y && y < close_button.y + close_button.h) {
+                            tuner_popup = TunerPopupKind::None;
+                            qo100::log("[TUNER_USB] no-tuner popup closed\n");
+                        }
+                    }
+                    continue;
+                }
+                if(app_page == AppPage::Settings) {
+                    if(point_in_rect(x, y, page_back_rect(display.width))) {
+                        app_page = AppPage::Main;
+                        qo100::log("[SETTINGS_UI] back to main\n");
+                    }
+                    else if(point_in_rect(
+                                x, y, settings_lo_button_rect(display.width, false))) {
+                        settings_lo_mhz = std::max(1000, settings_lo_mhz - 1);
+                        settings_saved = false;
+                    }
+                    else if(point_in_rect(
+                                x, y, settings_lo_button_rect(display.width, true))) {
+                        settings_lo_mhz = std::min(20000, settings_lo_mhz + 1);
+                        settings_saved = false;
+                    }
+                    else if(point_in_rect(x, y, settings_save_rect(display.width))) {
+                        receiver_settings.lnb_lo_mhz = settings_lo_mhz;
+                        receiver_settings.lnb_voltage_enabled =
+                            settings_voltage_choice != 0;
+                        receiver_settings.lnb_voltage_horizontal =
+                            settings_voltage_choice == 2;
+                        receiver_settings.audio_volume_percent = volume_percent;
+                        receiver_settings.display_800x480 = settings_display_choice == 1;
+                        const bool display_change_pending =
+                            receiver_settings.display_800x480 != (display.width == 800);
+                        settings_saved = qo100::save_receiver_settings(
+                            repository_root, receiver_settings);
+                        if(settings_saved) {
+                            receiver_client.send_voltage(
+                                receiver_settings.lnb_voltage_enabled,
+                                receiver_settings.lnb_voltage_horizontal);
+                            selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
+                                current_tune_if_khz / 1000.0;
+                            qo100::log(
+                                "[SETTINGS_UI] applied LO=%dMHz voltage=%s display=%s\n",
+                                settings_lo_mhz,
+                                settings_voltage_choice == 0 ? "OFF" :
+                                    (settings_voltage_choice == 1 ? "13V" : "18V"),
+                                settings_display_choice == 1 ? "800x480" : "1024x600");
+                            /* Resolution is only picked up at process start
+                             * (qo100_sdl/launch.sh reads settings.json fresh
+                             * each launch) - restart to apply, the same way
+                             * EXIT does. Restart=always in the systemd unit
+                             * brings it back up in the new size. */
+                            if(display_change_pending) {
+                                qo100::log(
+                                    "[SETTINGS_UI] display resolution changed; "
+                                    "restarting to apply\n");
+                                running = false;
+                            }
+                        }
+                    }
+                    else {
+                        bool matched = false;
+                        for(int index = 0; index < 3; ++index) {
+                            if(point_in_rect(x, y,
+                                             settings_voltage_rect(display.width, index))) {
+                                settings_voltage_choice = index;
+                                settings_saved = false;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        for(int index = 0; !matched && index < 2; ++index) {
+                            if(point_in_rect(x, y,
+                                             settings_display_res_rect(display.width, index))) {
+                                settings_display_choice = index;
+                                settings_saved = false;
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if(app_page == AppPage::Chat) {
+                    if(completed_chat_drag) continue;
+                    const bool keyboard_open = chat_input != ChatInput::None;
+                    if(point_in_rect(x, y, page_back_rect(display.width))) {
+                        close_chat_keyboard();
+                        app_page = AppPage::Main;
+                        qo100::log("[CHAT_UI] back to main\n");
+                        continue;
+                    }
+                    if(keyboard_open) {
+                        bool key_pressed = false;
+                        for(const KeyboardKey & key : keyboard_keys(
+                                display.width, display.height,
+                                chat_symbols, chat_shifted)) {
+                            if(!point_in_rect(x, y, key.rect)) continue;
+                            key_pressed = true;
+                            if(key.label == "SHIFT") chat_shifted = !chat_shifted;
+                            else if(key.label == "SYM") {
+                                chat_symbols = true;
+                                chat_shifted = false;
+                            }
+                            else if(key.label == "ABC") chat_symbols = false;
+                            else if(key.label == "BACK") {
+                                std::string & target = chat_input == ChatInput::Nick
+                                    ? chat_nick : chat_message;
+                                erase_last_utf8(target);
+                            }
+                            else if(key.label == "CANCEL") close_chat_keyboard();
+                            else if(key.label == "ENTER") submit_chat_input();
+                            else if(key.label == "SPACE") append_chat_text(" ");
+                            else append_chat_text(key.label);
+                            break;
+                        }
+                        if(key_pressed) continue;
+                    }
+                    if(point_in_rect(x, y, chat_nick_rect(display.height, keyboard_open))) {
+                        chat_input = ChatInput::Nick;
+                        chat_symbols = false;
+                        chat_shifted = false;
+                        SDL_StartTextInput();
+                    }
+                    else if(point_in_rect(x, y,
+                                         chat_message_rect(display.width, display.height,
+                                                           keyboard_open))) {
+                        chat_input = ChatInput::Message;
+                        chat_symbols = false;
+                        chat_shifted = false;
+                        SDL_StartTextInput();
+                    }
+                    else if(point_in_rect(x, y, chat_set_rect(display.height, keyboard_open))) {
+                        if(!chat_nick.empty()) chat_client.set_nick(chat_nick);
+                    }
+                    else if(point_in_rect(x, y,
+                                         chat_send_rect(display.width, display.height,
+                                                        keyboard_open))) {
+                        if(!chat_message.empty()) {
+                            chat_client.send_message(chat_message);
+                            chat_message.clear();
+                        }
+                    }
+                    continue;
+                }
+                if(fullscreen_video) {
+                    fullscreen_video = false;
+                    qo100::log(
+                        "[VIDEO_UI] fullscreen -> main tap=(%d,%d); decoder unchanged\n",
+                        x, y);
+                    continue;
+                }
+                const SDL_Rect snap_button = status_button_rect(layout, 0);
+                if(x >= snap_button.x && x < snap_button.x + snap_button.w &&
+                   y >= snap_button.y && y < snap_button.y + snap_button.h) {
+                    const std::string screenshot_path =
+                        repository_root + "/screenshots/latest.png";
+                    qo100::log("[SCREENSHOT] SNAP tapped; capturing display\n");
+                    if(save_display_screenshot(screenshot_path)) {
+                        qo100::log("[SCREENSHOT] saved %s\n", screenshot_path.c_str());
+                        /* Backgrounded (trailing &) - it shells out to
+                         * `convert` and rewrites index.html, which would
+                         * otherwise block this input-handling loop longer
+                         * than the grim capture itself. */
+                        const std::string album_cmd = repository_root +
+                            "/scripts/album_update.sh " + screenshot_path + " &";
+                        std::system(album_cmd.c_str());
+                    }
+                    else
+                        qo100::log("[SCREENSHOT] failed to save %s\n", screenshot_path.c_str());
+                    continue;
+                }
+                const SDL_Rect chat_button = status_button_rect(layout, 1);
+                if(point_in_rect(x, y, chat_button)) {
+                    app_page = AppPage::Chat;
+                    chat_follow_latest = true;
+                    chat_history_dragging = false;
+                    qo100::log("[CHAT_UI] opened\n");
+                    continue;
+                }
+                const SDL_Rect settings_button = status_button_rect(layout, 2);
+                if(point_in_rect(x, y, settings_button)) {
+                    settings_lo_mhz = static_cast<int>(
+                        std::lround(receiver_settings.lnb_lo_mhz));
+                    settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
+                        ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
+                    settings_display_choice = receiver_settings.display_800x480 ? 1 : 0;
+                    settings_saved = false;
+                    tuner_product = detect_tuner_product_string();
+                    app_page = AppPage::Settings;
+                    qo100::log("[SETTINGS_UI] opened\n");
+                    continue;
+                }
+                const SDL_Rect scan_button = status_button_rect(layout, 3);
+                if(point_in_rect(x, y, scan_button)) {
+                    scan_active = !scan_active;
+                    if(scan_active) {
+                        qo100::log("[SCAN] started\n");
+                        scan_current_freq_mhz = receiver_settings.lnb_lo_mhz +
+                                                beacon_frequency_khz / 1000.0;
+                        scan_parked_on_beacon = false;
+                        scan_awaiting_signal = false;
+                        scan_advance();
+                    }
+                    else qo100::log("[SCAN] stopped\n");
+                    continue;
+                }
+                const SDL_Rect exit_button = status_button_rect(layout, 4);
+                if(x >= exit_button.x && x < exit_button.x + exit_button.w &&
+                   y >= exit_button.y && y < exit_button.y + exit_button.h) {
+                    qo100::log(
+                        "[APP] EXIT tapped; closing application (system remains running)\n");
+                    running = false;
+                    continue;
+                }
                 if(x >= layout.spectrum_plot.x &&
                    x < layout.spectrum_plot.x + layout.spectrum_plot.w &&
                    y >= layout.spectrum_plot.y &&
-                   y < layout.spectrum_plot.y + layout.spectrum_plot.h) {
+                   y < layout.spectrum_plot.y + layout.spectrum_plot.h &&
+                   Clock::now() - last_spectrum_click >= std::chrono::milliseconds(400)) {
+                    last_spectrum_click = Clock::now();
                     const double clicked = kSpectrumStartMhz +
                         static_cast<double>(x - layout.spectrum_plot.x) /
                         layout.spectrum_plot.w * kSpectrumSpanMhz;
@@ -1249,50 +2893,157 @@ int main(int argc, char ** argv)
                         const double half_width = std::max(0.02,
                             static_cast<double>(signal.measured_width_mhz) / 2.0);
                         if(std::abs(clicked - signal.frequency_mhz) <= half_width) {
-                            selected_frequency_mhz = signal.frequency_mhz;
                             selected_signal = &signal;
                             break;
                         }
                     }
                     if(selected_signal == nullptr) {
-                        selected_frequency_mhz = clicked;
-                        std::fprintf(stderr, "[TUNE] no detected signal at %.3fMHz; not tuning\n",
-                                     clicked);
-                    }
-                    else if(!receiver_enabled || !receiver_client.control_connected()) {
-                        std::fprintf(stderr, "[TUNE] selected %.3fMHz but control link is not ready\n",
-                                     selected_frequency_mhz);
-                    }
-                    else if(Clock::now() - last_tune < std::chrono::milliseconds(1500)) {
-                        std::fprintf(stderr, "[TUNE] selection ignored inside debounce window\n");
+                        spectrum_marker.kind = spectrum_ready
+                            ? SpectrumMarkerKind::NoSignal
+                            : SpectrumMarkerKind::SpectrumNotReady;
+                        spectrum_marker.frequency_mhz = clicked;
+                        spectrum_marker.expires_at = Clock::now() +
+                            std::chrono::seconds(1);
+                        qo100::log(
+                            "[TUNE] %s at %.3fMHz; not tuning (notice for 1000ms)\n",
+                            spectrum_ready ? "no detected signal" : "spectrum not ready",
+                            clicked);
                     }
                     else {
-                        last_tune = Clock::now();
-                        const long if_khz = std::lround(
-                            (selected_frequency_mhz - receiver_settings.lnb_lo_mhz) * 1000.0);
-                        const long symbol_rate_ksps = std::lround(
+                        if(scan_active) {
+                            scan_active = false;
+                            qo100::log("[SCAN] cancelled by manual selection\n");
+                        }
+                        const double target_frequency_mhz = selected_signal->frequency_mhz;
+                        const long target_if_khz = std::lround(
+                            (target_frequency_mhz - receiver_settings.lnb_lo_mhz) * 1000.0);
+                        const long target_symbol_rate_ksps = std::lround(
                             selected_signal->symbol_rate_ms * 1000.0F);
-                        receiver_status.reset();
-                        scheduler.reset();
-                        have_video_frame = false;
-                        receiver_client.send_tune(if_khz, symbol_rate_ksps);
-                        std::fprintf(stderr,
-                            "[TUNE] %.3fMHz -> IF=%ldkHz SR=%ldkS/s\n",
-                            selected_frequency_mhz, if_khz, symbol_rate_ksps);
+                        const long same_signal_tolerance_khz = std::lround(
+                            std::max(0.02,
+                                static_cast<double>(selected_signal->measured_width_mhz) / 2.0) *
+                            1000.0);
+                        const bool already_tuned =
+                            std::labs(target_if_khz - current_tune_if_khz) <=
+                                same_signal_tolerance_khz &&
+                            std::labs(target_symbol_rate_ksps -
+                                      current_tune_symbol_rate_ksps) <= 10;
+                        const bool tune_still_waiting_for_video =
+                            video_notice == VideoNotice::Tuning ||
+                            video_notice == VideoNotice::NoVideoStream;
+                        if(already_tuned && !pending_tune.has_value() &&
+                           tune_still_waiting_for_video) {
+                            spectrum_marker = {
+                                SpectrumMarkerKind::AlreadyTuned,
+                                target_frequency_mhz,
+                                Clock::now() + std::chrono::seconds(1)};
+                            qo100::log(
+                                "[TUNE] %.3fMHz is already selected; still waiting for video\n",
+                                target_frequency_mhz);
+                        }
+                        else if(already_tuned) {
+                            pending_tune.reset();
+                            video_notice = VideoNotice::None;
+                            selected_frequency_mhz = target_frequency_mhz;
+                            spectrum_marker = {
+                                SpectrumMarkerKind::AlreadyTuned,
+                                selected_frequency_mhz,
+                                Clock::now() + std::chrono::seconds(1)};
+                            qo100::log(
+                                "[TUNE] already tuned %.3fMHz IF=%ldkHz SR=%ldkS/s; "
+                                "decoder unchanged (notice for 1000ms)\n",
+                                selected_frequency_mhz, current_tune_if_khz,
+                                current_tune_symbol_rate_ksps);
+                        }
+                        else if(pending_tune.has_value() &&
+                                std::labs(target_if_khz - pending_tune->if_khz) <=
+                                    same_signal_tolerance_khz &&
+                                std::labs(target_symbol_rate_ksps -
+                                          pending_tune->symbol_rate_ksps) <= 10) {
+                            spectrum_marker = {
+                                SpectrumMarkerKind::TuneQueued,
+                                pending_tune->frequency_mhz,
+                                Clock::time_point{}};
+                            qo100::log(
+                                "[TUNE] %.3fMHz already queued; waiting for control connection\n",
+                                pending_tune->frequency_mhz);
+                        }
+                        else if(!receiver_enabled) {
+                            qo100::log(
+                                "[TUNE] selected %.3fMHz but Longmynd is not running\n",
+                                target_frequency_mhz);
+                        }
+                        else if(!receiver_client.control_connected()) {
+                            pending_tune = PendingTune{
+                                target_frequency_mhz,
+                                target_if_khz,
+                                target_symbol_rate_ksps};
+                            spectrum_marker = {
+                                SpectrumMarkerKind::TuneQueued,
+                                target_frequency_mhz,
+                                Clock::time_point{}};
+                            video_notice = VideoNotice::WaitingForTuner;
+                            qo100::log(
+                                "[TUNE] queued %.3fMHz IF=%ldkHz SR=%ldkS/s; "
+                                "waiting for control connection\n",
+                                target_frequency_mhz, target_if_khz,
+                                target_symbol_rate_ksps);
+                        }
+                        else if(Clock::now() - last_tune < std::chrono::milliseconds(1500)) {
+                            qo100::log(
+                                "[TUNE] selection ignored inside debounce window\n");
+                        }
+                        else {
+                            apply_tune(PendingTune{
+                                target_frequency_mhz,
+                                target_if_khz,
+                                target_symbol_rate_ksps}, false);
+                        }
                     }
                 }
                 if(x >= layout.video_panel.x && x < layout.video_panel.x + layout.video_panel.w &&
-                   y >= layout.video_panel.y && y < layout.video_panel.y + layout.video_panel.h)
-                    fullscreen_video = !fullscreen_video;
-                const int slider_y = layout.status_panel.y + 8 + 7 *
-                    std::clamp(layout.status_panel.h * 24 / 301, 18, 24) + 6;
-                const int slider_x = layout.status_panel.x + 50;
-                const int slider_w = layout.status_panel.w - 105;
-                if(y >= slider_y - 10 && y <= slider_y + 17 &&
-                   x >= slider_x && x <= slider_x + slider_w)
-                    volume_percent = std::clamp((x - slider_x) * 100 / slider_w, 0, 100);
+                   y >= layout.video_panel.y && y < layout.video_panel.y + layout.video_panel.h) {
+                    fullscreen_video = true;
+                    qo100::log(
+                        "[VIDEO_UI] main -> fullscreen tap=(%d,%d); decoder unchanged\n",
+                        x, y);
+                }
+                if(volume_dragging) {
+                    volume_percent = volume_from_x(volume_track_rect(layout), x);
+                    audio_output.set_volume(volume_percent);
+                    receiver_settings.audio_volume_percent = volume_percent;
+                    qo100::save_receiver_settings(repository_root, receiver_settings);
+                    qo100::log("[AUDIO] volume=%d%%\n", volume_percent);
+                }
+                volume_dragging = false;
+            }
+            if(event.type == SDL_MOUSEBUTTONDOWN &&
+               event.button.button == SDL_BUTTON_LEFT && app_page == AppPage::Main) {
+                const SDL_Rect track = volume_track_rect(layout);
+                /* Generous hit band around the (visually thin) 7px track -
+                 * the width already spans nearly the whole panel, height is
+                 * the part that was too tight to comfortably land a finger
+                 * on. */
+                if(event.button.y >= track.y - 16 && event.button.y <= track.y + 23 &&
+                   event.button.x >= track.x && event.button.x <= track.x + track.w) {
+                    volume_dragging = true;
+                    volume_percent = volume_from_x(track, event.button.x);
+                    audio_output.set_volume(volume_percent);
+                }
+            }
+            if(event.type == SDL_MOUSEMOTION && volume_dragging) {
+                volume_percent = volume_from_x(volume_track_rect(layout), event.motion.x);
+                audio_output.set_volume(volume_percent);
             }
         }
+
+        if(tuner_popup == TunerPopupKind::Detected &&
+           Clock::now() - tuner_popup_started_at >= std::chrono::seconds(3)) {
+            tuner_popup = TunerPopupKind::None;
+            qo100::log("[TUNER_USB] detected popup closed after 3 seconds\n");
+        }
+
+        chat_client.consume();
 
         if(!options.offline_spectrum &&
            spectrum_feed.consume(spectrum_bins, spectrum_status)) {
@@ -1301,24 +3052,111 @@ int main(int argc, char ** argv)
         }
 
         if(receiver_enabled && receiver_client.consume_status(receiver_status)) {
+            if(awaiting_post_tune_unlock) {
+                if(receiver_status.locked()) {
+                    /* Stale pre-tune message - undo it rather than let it
+                     * flash the old lock/service name back onto the display. */
+                    receiver_status.reset();
+                }
+                else {
+                    awaiting_post_tune_unlock = false;
+                }
+            }
             const bool locked_now = receiver_status.locked();
             if(locked_now && !receiver_was_locked) {
-                scheduler.reset();
-                have_video_frame = false;
-                video_decoder.request_reset();
+                scan_locked_at = Clock::now();
                 const std::string service = !receiver_status.service_name.empty()
                     ? receiver_status.service_name : receiver_status.service_provider;
-                std::fprintf(stderr,
+                qo100::log(
                     "[TUNE] lock: %s IF=%ldkHz SR=%ldkS/s MER=%.1fdB service=%s\n",
                     receiver_status.demod_state == 4 ? "DVB-S2" : "DVB-S",
                     receiver_status.carrier_khz, receiver_status.symbol_rate_ksps,
                     receiver_status.mer_x10 / 10.0,
                     service.empty() ? "---" : service.c_str());
+                if(beacon_return_armed) {
+                    beacon_return_armed = false;
+                    qo100::log(
+                        "[TUNE] lock regained; cancelled pending return to beacon\n");
+                }
             }
             else if(!locked_now && receiver_was_locked) {
-                std::fprintf(stderr, "[TUNE] lock lost\n");
+                qo100::log( "[TUNE] lock lost\n");
+                /* scan_locked_at <= scan_tuned_at means this edge is just the
+                 * reset-induced drop from the *previous* scan step catching
+                 * up (status updates arrive on their own cadence, not every
+                 * frame) - the current frequency was never actually locked
+                 * in the first place, so it hasn't failed anything yet.
+                 * Advancing here too would skip it without a real try. */
+                if(scan_active && scan_locked_at > scan_tuned_at) {
+                    const auto held = Clock::now() - scan_locked_at;
+                    qo100::log("[SCAN] lock lost after %.1fs; advancing\n",
+                               std::chrono::duration<double>(held).count());
+                    scan_note_lock_result(scan_current_freq_mhz, held >= kScanFastLossWindow);
+                    scan_advance();
+                }
+                else if(!scan_active) {
+                    const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+                                              beacon_frequency_khz / 1000.0;
+                    if(std::abs(selected_frequency_mhz - beacon_mhz) > 0.02) {
+                        beacon_return_armed = true;
+                        beacon_return_deadline = Clock::now() + kBeaconReturnDelay;
+                        qo100::log(
+                            "[TUNE] lock lost on non-beacon signal; returning to "
+                            "beacon in %lldms unless it comes back\n",
+                            static_cast<long long>(kBeaconReturnDelay.count()));
+                    }
+                }
             }
             receiver_was_locked = locked_now;
+        }
+
+        if(beacon_return_armed && Clock::now() >= beacon_return_deadline) {
+            beacon_return_armed = false;
+            const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+                                      beacon_frequency_khz / 1000.0;
+            qo100::log("[TUNE] returning to beacon\n");
+            apply_tune(PendingTune{
+                beacon_mhz, beacon_frequency_khz, beacon_symbol_rate_ksps}, false);
+        }
+
+        /* Safety cap: move on even if still locked, so one long-running
+         * transmission can't hold the scan in place indefinitely. */
+        if(scan_active && Clock::now() >= scan_dwell_deadline) {
+            if(!scan_awaiting_signal) {
+                qo100::log("[SCAN] max dwell reached; advancing\n");
+                /* Held the full dwell (whether or not still locked this
+                 * instant) - that's a pass, not a fast-loss candidate. */
+                scan_note_lock_result(scan_current_freq_mhz, true);
+            }
+            scan_advance();
+        }
+
+        if(pending_tune.has_value() && receiver_client.control_connected()) {
+            const PendingTune tune = *pending_tune;
+            pending_tune.reset();
+            apply_tune(tune, true);
+        }
+
+        if(video_notice == VideoNotice::Tuning &&
+           Clock::now() - video_notice_started_at >= std::chrono::seconds(15)) {
+            video_notice = VideoNotice::NoVideoStream;
+            qo100::log(
+                "[TUNE] no video stream received within 15 seconds; staying tuned\n");
+        }
+
+        if(spectrum_marker.kind == SpectrumMarkerKind::AlreadyTuned &&
+           Clock::now() >= spectrum_marker.expires_at) {
+            spectrum_marker = {
+                have_video_frame && video_notice == VideoNotice::None
+                    ? SpectrumMarkerKind::None
+                    : SpectrumMarkerKind::Tune,
+                selected_frequency_mhz,
+                Clock::time_point{}};
+        }
+        else if((spectrum_marker.kind == SpectrumMarkerKind::NoSignal ||
+            spectrum_marker.kind == SpectrumMarkerKind::SpectrumNotReady) &&
+           Clock::now() >= spectrum_marker.expires_at) {
+            spectrum_marker.kind = SpectrumMarkerKind::None;
         }
 
         if(auto frame = scheduler.take_due(Clock::now())) {
@@ -1331,11 +3169,11 @@ int main(int argc, char ** argv)
                     SDL_SetTextureScaleMode(video_texture, SDL_ScaleModeLinear);
                     video_source_width = frame->width;
                     video_source_height = frame->height;
-                    std::fprintf(stderr, "[VIDEO] texture=%dx%d IYUV\n",
+                    qo100::log( "[VIDEO] texture=%dx%d IYUV\n",
                                  video_source_width, video_source_height);
                 }
                 else {
-                    std::fprintf(stderr, "[VIDEO] texture failed: %s\n", SDL_GetError());
+                    qo100::log( "[VIDEO] texture failed: %s\n", SDL_GetError());
                     video_source_width = 0;
                     video_source_height = 0;
                 }
@@ -1347,34 +3185,85 @@ int main(int argc, char ** argv)
                    frame->v_plane(), frame->uv_pitch) == 0) {
                 have_video_frame = true;
                 uploaded_frame_this_loop = true;
+                last_video_frame_at = Clock::now();
+                if(spectrum_marker.kind == SpectrumMarkerKind::Tune)
+                    spectrum_marker.kind = SpectrumMarkerKind::None;
+                if((video_notice == VideoNotice::Tuning ||
+                    video_notice == VideoNotice::NoVideoStream) &&
+                   video_decoder.reopen_count() > tune_reopen_before) {
+                    const double acquisition_seconds = std::chrono::duration<double>(
+                        Clock::now() - video_notice_started_at).count();
+                    video_notice = VideoNotice::None;
+                    qo100::log(
+                        "[TUNE] video acquired after %.1fs\n",
+                        acquisition_seconds);
+                }
             }
+        }
+
+        if(use_tuner && video_notice == VideoNotice::None && have_video_frame &&
+           Clock::now() - last_video_frame_at >= std::chrono::seconds(8)) {
+            scheduler.reset();
+            have_video_frame = false;
+            video_notice = VideoNotice::NoVideoStream;
+            qo100::log(
+                "[TUNE] video stream stopped for 8 seconds; staying tuned\n");
         }
 
         set_colour(renderer, kBackground);
         SDL_RenderClear(renderer);
-        if(fullscreen_video) {
+        if(app_page == AppPage::Settings) {
+            draw_settings_page(renderer, text, display.width, display.height,
+                               settings_lo_mhz, settings_voltage_choice,
+                               settings_display_choice, settings_saved, tuner_product,
+                               receiver_client.monitor_connected());
+        }
+        else if(app_page == AppPage::Chat) {
+            draw_chat_page(renderer, text, display.width, display.height,
+                           chat_client.state(), chat_nick, chat_message,
+                           chat_input, chat_symbols, chat_shifted,
+                           chat_first_visible, chat_last_visible,
+                           chat_follow_latest);
+        }
+        else if(fullscreen_video) {
             if(have_video_frame) {
                 const SDL_Rect screen_bounds{0, 0, display.width, display.height};
                 const SDL_Rect destination = aspect_fit(
                     video_source_width, video_source_height, screen_bounds);
                 SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
             }
+            const SDL_Rect screen_bounds{0, 0, display.width, display.height};
+            draw_video_notice(text, screen_bounds, video_notice,
+                std::chrono::duration<double>(
+                    Clock::now() - video_notice_started_at).count());
         }
         else {
             draw_spectrum(renderer, text, layout, *spectrum_texture,
-                          spectrum_status, selected_frequency_mhz);
+                          spectrum_status, spectrum_marker, receiver_status,
+                          selected_frequency_mhz);
             fill_panel(renderer, layout.video_panel);
-            set_colour(renderer, {0, 0, 0});
+            set_colour(renderer, kPanel);
             SDL_RenderFillRect(renderer, &layout.video_content);
             if(have_video_frame) {
                 const SDL_Rect destination = aspect_fit(
                     video_source_width, video_source_height, layout.video_content);
                 SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
             }
+            draw_video_notice(text, layout.video_content, video_notice,
+                std::chrono::duration<double>(
+                    Clock::now() - video_notice_started_at).count());
             const std::string video_codec = options.demo ? "DEMO" : video_decoder.codec_name();
-            draw_status(renderer, text, layout, volume_percent, receiver_status,
-                        receiver_client.monitor_connected(), video_codec);
+            const std::string audio_codec = video_decoder.audio_codec_name();
+            draw_status(renderer, text, layout, volume_percent, audio_output.peak_percent(),
+                        receiver_status,
+                        receiver_client.monitor_connected(),
+                        receiver_client.received_updates() != 0,
+                        selected_frequency_mhz, current_tune_if_khz,
+                        current_tune_symbol_rate_ksps,
+                        video_codec, audio_codec, scan_active);
         }
+        draw_tuner_popup(renderer, text, display.width, display.height,
+                         tuner_popup, tuner_product);
         SDL_RenderPresent(renderer);
 
         const auto now = Clock::now();
@@ -1393,11 +3282,15 @@ int main(int argc, char ** argv)
             const uint64_t presented_delta = stats.presented - previous_presented;
             const uint64_t queue_drop_delta = stats.queue_drops - previous_queue_drops;
             const uint64_t late_drop_delta = stats.late_drops - previous_late_drops;
-            std::fprintf(stderr,
+            qo100::log(
                 "[PRESENT] fps=%.1f drop=%llu late=%llu max_gap=%.1fms stalls=%llu "
                 "shown=%llu rebases=%llu depth=%zu "
-                "spectrum=%llu replaced=%llu receiver=%llu/%llu link=%s/%s "
-                "decode=%llu reopen=%llu errors=%llu\n",
+                 "spectrum=%llu replaced=%llu "
+                 "tuner_status=%s updates=%llu overwritten=%llu tune_control=%s "
+                 "decode=%llu reopen=%llu errors=%llu "
+                 "audio_chunks=%llu audio_q=%ums audio_drop=%llu "
+                 "audio_under=%llu audio_rebuffer=%llu audio_errors=%llu "
+                 "textures=%zu rss=%ldkB cpu_temp=%.1fC\n",
                 presented_delta / window_seconds,
                 static_cast<unsigned long long>(queue_drop_delta),
                 static_cast<unsigned long long>(late_drop_delta),
@@ -1407,13 +3300,20 @@ int main(int argc, char ** argv)
                 static_cast<unsigned long long>(stats.rebases), stats.depth,
                 static_cast<unsigned long long>(spectrum_feed.received_frames()),
                 static_cast<unsigned long long>(spectrum_feed.replaced_frames()),
+                receiver_client.monitor_connected() ? "CONNECTED" : "DISCONNECTED",
                 static_cast<unsigned long long>(receiver_client.received_updates()),
                 static_cast<unsigned long long>(receiver_client.replaced_updates()),
-                receiver_client.monitor_connected() ? "monitor" : "---",
-                receiver_client.control_connected() ? "control" : "---",
-                static_cast<unsigned long long>(video_decoder.decoded_frames()),
-                static_cast<unsigned long long>(video_decoder.reopen_count()),
-                static_cast<unsigned long long>(video_decoder.decode_errors()));
+                receiver_client.control_connected() ? "CONNECTED" : "DISCONNECTED",
+                 static_cast<unsigned long long>(video_decoder.decoded_frames()),
+                 static_cast<unsigned long long>(video_decoder.reopen_count()),
+                 static_cast<unsigned long long>(video_decoder.decode_errors()),
+                 static_cast<unsigned long long>(video_decoder.decoded_audio_chunks()),
+                 audio_output.queued_ms(),
+                 static_cast<unsigned long long>(audio_output.dropped_chunks()),
+                 static_cast<unsigned long long>(audio_output.underruns()),
+                 static_cast<unsigned long long>(audio_output.rebuffers()),
+                 static_cast<unsigned long long>(video_decoder.audio_decode_errors()),
+                 text.texture_count(), process_rss_kb(), cpu_temperature_c());
             previous_presented = stats.presented;
             previous_queue_drops = stats.queue_drops;
             previous_late_drops = stats.late_drops;
@@ -1431,8 +3331,11 @@ int main(int argc, char ** argv)
         if((renderer_info.flags & SDL_RENDERER_PRESENTVSYNC) == 0) SDL_Delay(2);
     }
 
+    SDL_StopTextInput();
+    chat_client.stop();
     spectrum_feed.stop();
     video_decoder.stop();
+    audio_output.close();
     receiver_client.stop();
     longmynd->stop();
 
@@ -1440,9 +3343,10 @@ int main(int argc, char ** argv)
         set_colour(renderer, kBackground);
         SDL_RenderClear(renderer);
         draw_spectrum(renderer, text, layout, *spectrum_texture,
-                      spectrum_status, selected_frequency_mhz);
+                      spectrum_status, spectrum_marker, receiver_status,
+                      selected_frequency_mhz);
         fill_panel(renderer, layout.video_panel);
-        set_colour(renderer, {0, 0, 0});
+        set_colour(renderer, kPanel);
         SDL_RenderFillRect(renderer, &layout.video_content);
         if(have_video_frame) {
             const SDL_Rect destination = aspect_fit(
@@ -1450,19 +3354,25 @@ int main(int argc, char ** argv)
             SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
         }
         const std::string video_codec = options.demo ? "DEMO" : video_decoder.codec_name();
-        draw_status(renderer, text, layout, volume_percent, receiver_status,
-                    receiver_client.monitor_connected(), video_codec);
+        const std::string audio_codec = video_decoder.audio_codec_name();
+        draw_status(renderer, text, layout, volume_percent, audio_output.peak_percent(),
+                    receiver_status,
+                    receiver_client.monitor_connected(),
+                    receiver_client.received_updates() != 0,
+                    selected_frequency_mhz, current_tune_if_khz,
+                    current_tune_symbol_rate_ksps,
+                    video_codec, audio_codec, scan_active);
         SDL_RenderPresent(renderer);
         if(!save_screenshot(renderer, display.width, display.height, options.screenshot))
-            std::fprintf(stderr, "[SCREENSHOT] failed to save %s\n", options.screenshot.c_str());
+            qo100::log( "[SCREENSHOT] failed to save %s\n", options.screenshot.c_str());
         else
-            std::fprintf(stderr, "[SCREENSHOT] saved %s\n", options.screenshot.c_str());
+            qo100::log( "[SCREENSHOT] saved %s\n", options.screenshot.c_str());
     }
 
     producer_running = false;
     if(producer.joinable()) producer.join();
     const auto stats = scheduler.stats();
-    std::fprintf(stderr,
+    qo100::log(
         "[PRESENT] final shown=%llu queue_drops=%llu late_drops=%llu rebases=%llu depth=%zu\n",
         static_cast<unsigned long long>(stats.presented),
         static_cast<unsigned long long>(stats.queue_drops),

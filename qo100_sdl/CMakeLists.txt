@@ -11,10 +11,11 @@ pkg_check_modules(SDL2_TTF REQUIRED IMPORTED_TARGET SDL2_ttf)
 pkg_check_modules(WEBSOCKETS REQUIRED IMPORTED_TARGET libwebsockets)
 pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat libavcodec libavutil libswscale)
+    libavformat libavcodec libavutil libswscale libswresample)
 
 add_executable(qo100sdl
     src/main.cpp
+    src/chat_client.cpp
     src/receiver.cpp
     src/video_decoder.cpp)
 target_compile_options(qo100sdl PRIVATE -Wall -Wextra -Wpedantic)
@@ -27,7 +28,7 @@ target_link_libraries(qo100sdl PRIVATE
     pthread)
 
 set(QO100_FONT_SOURCE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../qo100_lvgl/lvgl/scripts/built_in_font/Montserrat-Medium.ttf")
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/Montserrat-Medium.ttf")
 if(EXISTS "${QO100_FONT_SOURCE}")
     add_custom_command(TARGET qo100sdl POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

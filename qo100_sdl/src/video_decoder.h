@@ -23,11 +23,18 @@ struct VideoFrame {
     const uint8_t * v_plane() const { return yuv420.data() + v_offset; }
 };
 
+struct AudioChunk {
+    std::vector<uint8_t> pcm_s16;
+    int sample_rate = 48000;
+    int channels = 2;
+};
+
 class VideoDecoder {
 public:
     using FrameCallback = std::function<void(VideoFrame &&)>;
+    using AudioCallback = std::function<void(AudioChunk &&)>;
 
-    explicit VideoDecoder(FrameCallback callback);
+    explicit VideoDecoder(FrameCallback callback, AudioCallback audio_callback = {});
     ~VideoDecoder();
 
     VideoDecoder(const VideoDecoder &) = delete;
@@ -38,9 +45,12 @@ public:
     void request_reset();
 
     std::string codec_name() const;
+    std::string audio_codec_name() const;
     uint64_t decoded_frames() const;
+    uint64_t decoded_audio_chunks() const;
     uint64_t reopen_count() const;
     uint64_t decode_errors() const;
+    uint64_t audio_decode_errors() const;
 
 private:
     struct Impl;

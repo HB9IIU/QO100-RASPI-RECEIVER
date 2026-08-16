@@ -11,9 +11,20 @@ struct ReceiverSettings {
     bool lnb_voltage_enabled = false;
     bool lnb_voltage_horizontal = false;
     int audio_volume_percent = 50;
+    /* Placeholder for upcoming 800x480 display support - persisted so the
+     * Settings page radio choice survives a restart, but not yet wired to
+     * anything that actually changes the running resolution. */
+    bool display_800x480 = false;
 };
 
 ReceiverSettings load_receiver_settings(const std::string & repository_root);
+bool save_receiver_settings(const std::string & repository_root,
+                            const ReceiverSettings & settings);
+
+/* Network stream URL to paste into VLC (Media > Open Network Stream) to
+ * watch the same feed the app is decoding, e.g. "udp://@239.1.1.1:5600".
+ * Reflects QO100_TS_ADDR/QO100_TS_PORT if set, otherwise the defaults. */
+std::string ts_stream_vlc_url();
 
 struct ReceiverStatus {
     int demod_state = 0;
@@ -29,6 +40,7 @@ struct ReceiverStatus {
     int short_frames = -1;
     int pilots = -1;
     long ldpc_errors = 0;
+    int null_packet_percent = -1;
 
     bool locked() const { return demod_state == 3 || demod_state == 4; }
     void reset();

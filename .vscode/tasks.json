@@ -2,23 +2,38 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "stop-qo100datv-service",
-            "type": "shell",
-            "command": "systemctl --user stop qo100datv.service",
-            "problemMatcher": []
-        },
-        {
             "label": "start-qo100datv-service",
             "type": "shell",
             "command": "systemctl --user start qo100datv.service",
             "problemMatcher": []
         },
         {
-            "label": "build-qo100-monitor-debug",
+            "label": "stop-any-qo100datv-instance",
             "type": "shell",
-            "command": "mkdir -p '${workspaceFolder}/qo100_lvgl/build-debug' && cmake -S '${workspaceFolder}/qo100_lvgl' -B '${workspaceFolder}/qo100_lvgl/build-debug' -DCMAKE_BUILD_TYPE=Debug && cmake --build '${workspaceFolder}/qo100_lvgl/build-debug' -j$(nproc)",
+            "command": "systemctl --user stop qo100datv.service; pkill -f '/qo100_sdl/build.*/qo100sdl' || true",
+            "problemMatcher": []
+        },
+        {
+            "label": "screenshot-app-window",
+            "type": "shell",
+            "command": "${workspaceFolder}/scripts/screenshot.sh",
+            "problemMatcher": []
+        },
+        {
+            "label": "build-qo100-sdl-debug",
+            "type": "shell",
+            "command": "mkdir -p '${workspaceFolder}/qo100_sdl/build-debug' && cmake -S '${workspaceFolder}/qo100_sdl' -B '${workspaceFolder}/qo100_sdl/build-debug' -DCMAKE_BUILD_TYPE=Debug && cmake --build '${workspaceFolder}/qo100_sdl/build-debug' -j$(nproc)",
             "problemMatcher": ["$gcc"],
-            "dependsOn": ["stop-qo100datv-service"],
+            "dependsOn": ["stop-any-qo100datv-instance"],
+            "dependsOrder": "sequence",
+            "group": "build"
+        },
+        {
+            "label": "build and RUN qo100-sdl-release",
+            "type": "shell",
+            "command": "cd '${workspaceFolder}' && cmake -S qo100_sdl -B qo100_sdl/build && cmake --build qo100_sdl/build -j2 && DISPLAY=:0.0 ./qo100_sdl/build/qo100sdl 2>&1 | tee qo100_sdl_test.log",
+            "problemMatcher": ["$gcc"],
+            "dependsOn": ["stop-any-qo100datv-instance"],
             "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
@@ -26,10 +41,13 @@
             }
         },
         {
-            "label": "screenshot-app-window",
+            "label": "build and RUN qo100-sdl @ 800x480 (windowed preview)",
             "type": "shell",
-            "command": "${workspaceFolder}/scripts/screenshot.sh",
-            "problemMatcher": []
+            "command": "cd '${workspaceFolder}' && cmake -S qo100_sdl -B qo100_sdl/build && cmake --build qo100_sdl/build -j2 && DISPLAY=:0.0 QO100_DISPLAY=800x480 QO100_WINDOWED=1 ./qo100_sdl/build/qo100sdl 2>&1 | tee qo100_sdl_800x480_test.log",
+            "problemMatcher": ["$gcc"],
+            "dependsOn": ["stop-any-qo100datv-instance"],
+            "dependsOrder": "sequence",
+            "group": "build"
         }
     ]
 }
