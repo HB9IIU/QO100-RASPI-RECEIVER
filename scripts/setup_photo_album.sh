@@ -1,6 +1,8 @@
 #!/bin/bash
 # Installs and enables a systemd --user service that serves the screenshot
-# album (screenshots/album/) as a static website on the LAN.
+# album (screenshots/album/) on the LAN, with a "Take Screenshot" button on
+# the page that captures the display (grim, whatever's currently fullscreen)
+# without needing to talk to the running qo100sdl app.
 #
 # Usage: scripts/setup_photo_album.sh [PORT]
 #   No argument: default port 8090.
@@ -26,7 +28,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -m http.server $PORT --bind 0.0.0.0 --directory $ALBUM_DIR
+ExecStart=/usr/bin/python3 $REPO_DIR/scripts/album_server.py $PORT
 Restart=on-failure
 RestartSec=3
 

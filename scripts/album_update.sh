@@ -46,13 +46,19 @@ INDEX="$ALBUM_DIR/index.html"
     echo '<meta name="viewport" content="width=device-width, initial-scale=1">'
     echo '<style>
 body{background:#111;color:#eee;font-family:sans-serif;margin:1rem}
-h1{font-size:1.2rem;font-weight:normal}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+h1{font-size:1.2rem;font-weight:normal;margin:0}
+button{background:#2b8ea3;color:#fff;border:none;border-radius:6px;padding:10px 18px;font-size:1rem;cursor:pointer}
+button:active{background:#236f80}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:16px}
 .grid a{display:block}
 .grid img{width:100%;border-radius:4px;display:block}
 .grid figcaption{font-size:0.75rem;text-align:center;color:#aaa;margin-top:2px}
 </style></head><body>'
+    echo '<div class="top">'
     echo "<h1>QO-100 DATV screenshots ($(ls -1 "$ALBUM_DIR"/*.png 2>/dev/null | wc -l))</h1>"
+    echo '<form method="POST" action="/snap"><button type="submit">Take Screenshot</button></form>'
+    echo '</div>'
     echo '<div class="grid">'
     for f in $(ls -1t "$ALBUM_DIR"/*.png 2>/dev/null); do
         name="$(basename "$f")"
