@@ -150,6 +150,13 @@ struct DisplayConfig {
     bool fullscreen = true;
 };
 
+/* Requires SDL video already initialised (SDL_Init(SDL_INIT_VIDEO) must run
+ * before this). With no explicit QO100_DISPLAY, defaults to the actual
+ * physical screen size rather than a hardcoded 1024x600 - otherwise a Pi
+ * with the smaller 800x480 panel opens a too-big window on first run, with
+ * the SET button (needed to fix the resolution) pushed off-screen and
+ * unreachable. Falls back to the 1024x600 reference size only if SDL can't
+ * report a desktop mode at all. */
 DisplayConfig resolve_display_config(bool screenshot_mode)
 {
     DisplayConfig config;
@@ -159,6 +166,13 @@ DisplayConfig resolve_display_config(bool screenshot_mode)
         if(std::sscanf(value, "%dx%d", &width, &height) == 2 && width > 0 && height > 0) {
             config.width = width;
             config.height = height;
+        }
+    }
+    else {
+        SDL_DisplayMode mode{};
+        if(SDL_GetDesktopDisplayMode(0, &mode) == 0 && mode.w > 0 && mode.h > 0) {
+            config.width = mode.w;
+            config.height = mode.h;
         }
     }
     if(std::getenv("QO100_WINDOWED") != nullptr || screenshot_mode) config.fullscreen = false;
@@ -2198,11 +2212,11 @@ int main(int argc, char ** argv)
     qo100::reset_log_clock();
     log_startup_banner();
     const Options options = parse_options(argc, argv);
-    const DisplayConfig display = resolve_display_config(!options.screenshot.empty());
     if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         qo100::log("[SDL] init failed: %s\n", SDL_GetError());
         return 1;
     }
+    const DisplayConfig display = resolve_display_config(!options.screenshot.empty());
     if(TTF_Init() != 0) {
         qo100::log("[TTF] init failed: %s\n", TTF_GetError());
         SDL_Quit();
