@@ -19,57 +19,27 @@ A standalone QO-100 (Es'hail-2) digital amateur TV receiver: a **Raspberry Pi 5*
 
 Default tuning at startup is the QO-100 beacon: **741474 kHz, 1500 ksps**.
 
-## Quick setup (fresh Pi)
+## Setup (fresh Pi)
+
+See **[HOWTO.md](HOWTO.md)** for the full step-by-step walkthrough. The short version:
 
 ```bash
 scripts/initialSetup.sh
 ```
 
-Installs build dependencies, fetches the vendored library below (pinned to
-the version this repo expects), creates the longmynd status FIFO, installs
+This one script installs everything needed (build tools, `SDL2`/`SDL2_ttf`,
+FFmpeg, `libwebsockets`, `json-c`, `grim`, `imagemagick`...), fetches the one
+vendored dependency not included in this repo (`libwebsockets`), installs
 the MiniTiouner udev rule, and builds both `longmynd_ws` and `qo100_sdl`.
-Safe to re-run - every step is skipped if already done. See the sections
-below for what it's doing and why, or to run any step by hand.
+Safe to re-run.
 
-## Getting the vendored dependency
-
-One third-party library is required to build but is not vendored in this repo (kept out to keep it small) — clone it into place before building:
+## Rebuilding after a code change
 
 ```bash
-git clone --branch v4.3-stable https://github.com/warmcat/libwebsockets.git longmynd_ws/web/libwebsockets
+cd qo100_sdl && ./build_and_run.sh
 ```
 
-## Building
-
-**`longmynd_ws`** (tuner driver + websocket server):
-
-```bash
-cd longmynd_ws
-make clean && make
-```
-
-Build locally on the Pi — a binary copied from another machine can fail to start with a GLIBC version mismatch.
-
-**`qo100_sdl`** (the UI app):
-
-```bash
-cd qo100_sdl
-./build_and_run.sh
-```
-
-This configures and builds with CMake (`build/`, Release) and launches the app. Requires `SDL2`, `SDL2_ttf`, `libwebsockets`, `libavformat`/`libavcodec`/`libavutil`/`libswscale`/`libswresample` (FFmpeg), and `json-c` dev packages, plus `grim` and `imagemagick` at runtime for screenshots (SNAP button, `scripts/screenshot.sh`).
-
-## First-time device setup
-
-The MiniTiouner needs a udev rule so it's readable without root:
-
-```bash
-sudo cp longmynd_ws/minitiouner.rules /etc/udev/rules.d/minitiouner.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=0403 --attr-match=idProduct=6010
-```
-
-Verify with `lsusb` + `ls -la /dev/bus/usb/<bus>/<dev>` — permissions should read `crw-rw-rw-`.
+Or `cd longmynd_ws && make` if you touched the tuner driver instead.
 
 ## Screenshots
 
