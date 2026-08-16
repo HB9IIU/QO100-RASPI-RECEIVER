@@ -6,7 +6,7 @@ A standalone QO-100 (Es'hail-2) digital amateur TV receiver: a **Raspberry Pi 5*
 
 - Raspberry Pi 5
 - MiniTiouner Pro TS2 (FTDI FT2232H, USB `0403:6010`, reports as `MiniTiouner_Pro_TS2`)
-- 1024x600 DSI touchscreen
+- A touchscreen — either a 1024x600 DSI panel or the official 800x480 Raspberry Pi touchscreen. Switch between them from the app's **SET** page (Display Resolution), or see [HOWTO.md](HOWTO.md#5-choose-your-screen-resolution).
 
 ## Repo layout
 
