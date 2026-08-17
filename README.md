@@ -33,38 +33,31 @@ taskbar (look for a black screen icon) or the applications menu, usually
 under **Accessories > Terminal**. Each step below shows exactly what to
 type; type or paste it in, then press **Enter** to run it.
 
-### 1. Get the code
+### 1. Get the code and run the setup script
 
-This puts the project in a `DATVreceiver` folder in your home folder.
+Paste this whole block in at once — it puts the project in a `DATVreceiver`
+folder in your home folder, then runs its setup script.
 
 ```bash
 cd ~
 git clone https://github.com/HB9IIU/QO100-RASPI-RECEIVER.git DATVreceiver
-```
-
-### 2. Run the setup script
-
-Every step from here on starts with `cd ~/DATVreceiver` — that's on purpose,
-so each command works exactly as written whether it's the same terminal
-window as the step before, or a brand new one.
-
-```bash
 cd ~/DATVreceiver
 scripts/initialSetup.sh
 ```
 
-This one script does everything: installs all the software this app needs,
+The setup script does everything: installs all the software this app needs,
 downloads one small third-party library it depends on, builds the app, sets
 it up to start automatically at boot, and **reboots the Pi at the end** —
 that last part matters, the MiniTiouner's USB permissions don't reliably
 take effect without it. It will ask for your password, and gives you a 10
 second window to Ctrl+C out of the reboot if you're not ready for it. Safe
-to re-run if something goes wrong partway through.
+to re-run (from `cd ~/DATVreceiver && scripts/initialSetup.sh`) if something
+goes wrong partway through.
 
 Plug the MiniTiouner into a USB port before or during this step, if it
 isn't already.
 
-### 3. Check it worked
+### 2. Check it worked
 
 Once the Pi finishes rebooting and you're logged back in, the receiver
 should appear on its own, fullscreen, tuned to the QO-100 beacon. If it
