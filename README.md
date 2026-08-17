@@ -26,9 +26,6 @@ git clone https://github.com/HB9IIU/QO100-RASPI-RECEIVER.git DATVreceiver
 cd DATVreceiver
 ```
 
-This is a **private** repo, so `git` will ask you to log in to GitHub
-(a personal access token, or an SSH key if you'd rather use that).
-
 ### 2. Run the setup script
 
 ```bash
