@@ -12,13 +12,12 @@ struct ReceiverSettings {
     bool lnb_voltage_horizontal = false;
     int audio_volume_percent = 50;
     bool display_800x480 = false;
-    /* false (default): EXIT restarts the app (systemd Restart=always picks
-     * it back up a few seconds later) - unchanged, original behaviour.
-     * true: EXIT calls `systemctl --user stop` on itself instead, a real
-     * stop that Restart=always doesn't override, for anyone who wants EXIT
-     * to actually exit and expects to restart it manually (desktop icon /
-     * systemctl --user start) rather than have it come back on its own. */
-    bool exit_full_stop = false;
+    /* true (default): EXIT calls `systemctl --user stop` on itself, a real
+     * stop that Restart=always doesn't override - matches what EXIT looks
+     * like it should do on a fresh install. false: EXIT just exits cleanly,
+     * which Restart=always picks back up a few seconds later - for anyone
+     * who deliberately wants EXIT to double as a quick restart. */
+    bool exit_full_stop = true;
 };
 
 ReceiverSettings load_receiver_settings(const std::string & repository_root);

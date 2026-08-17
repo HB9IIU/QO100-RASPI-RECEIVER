@@ -3,8 +3,12 @@
 #
 # Installs build dependencies, fetches the vendored library (pinned to the
 # version this repo actually expects), creates the longmynd status FIFO,
-# installs the MiniTiouner udev rule, and builds both longmynd_ws and
-# qo100_sdl.
+# installs the MiniTiouner udev rule, builds both longmynd_ws and qo100_sdl,
+# sets up autostart (scripts/setup_autostart.sh), and reboots at the end -
+# udev's live rule-reload doesn't always actually take effect for a device
+# that was already plugged in when the rule was installed (observed
+# directly: MiniTiouner permissions stayed wrong until a reboot), so this
+# no longer just trusts `udevadm trigger` and calls it done.
 #
 # Safe to re-run - every step is skipped (or is a no-op) if already done.
 # Run from anywhere; paths are resolved relative to this script.
@@ -72,10 +76,15 @@ step "🛠️  Building qo100_sdl (the receiver app)..."
 cmake -S qo100_sdl -B qo100_sdl/build -DCMAKE_BUILD_TYPE=Release
 cmake --build qo100_sdl/build --target qo100sdl -j"$(nproc)"
 
+step "🚀 Setting up autostart..."
+"$REPO_DIR/scripts/setup_autostart.sh"
+
 printf "\n${GREEN}✅ Setup complete!${NC}\n\n"
-echo "▶️  Run the app with:            $REPO_DIR/qo100_sdl/build_and_run.sh"
-echo "🚀 Set up autostart (optional): $REPO_DIR/scripts/setup_autostart.sh"
 echo "🖼️  Screenshot album (optional): $REPO_DIR/scripts/setup_photo_album.sh"
 echo
-echo "🔌 Plug in the MiniTiouner (USB 0403:6010) before or after this script -"
-echo "   the udev rule picks it up on connect, no reboot needed."
+echo "🔌 Plug in the MiniTiouner (USB 0403:6010) now if it isn't already."
+echo
+printf "${YELLOW}🔁 Rebooting in 10s to make sure the udev rule actually takes effect -${NC}\n"
+printf "${YELLOW}   Ctrl+C now to skip this and reboot yourself later instead.${NC}\n"
+sleep 10
+sudo reboot
