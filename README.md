@@ -11,8 +11,7 @@ tune, and connects to the QO-100 wideband chat.
 - A MiniTiouner tuner. Tested with the **Pro TS2** and the **S** — other
   variants (Express, original) likely work too but haven't been tried.
 - A touchscreen — either a 1024x600 DSI panel or the official 800x480
-  Raspberry Pi touchscreen (switchable any time from the app itself, see
-  Step 4 below).
+  Raspberry Pi touchscreen (switchable any time from **SET** in the app).
 - Internet access on the Pi — needed for setup, and also ongoing during
   normal use (the spectrum display and chat both come from live internet
   feeds, separate from the tuner itself).
@@ -71,16 +70,7 @@ make sure the antenna/LNB is actually pointed at QO-100, and check the
 **SET** page in the app for the LNB settings (LO offset, bias voltage)
 match your hardware.
 
-### 4. Pick your screen size
-
-The app automatically detects and matches your actual screen size, so this
-is usually nothing to do. If it ever guesses wrong, or you want to force a
-specific size (e.g. testing the smaller 800x480 layout on a bigger screen):
-open **SET** in the app, choose the resolution under Display Resolution,
-and tap **SAVE** — the app restarts itself in the new size automatically.
-You can change this again any time.
-
-### 5. Make it start automatically
+### 4. Make it start automatically
 
 ```bash
 cd ~/DATVreceiver
@@ -90,7 +80,7 @@ scripts/setup_autostart.sh
 This makes the app start by itself every time the Pi boots up and you log
 in, fullscreen, ready to go — and starts it right now too, no reboot needed.
 
-### 6. Reboot and check
+### 5. Reboot and check
 
 ```bash
 sudo reboot
