@@ -19,6 +19,12 @@ tune, and connects to the QO-100 wideband chat.
 
 ## Setup, step by step
 
+Everything below is done by typing commands into a **terminal** — a
+text-based command window. On the Raspberry Pi desktop, open one from the
+taskbar (look for a black screen icon) or the applications menu, usually
+under **Accessories > Terminal**. Each step below shows exactly what to
+type; type or paste it in, then press **Enter** to run it.
+
 ### 1. Get the code
 
 ```bash
