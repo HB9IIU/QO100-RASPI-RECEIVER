@@ -2321,6 +2321,18 @@ int main(int argc, char ** argv)
     const std::string repository_root = repository_directory();
     qo100::ReceiverSettings receiver_settings =
         qo100::load_receiver_settings(repository_root);
+    /* display.width/height is the resolution actually in use this run
+     * (auto-detected, or QO100_DISPLAY) - keep the persisted preference in
+     * sync with it so the Settings page toggle never shows a stale choice
+     * left over from before an auto-detect or an external resolution
+     * change (e.g. swapping panels) updated the real running resolution. */
+    {
+        const bool actual_800x480 = (display.width == 800);
+        if(receiver_settings.display_800x480 != actual_800x480) {
+            receiver_settings.display_800x480 = actual_800x480;
+            qo100::save_receiver_settings(repository_root, receiver_settings);
+        }
+    }
     auto spectrum_texture = std::make_unique<SpectrumTexture>(
         renderer, layout.spectrum_plot.w, layout.spectrum_plot.h, layout.spectrum_max_db);
     if(!spectrum_texture->valid()) {
