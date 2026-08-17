@@ -51,55 +51,31 @@ scripts/initialSetup.sh
 ```
 
 This one script does everything: installs all the software this app needs,
-downloads one small third-party library it depends on, sets up the tuner so
-it works without needing admin rights every time, and builds the app. It
-will ask for your password (for the parts that need it). Safe to run more
-than once if something goes wrong partway through.
+downloads one small third-party library it depends on, builds the app, sets
+it up to start automatically at boot, and **reboots the Pi at the end** —
+that last part matters, the MiniTiouner's USB permissions don't reliably
+take effect without it. It will ask for your password, and gives you a 10
+second window to Ctrl+C out of the reboot if you're not ready for it. Safe
+to re-run if something goes wrong partway through.
 
-### 3. Try it out
+Plug the MiniTiouner into a USB port before or during this step, if it
+isn't already.
 
-Plug the MiniTiouner into a USB port now, if it isn't already, then:
+### 3. Check it worked
 
-```bash
-cd ~/DATVreceiver/qo100_sdl
-./build_and_run.sh
-```
-
-A window should open showing the spectrum display, video, and status
-panel. If the antenna is pointed at QO-100, it should lock onto the beacon
-signal within a couple of seconds. Tap **EXIT** (or close the window) when
-you're done checking.
-
-If it says "No MiniTiouner detected on USB": check the tuner is properly
-plugged in and try a different USB port. If it doesn't lock onto a signal:
-make sure the antenna/LNB is actually pointed at QO-100, and check the
-**SET** page in the app for the LNB settings (LO offset, bias voltage)
-match your hardware.
-
-### 4. Make it start automatically
-
-```bash
-cd ~/DATVreceiver
-scripts/setup_autostart.sh
-```
-
-This makes the app start by itself every time the Pi boots up and you log
-in, fullscreen, ready to go — and starts it right now too, no reboot needed.
-
-### 5. Reboot and check
-
-```bash
-sudo reboot
-```
-
-Once the Pi is back up and you're logged in, the receiver should appear on
-its own, fullscreen, tuned to the QO-100 beacon. If it doesn't:
+Once the Pi finishes rebooting and you're logged back in, the receiver
+should appear on its own, fullscreen, tuned to the QO-100 beacon. If it
+doesn't:
 
 ```bash
 systemctl --user status qo100datv.service
 ```
 
-This shows whether it's running, and if not, why.
+This shows whether it's running, and if not, why. If it says "No
+MiniTiouner detected on USB" on screen: check the tuner is properly plugged
+in. If it doesn't lock onto a signal: make sure the antenna/LNB is actually
+pointed at QO-100, and check the **SET** page for the LNB settings (LO
+offset, bias voltage) match your hardware.
 
 ## Using the app
 

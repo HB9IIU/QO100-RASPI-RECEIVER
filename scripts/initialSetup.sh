@@ -25,6 +25,39 @@ fi
 step() { printf "\n${BLUE}%s${NC}\n" "$1"; }
 skip() { printf "${YELLOW}   ↷ %s${NC}\n" "$1"; }
 
+cat <<BANNER
+
+${BLUE}================================================================${NC}
+${BLUE}  QO-100 DATV Receiver - first-time setup${NC}
+${BLUE}================================================================${NC}
+
+This script WILL:
+  - Install some software packages via apt (build tools, SDL2,
+    FFmpeg, and a few other libraries this app needs)
+  - Download one small open-source library (libwebsockets) from
+    GitHub
+  - Build the receiver app and the tuner driver from source
+  - Install a udev rule so the MiniTiouner USB tuner works without
+    root access
+  - Adjust one system network setting (UDP receive buffer size) for
+    smoother video
+  - Set the app to start automatically when the Pi boots
+  - Reboot the Pi at the end, so all of the above actually takes
+    effect (needed for the udev rule specifically)
+
+${GREEN}This script will NOT:${NC}
+  - Send any of your files, data, or settings anywhere
+  - Install anything beyond what's listed above
+  - Touch any other project or folder on this Pi
+  - Ask you to sign up for or log in to anything
+  Everything it downloads comes from Debian's own package repos and
+  GitHub - ordinary, public open-source sources, nothing bundled or
+  hidden.
+
+Press ${GREEN}ENTER${NC} to continue, or ${YELLOW}Ctrl+C${NC} to cancel.
+BANNER
+read -r _
+
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
