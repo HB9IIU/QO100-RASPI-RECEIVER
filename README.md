@@ -27,14 +27,21 @@ type; type or paste it in, then press **Enter** to run it.
 
 ### 1. Get the code
 
+This puts the project in a `DATVreceiver` folder in your home folder.
+
 ```bash
+cd ~
 git clone https://github.com/HB9IIU/QO100-RASPI-RECEIVER.git DATVreceiver
-cd DATVreceiver
 ```
 
 ### 2. Run the setup script
 
+Every step from here on starts with `cd ~/DATVreceiver` — that's on purpose,
+so each command works exactly as written whether it's the same terminal
+window as the step before, or a brand new one.
+
 ```bash
+cd ~/DATVreceiver
 scripts/initialSetup.sh
 ```
 
@@ -58,7 +65,7 @@ You should see a line show up.
 ### 4. Try it out
 
 ```bash
-cd qo100_sdl
+cd ~/DATVreceiver/qo100_sdl
 ./build_and_run.sh
 ```
 
@@ -81,6 +88,7 @@ itself in the new size automatically. You can change this again any time.
 ### 6. Make it start automatically
 
 ```bash
+cd ~/DATVreceiver
 scripts/setup_autostart.sh
 ```
 
@@ -123,6 +131,7 @@ app is fullscreen with no touch access — it captures whatever's currently
 on screen, not just this app). To turn it on:
 
 ```bash
+cd ~/DATVreceiver
 scripts/setup_photo_album.sh
 ```
 
@@ -135,11 +144,11 @@ individual photos or select several for bulk delete right from the page.
 After editing the source, rebuild with:
 
 ```bash
-cd qo100_sdl && ./build_and_run.sh
+cd ~/DATVreceiver/qo100_sdl && ./build_and_run.sh
 ```
 
-(Or `cd longmynd_ws && make` if you changed the tuner driver instead of the
-app itself.)
+(Or `cd ~/DATVreceiver/longmynd_ws && make` if you changed the tuner driver
+instead of the app itself.)
 
 ## Repo layout
 
