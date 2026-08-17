@@ -73,10 +73,12 @@ match your hardware.
 
 ### 4. Pick your screen size
 
-The app defaults to 1024x600. If your touchscreen is the smaller 800x480
-official Raspberry Pi one instead: open **SET** in the app, choose
-**800 x 480** under Display Resolution, and tap **SAVE** — the app restarts
-itself in the new size automatically. You can change this again any time.
+The app automatically detects and matches your actual screen size, so this
+is usually nothing to do. If it ever guesses wrong, or you want to force a
+specific size (e.g. testing the smaller 800x480 layout on a bigger screen):
+open **SET** in the app, choose the resolution under Display Resolution,
+and tap **SAVE** — the app restarts itself in the new size automatically.
+You can change this again any time.
 
 ### 5. Make it start automatically
 
