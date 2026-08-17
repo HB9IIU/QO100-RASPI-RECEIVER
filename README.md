@@ -13,7 +13,9 @@ tune, and connects to the QO-100 wideband chat.
 - A touchscreen — either a 1024x600 DSI panel or the official 800x480
   Raspberry Pi touchscreen (switchable any time from the app itself, see
   Step 5 below).
-- Internet access on the Pi, at least for the setup steps below.
+- Internet access on the Pi — needed for setup, and also ongoing during
+  normal use (the spectrum display and chat both come from live internet
+  feeds, separate from the tuner itself).
 
 ## Setup, step by step
 
