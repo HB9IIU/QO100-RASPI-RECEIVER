@@ -134,6 +134,20 @@ This prints a web address to open in a browser (e.g. `http://<pi's IP
 address>:8090/`). Keeps the most recent 300 screenshots by default; delete
 individual photos or select several for bulk delete right from the page.
 
+## Uninstalling
+
+```bash
+cd ~/DATVreceiver
+scripts/uninstall.sh
+```
+
+Undoes everything the setup steps above did: stops and removes both
+background services, the desktop shortcut, the MiniTiouner udev rule, and
+the UDP-buffer system tweak. Leaves your screenshots and saved settings
+alone unless you add `--purge-data`. Doesn't delete the `DATVreceiver`
+folder itself or any installed software packages — see the script's own
+comments for why.
+
 ---
 
 Everything below this point is reference material for people modifying the
