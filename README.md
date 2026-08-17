@@ -1,23 +1,26 @@
-# QO-100 DATV Receiver (Raspberry Pi 5)
+# QO-100 DATV Receiver (Raspberry Pi 4/5)
 
 A standalone QO-100 (Es'hail-2) digital amateur TV receiver. Runs on a
-**Raspberry Pi 5**, driving a **MiniTiouner** tuner, with a fullscreen
+**Raspberry Pi 4 or 5**, driving a **MiniTiouner** tuner, with a fullscreen
 touchscreen app that shows the spectrum, decodes the video, lets you tap to
-tune, and connects to the QO-100 wideband chat.
+tune, and connects to the QO-100 wideband chat. Everything is operated by
+touch — no keyboard or mouse needed once it's set up.
 
 ## What you need
 
-- Raspberry Pi 5, running Raspberry Pi OS (Bookworm or newer) with a desktop.
+- Raspberry Pi 4 Model B or Raspberry Pi 5, running Raspberry Pi OS
+  (Bookworm or newer) with a desktop.
 - A MiniTiouner tuner. Tested with the **Pro TS2** and the **S** — other
   variants (Express, original) likely work too but haven't been tried.
 - A touchscreen — either a 1024x600 DSI panel or the official 800x480
   Raspberry Pi touchscreen (switchable any time from **SET** in the app).
-- Something to play audio through. The Pi 5 has no 3.5mm audio jack, and a
-  DSI touchscreen has no speaker of its own, so there's no built-in audio
-  output for this kind of kiosk setup — **a Bluetooth speaker is the
-  easiest fix**, pair it once in Raspberry Pi OS's Bluetooth settings and
-  it just works. A USB audio adapter or an HDMI-connected display with
-  speakers works too, if you'd rather avoid Bluetooth.
+- Something to play audio through. The Pi 5 has no 3.5mm audio jack (the
+  Pi 4 does); either way, a DSI touchscreen has no speaker of its own, so
+  there's no built-in audio output for a Pi 5 kiosk setup like this one —
+  **a Bluetooth speaker is the easiest fix**, pair it once in Raspberry Pi
+  OS's Bluetooth settings and it just works. A USB audio adapter or an
+  HDMI-connected display with speakers works too, if you'd rather avoid
+  Bluetooth.
 - Internet access on the Pi — needed for setup, and also ongoing during
   normal use (the spectrum display and chat both come from live internet
   feeds, separate from the tuner itself).
