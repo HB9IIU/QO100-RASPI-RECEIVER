@@ -2384,23 +2384,38 @@ int main(int argc, char ** argv)
     }
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-    /* SDL_WINDOW_FULLSCREEN_DESKTOP always sizes the window to match the
-     * current desktop mode, ignoring whatever width/height was requested at
-     * creation - so a saved/forced resolution smaller than the real screen
-     * (e.g. settings.json asking for 800x480 on a genuinely 1024x600 panel)
-     * would otherwise leave display.width/height wrong for the rest of the
-     * app, which draws everything using those values: the UI would render
-     * correctly but confined to an 800x480 box in the corner of the real,
-     * larger window, with the remaining desktop area left blank. Query the
-     * renderer's actual output size and use that from here on so layout
-     * always matches what's really on screen. */
+    /* SDL_WINDOW_FULLSCREEN_DESKTOP always sizes the actual window to match
+     * the current desktop mode, ignoring whatever width/height was
+     * requested at creation - so picking a resolution smaller than the real
+     * screen (the 800x480 choice on SET, previewed here on a genuinely
+     * 1024x600 panel; also matters if a physical panel's real size is ever
+     * smaller than what auto-detect/settings.json expected) still draws a
+     * full, correctly-arranged 800x480 UI, just inside a real window that's
+     * actually bigger. Rather than stretching that content or silently
+     * overriding the chosen resolution back up to the real screen size
+     * (which made the SET page's choice pointless - it kept showing the
+     * large layout no matter what was selected), centre it: everything
+     * still draws using the chosen display.width/height as before, offset
+     * into the middle of the real window via a render viewport, with the
+     * true edges of the screen filled in as plain background rather than
+     * left undrawn. Touch/mouse coordinates are corrected by the same
+     * offset where they're read, further down. */
+    int render_offset_x = 0;
+    int render_offset_y = 0;
     if(display.fullscreen) {
         int actual_width = display.width;
         int actual_height = display.height;
         SDL_GetRendererOutputSize(renderer, &actual_width, &actual_height);
-        display.width = actual_width;
-        display.height = actual_height;
+        render_offset_x = std::max(0, (actual_width - display.width) / 2);
+        render_offset_y = std::max(0, (actual_height - display.height) / 2);
     }
+    /* Re-applied every frame (not just once here) because SDL's renderer
+     * silently resets the viewport to match the full window on some window
+     * resize events - which, under Wayland, can arrive a little after the
+     * window has already reached its final fullscreen size, undoing a
+     * one-time viewport set made right after renderer creation. */
+    const SDL_Rect content_viewport{render_offset_x, render_offset_y,
+                                    display.width, display.height};
 
     SDL_RendererInfo renderer_info{};
     SDL_GetRendererInfo(renderer, &renderer_info);
@@ -2760,6 +2775,21 @@ int main(int argc, char ** argv)
         bool uploaded_frame_this_loop = false;
         SDL_Event event{};
         while(SDL_PollEvent(&event)) {
+            /* Undo the centring offset set up around SDL_RenderSetViewport
+             * above, so hit-testing (which compares against rects computed
+             * in the same 0..display.width/height space everything draws
+             * in) sees coordinates relative to the content, not the real,
+             * possibly-larger window. */
+            if(render_offset_x != 0 || render_offset_y != 0) {
+                if(event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) {
+                    event.button.x -= render_offset_x;
+                    event.button.y -= render_offset_y;
+                }
+                else if(event.type == SDL_MOUSEMOTION) {
+                    event.motion.x -= render_offset_x;
+                    event.motion.y -= render_offset_y;
+                }
+            }
             if(event.type == SDL_QUIT) {
                 running = false;
             }
@@ -3384,6 +3414,7 @@ int main(int argc, char ** argv)
 
         set_colour(renderer, kBackground);
         SDL_RenderClear(renderer);
+        SDL_RenderSetViewport(renderer, &content_viewport);
         if(app_page == AppPage::Settings) {
             draw_settings_page(renderer, text, display.width, display.height,
                                settings_lo_mhz, settings_voltage_choice,
