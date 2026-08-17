@@ -121,7 +121,6 @@ echo "🖼️  Screenshot album (optional): $REPO_DIR/scripts/setup_photo_album.
 echo
 echo "🔌 Plug in the MiniTiouner (USB 0403:6010) now if it isn't already."
 echo
-printf "${YELLOW}🔁 Rebooting in 10s to make sure the udev rule actually takes effect -${NC}\n"
-printf "${YELLOW}   Ctrl+C now to skip this and reboot yourself later instead.${NC}\n"
-sleep 10
+printf "${YELLOW}🔁 Rebooting now to make sure everything actually takes effect...${NC}\n"
+sleep 3
 sudo reboot

@@ -49,9 +49,9 @@ The setup script does everything: installs all the software this app needs,
 downloads one small third-party library it depends on, builds the app, sets
 it up to start automatically at boot, and **reboots the Pi at the end** —
 that last part matters, the MiniTiouner's USB permissions don't reliably
-take effect without it. It will ask for your password, and gives you a 10
-second window to Ctrl+C out of the reboot if you're not ready for it. Safe
-to re-run (from `cd ~/DATVreceiver && scripts/initialSetup.sh`) if something
+take effect without it. It will ask for your password along the way, and
+asks for one Enter keypress up front to confirm before it starts. Safe to
+re-run (from `cd ~/DATVreceiver && scripts/initialSetup.sh`) if something
 goes wrong partway through.
 
 Plug the MiniTiouner into a USB port before or during this step, if it
