@@ -256,9 +256,14 @@ public:
         return true;
     }
 
-    void close()
+    /* Returns false if SDL_CloseAudioDevice had to be abandoned still
+     * running - the caller must not call anything that touches SDL's audio
+     * subsystem again in that case (notably SDL_Quit()), since the
+     * abandoned close is still in there, forever, holding a lock that would
+     * be needed - see the comment below. */
+    bool close()
     {
-        if(device_ == 0) return;
+        if(device_ == 0) return true;
         const SDL_AudioDeviceID device = device_;
         device_ = 0;
         SDL_PauseAudioDevice(device, 1);
@@ -269,8 +274,22 @@ public:
          * arrives. EXIT must never freeze the whole app on that - and it
          * did, taking the systemd service down with it since a hung stop
          * gets SIGKILLed and isn't restarted. Give it a bounded window on
-         * its own thread and abandon it if it doesn't return; harmless,
-         * since the process is exiting either way. */
+         * its own thread and abandon it if it doesn't return.
+         *
+         * Abandoning it is NOT fully harmless, though: the detached thread
+         * stays stuck inside SDL's audio code forever, holding SDL's
+         * internal audio-subsystem lock. If the process later calls
+         * SDL_Quit() (which tears down every SDL subsystem, including
+         * audio) on the main thread as normal, that call blocks forever
+         * trying to acquire the very same lock - trading the original
+         * EXIT-hangs-forever bug for an equally permanent hang a few lines
+         * later, just without systemd's stop-timeout around to eventually
+         * SIGKILL it (this happened in practice: EXIT with "Restart"
+         * selected doesn't call `systemctl stop` at all, so nothing was
+         * left to force-kill the now-deadlocked process, and it silently
+         * never restarted). The caller is responsible for skipping
+         * SDL_Quit() and exiting immediately instead when this returns
+         * false. */
         auto closed = std::make_shared<std::atomic<bool>>(false);
         std::thread closer([device, closed] {
             SDL_CloseAudioDevice(device);
@@ -279,8 +298,9 @@ public:
         closer.detach();
         for(int attempt = 0; attempt < 30 && !closed->load(); ++attempt)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        if(!closed->load())
-            qo100::log("[AUDIO] SDL_CloseAudioDevice did not return in time; abandoning\n");
+        if(closed->load()) return true;
+        qo100::log("[AUDIO] SDL_CloseAudioDevice did not return in time; abandoning\n");
+        return false;
     }
 
     void reset()
@@ -3598,7 +3618,7 @@ int main(int argc, char ** argv)
     chat_client.stop();
     spectrum_feed.stop();
     video_decoder.stop();
-    audio_output.close();
+    const bool audio_closed_cleanly = audio_output.close();
     receiver_client.stop();
     longmynd->stop();
 
@@ -3648,6 +3668,19 @@ int main(int argc, char ** argv)
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();
+    if(!audio_closed_cleanly) {
+        /* SDL_Quit() tears down every SDL subsystem, including audio - and
+         * the abandoned SDL_CloseAudioDevice() call from AudioOutput::close()
+         * is still in there on its own thread, forever, holding SDL's
+         * internal audio lock. Calling SDL_Quit() here would deadlock the
+         * same way (confirmed in practice: the process sat in futex_do_wait
+         * indefinitely, invisible to systemd since nothing was left to
+         * SIGKILL it under EXIT's "Restart" mode). Skip it and exit
+         * immediately instead - the OS reclaims everything on process exit
+         * regardless of whether SDL considers itself cleanly shut down. */
+        qo100::log("[SDL] skipping SDL_Quit() - audio close never finished\n");
+        std::_Exit(0);
+    }
     SDL_Quit();
     return 0;
 }
