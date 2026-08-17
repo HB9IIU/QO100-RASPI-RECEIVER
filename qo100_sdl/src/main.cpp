@@ -1379,7 +1379,7 @@ void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
 void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                         int width, int height, int lo_mhz,
                         int voltage_choice, int display_choice,
-                        int exit_behaviour_choice, bool saved,
+                        int exit_behaviour_choice,
                         const std::string & tuner_product,
                         bool longmynd_connected)
 {
@@ -1433,9 +1433,6 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
               display_card.y + display_card.h - 24, kTextDim, 14);
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan);
-    if(saved)
-        text.draw("Saved", settings_save_rect(width).x + 220,
-                  settings_save_rect(width).y + 17, kGreen, 16);
 
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
     draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS");
@@ -2442,7 +2439,6 @@ int main(int argc, char ** argv)
         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
     int settings_display_choice = receiver_settings.display_800x480 ? 1 : 0;
     int settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
-    bool settings_saved = false;
     std::string chat_nick;
     std::string chat_message;
     ChatInput chat_input = ChatInput::None;
@@ -2747,12 +2743,10 @@ int main(int argc, char ** argv)
                     else if(point_in_rect(
                                 x, y, settings_lo_button_rect(display.width, false))) {
                         settings_lo_mhz = std::max(1000, settings_lo_mhz - 1);
-                        settings_saved = false;
                     }
                     else if(point_in_rect(
                                 x, y, settings_lo_button_rect(display.width, true))) {
                         settings_lo_mhz = std::min(20000, settings_lo_mhz + 1);
-                        settings_saved = false;
                     }
                     else if(point_in_rect(x, y, settings_save_rect(display.width))) {
                         receiver_settings.lnb_lo_mhz = settings_lo_mhz;
@@ -2765,9 +2759,9 @@ int main(int argc, char ** argv)
                         receiver_settings.exit_full_stop = settings_exit_behaviour_choice == 1;
                         const bool display_change_pending =
                             receiver_settings.display_800x480 != (display.width == 800);
-                        settings_saved = qo100::save_receiver_settings(
+                        const bool applied = qo100::save_receiver_settings(
                             repository_root, receiver_settings);
-                        if(settings_saved) {
+                        if(applied) {
                             receiver_client.send_voltage(
                                 receiver_settings.lnb_voltage_enabled,
                                 receiver_settings.lnb_voltage_horizontal);
@@ -2792,6 +2786,14 @@ int main(int argc, char ** argv)
                                 running = false;
                             }
                         }
+                        else {
+                            qo100::log("[SETTINGS_UI] failed to save settings.json\n");
+                        }
+                        /* Closing the page is itself the confirmation - no
+                         * separate "Saved" message, which would flash for
+                         * under a frame (or not at all) when a resolution
+                         * change is about to tear the app down anyway. */
+                        app_page = AppPage::Main;
                     }
                     else {
                         bool matched = false;
@@ -2799,7 +2801,6 @@ int main(int argc, char ** argv)
                             if(point_in_rect(x, y,
                                              settings_voltage_rect(display.width, index))) {
                                 settings_voltage_choice = index;
-                                settings_saved = false;
                                 matched = true;
                                 break;
                             }
@@ -2808,7 +2809,6 @@ int main(int argc, char ** argv)
                             if(point_in_rect(x, y,
                                              settings_display_res_rect(display.width, index))) {
                                 settings_display_choice = index;
-                                settings_saved = false;
                                 matched = true;
                                 break;
                             }
@@ -2817,7 +2817,6 @@ int main(int argc, char ** argv)
                             if(point_in_rect(x, y,
                                              settings_exit_behaviour_rect(display.width, index))) {
                                 settings_exit_behaviour_choice = index;
-                                settings_saved = false;
                                 break;
                             }
                         }
@@ -2909,7 +2908,6 @@ int main(int argc, char ** argv)
                         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
                     settings_display_choice = receiver_settings.display_800x480 ? 1 : 0;
                     settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
-                    settings_saved = false;
                     tuner_product = detect_tuner_product_string();
                     app_page = AppPage::Settings;
                     qo100::log("[SETTINGS_UI] opened\n");
@@ -3288,8 +3286,7 @@ int main(int argc, char ** argv)
             draw_settings_page(renderer, text, display.width, display.height,
                                settings_lo_mhz, settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
-                               settings_saved, tuner_product,
-                               receiver_client.monitor_connected());
+                               tuner_product, receiver_client.monitor_connected());
         }
         else if(app_page == AppPage::Chat) {
             draw_chat_page(renderer, text, display.width, display.height,
