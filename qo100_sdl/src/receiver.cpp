@@ -214,9 +214,20 @@ bool save_receiver_settings(const std::string & repository_root,
                            json_object_new_boolean(settings.display_800x480));
     json_object_object_add(root, "exit_full_stop",
                            json_object_new_boolean(settings.exit_full_stop));
-    const bool saved = json_object_to_file_ext(
-        path.c_str(), root, JSON_C_TO_STRING_PRETTY) == 0;
+    /* Write to a temp file and rename() it over the real path, rather than
+     * writing settings.json directly - a direct write left it truncated to
+     * 0 bytes (losing every saved setting, silently falling back to
+     * defaults) when the process was killed mid-write, e.g. by the EXIT
+     * shutdown hang/crash fixed elsewhere in this file. rename() within the
+     * same directory is atomic on Linux: settings.json is always either the
+     * complete previous version or the complete new one, never a partial
+     * write. */
+    const std::string temp_path = path + ".tmp";
+    const bool written = json_object_to_file_ext(
+        temp_path.c_str(), root, JSON_C_TO_STRING_PRETTY) == 0;
     json_object_put(root);
+    const bool saved = written && std::rename(temp_path.c_str(), path.c_str()) == 0;
+    if(written && !saved) std::remove(temp_path.c_str());
     qo100::log("[SETTINGS] %s %s\n", saved ? "saved" : "could not save", path.c_str());
     return saved;
 }
