@@ -144,3 +144,25 @@ comments for why.
 | `scripts/` | The setup scripts described above. |
 
 Default tuning at startup is the QO-100 beacon: 741474 kHz, 1500 ksps.
+
+## License
+
+[GPLv3](LICENSE), matching [Longmynd](https://github.com/BritishAmateurTelevisionClub/longmynd) (`longmynd_ws/`), the tuner driver this project is built on and vendors directly.
+
+## Thanks
+
+I put this together for fun, after finding a couple of unused Raspberry Pis
+with displays sitting around and wanting to do something with them — I
+didn't invent any of the real engineering here, I just assembled it. Real
+thanks are owed to:
+
+- **Heather Lomond**, who wrote [Longmynd](https://github.com/BritishAmateurTelevisionClub/longmynd), the actual driver talking to the MiniTiouner hardware and doing the real DVB-S/S2 work underneath this whole receiver.
+- **Phil Crump**, whose fork of Longmynd adds the websocket status/control server this project builds on.
+- **BATC** (British Amateur Television Club), whose live wideband spectrum feed and QO-100 chat this app connects to.
+- **Andy Green**, author of libwebsockets, used throughout for all of the above.
+- **Tom, ZR6TG**, whose OpenTuner interface was the spark that got me wanting to build this in the first place.
+- **Claude**, who helped me build, debug, and optimize this — patiently, over a lot of iterations.
+
+Feel free to use, copy, and modify any of this for your own QO-100 setup.
+If you get stuck, open an issue and I'll try to help when I can, though I
+can't promise a quick turnaround.
