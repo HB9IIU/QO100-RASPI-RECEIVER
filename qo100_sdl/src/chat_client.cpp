@@ -50,7 +50,17 @@ std::string event_packet(const char * event, const char * key,
 struct ChatClient::Impl {
     std::atomic<bool> running{false};
     std::thread thread;
-    std::atomic<lws_context *> context{nullptr};
+    /* Guards `context` against a use-after-free race: run() destroys the
+     * context right after its loop exits, while stop()/queue_outgoing()
+     * (called from the main thread) read `context` and call
+     * lws_cancel_service() on it to wake the loop up early. A plain atomic
+     * pointer only makes the *read* safe, not the use of what it points
+     * to - see the identical fix and longer explanation in receiver.cpp's
+     * LongmyndClient::Impl, where this exact race was caught causing a
+     * libwebsockets internal assertion failure (SIGABRT) during EXIT's
+     * shutdown. */
+    std::mutex context_mutex;
+    lws_context * context = nullptr;
     lws * websocket = nullptr;
     std::mutex mutex;
     std::vector<std::string> incoming;
@@ -138,8 +148,8 @@ struct ChatClient::Impl {
             std::lock_guard<std::mutex> lock(mutex);
             outgoing.push_back(std::move(packet));
         }
-        if(lws_context * active_context = context.load())
-            lws_cancel_service(active_context);
+        std::lock_guard<std::mutex> lock(context_mutex);
+        if(context != nullptr) lws_cancel_service(context);
     }
 
     void connect(lws_context * active_context, const char * protocol)
@@ -174,7 +184,10 @@ struct ChatClient::Impl {
             queue_incoming("__DISCONNECTED__");
             return;
         }
-        context = active_context;
+        {
+            std::lock_guard<std::mutex> lock(context_mutex);
+            context = active_context;
+        }
         connect(active_context, protocols[0].name);
         auto last_attempt = Clock::now();
         while(running.load(std::memory_order_relaxed)) {
@@ -185,7 +198,10 @@ struct ChatClient::Impl {
                 connect(active_context, protocols[0].name);
             }
         }
-        context = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(context_mutex);
+            context = nullptr;
+        }
         lws_context_destroy(active_context);
         websocket = nullptr;
     }
@@ -289,8 +305,10 @@ void ChatClient::start()
 void ChatClient::stop()
 {
     if(!impl_->running.exchange(false)) return;
-    if(lws_context * active_context = impl_->context.load())
-        lws_cancel_service(active_context);
+    {
+        std::lock_guard<std::mutex> lock(impl_->context_mutex);
+        if(impl_->context != nullptr) lws_cancel_service(impl_->context);
+    }
     if(impl_->thread.joinable()) impl_->thread.join();
 }
 
