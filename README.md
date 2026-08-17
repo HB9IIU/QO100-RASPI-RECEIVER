@@ -134,22 +134,6 @@ alone unless you add `--purge-data`. Doesn't delete the `DATVreceiver`
 folder itself or any installed software packages — see the script's own
 comments for why.
 
----
-
-Everything below this point is reference material for people modifying the
-code — nothing you need in order to just set up and use the receiver.
-
-## Making code changes
-
-After editing the source, rebuild with:
-
-```bash
-cd ~/DATVreceiver/qo100_sdl && ./build_and_run.sh
-```
-
-(Or `cd ~/DATVreceiver/longmynd_ws && make` if you changed the tuner driver
-instead of the app itself.)
-
 ## Repo layout
 
 | Path | What it is |
