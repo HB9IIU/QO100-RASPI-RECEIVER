@@ -1318,9 +1318,13 @@ SDL_Rect settings_display_card_rect(int)
 
 SDL_Rect settings_diagnostics_card_rect(int width)
 {
+    /* Same height as settings_receiver_card_rect, so the two right-column
+     * cards below this one (Display Resolution / Exit Behaviour) line up
+     * exactly with their left-column counterparts instead of trailing 40px
+     * lower. */
     const SDL_Rect receiver = settings_receiver_card_rect(0);
     const int x = receiver.x + receiver.w + 24;
-    return {x, receiver.y, width - x - 40, 300};
+    return {x, receiver.y, width - x - 40, receiver.h};
 }
 
 SDL_Rect settings_exit_card_rect(int width)
@@ -1350,7 +1354,8 @@ SDL_Rect settings_display_res_rect(int width, int index)
 SDL_Rect settings_save_rect(int width)
 {
     const SDL_Rect card = settings_display_card_rect(width);
-    return {card.x + 24, card.y + card.h + 20, 140, 50};
+    constexpr int save_width = 140;
+    return {(width - save_width) / 2, card.y + card.h + 20, save_width, 50};
 }
 
 SDL_Rect settings_exit_behaviour_rect(int width, int index)
@@ -1427,7 +1432,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     text.draw("Restarts the app to apply", display_card.x + 24,
               display_card.y + display_card.h - 24, kTextDim, 14);
 
-    draw_button(renderer, text, settings_save_rect(width), "SAVE", kGreen);
+    draw_button(renderer, text, settings_save_rect(width), "SAVE", kCyan);
     if(saved)
         text.draw("Saved", settings_save_rect(width).x + 160,
                   settings_save_rect(width).y + 17, kGreen, 16);
@@ -1435,18 +1440,18 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
     draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS");
     const int diagnostic_x = diagnostics_card.x + 24;
-    text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 56, kText, 16);
+    text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 58, kText, 16);
     text.draw(tuner_product.empty() ? "Not detected" : tuner_product,
-              diagnostic_x, diagnostics_card.y + 88,
+              diagnostic_x, diagnostics_card.y + 82,
               tuner_product.empty() ? kRed : kText, 16);
-    text.draw("Longmynd Link", diagnostic_x, diagnostics_card.y + 148, kText, 16);
+    text.draw("Longmynd Link", diagnostic_x, diagnostics_card.y + 122, kText, 16);
     text.draw(longmynd_connected ? "Connected" : "Not connected",
-              diagnostic_x, diagnostics_card.y + 180,
+              diagnostic_x, diagnostics_card.y + 146,
               longmynd_connected ? kGreen : kRed, 16);
 
-    text.draw("Watch in VLC (same network)", diagnostic_x, diagnostics_card.y + 220, kText, 16);
-    text.draw("Media > Open Network Stream:", diagnostic_x, diagnostics_card.y + 250, kTextDim, 14);
-    text.draw(qo100::ts_stream_vlc_url(), diagnostic_x, diagnostics_card.y + 274, kCyan, 16);
+    text.draw("Watch in VLC (same network)", diagnostic_x, diagnostics_card.y + 186, kText, 16);
+    text.draw("Media > Open Network Stream:", diagnostic_x, diagnostics_card.y + 210, kTextDim, 14);
+    text.draw(qo100::ts_stream_vlc_url(), diagnostic_x, diagnostics_card.y + 230, kCyan, 16);
 
     const SDL_Rect exit_card = settings_exit_card_rect(width);
     draw_settings_card(renderer, text, exit_card, "EXIT BUTTON BEHAVIOUR");
