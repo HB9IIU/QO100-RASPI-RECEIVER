@@ -73,9 +73,9 @@ cmake -S qo100_sdl -B qo100_sdl/build -DCMAKE_BUILD_TYPE=Release
 cmake --build qo100_sdl/build --target qo100sdl -j"$(nproc)"
 
 printf "\n${GREEN}✅ Setup complete!${NC}\n\n"
-echo "▶️  Run the app with:            qo100_sdl/build_and_run.sh"
-echo "🚀 Set up autostart (optional): scripts/setup_autostart.sh"
-echo "🖼️  Screenshot album (optional): scripts/setup_photo_album.sh"
+echo "▶️  Run the app with:            $REPO_DIR/qo100_sdl/build_and_run.sh"
+echo "🚀 Set up autostart (optional): $REPO_DIR/scripts/setup_autostart.sh"
+echo "🖼️  Screenshot album (optional): $REPO_DIR/scripts/setup_photo_album.sh"
 echo
 echo "🔌 Plug in the MiniTiouner (USB 0403:6010) before or after this script -"
 echo "   the udev rule picks it up on connect, no reboot needed."
