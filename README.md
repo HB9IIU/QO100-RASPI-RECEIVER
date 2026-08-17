@@ -12,7 +12,7 @@ tune, and connects to the QO-100 wideband chat.
   variants (Express, original) likely work too but haven't been tried.
 - A touchscreen — either a 1024x600 DSI panel or the official 800x480
   Raspberry Pi touchscreen (switchable any time from the app itself, see
-  Step 5 below).
+  Step 4 below).
 - Internet access on the Pi — needed for setup, and also ongoing during
   normal use (the spectrum display and chat both come from live internet
   feeds, separate from the tuner itself).
@@ -51,18 +51,9 @@ it works without needing admin rights every time, and builds the app. It
 will ask for your password (for the parts that need it). Safe to run more
 than once if something goes wrong partway through.
 
-### 3. Plug in the tuner
+### 3. Try it out
 
-Plug the MiniTiouner into a USB port now, if it isn't already. Check it's
-recognized:
-
-```bash
-lsusb | grep 0403:6010
-```
-
-You should see a line show up.
-
-### 4. Try it out
+Plug the MiniTiouner into a USB port now, if it isn't already, then:
 
 ```bash
 cd ~/DATVreceiver/qo100_sdl
@@ -74,18 +65,20 @@ panel. If the antenna is pointed at QO-100, it should lock onto the beacon
 signal within a couple of seconds. Tap **EXIT** (or close the window) when
 you're done checking.
 
-If it doesn't lock: make sure the antenna/LNB is actually pointed at
-QO-100, and check the **SET** page in the app for the LNB settings (LO
-offset, bias voltage) match your hardware.
+If it says "No MiniTiouner detected on USB": check the tuner is properly
+plugged in and try a different USB port. If it doesn't lock onto a signal:
+make sure the antenna/LNB is actually pointed at QO-100, and check the
+**SET** page in the app for the LNB settings (LO offset, bias voltage)
+match your hardware.
 
-### 5. Pick your screen size
+### 4. Pick your screen size
 
 The app defaults to 1024x600. If your touchscreen is the smaller 800x480
 official Raspberry Pi one instead: open **SET** in the app, choose
 **800 x 480** under Display Resolution, and tap **SAVE** — the app restarts
 itself in the new size automatically. You can change this again any time.
 
-### 6. Make it start automatically
+### 5. Make it start automatically
 
 ```bash
 cd ~/DATVreceiver
@@ -99,7 +92,7 @@ in, fullscreen, ready to go. To start it right now without rebooting:
 systemctl --user start qo100datv.service
 ```
 
-### 7. Reboot and check
+### 6. Reboot and check
 
 ```bash
 sudo reboot
