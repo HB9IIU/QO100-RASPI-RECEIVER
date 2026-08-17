@@ -1338,7 +1338,7 @@ bool settings_compact(int width)
 
 SDL_Rect settings_receiver_card_rect(int width)
 {
-    return settings_compact(width) ? SDL_Rect{16, 50, (width - 48) / 2, 176}
+    return settings_compact(width) ? SDL_Rect{16, 50, (width - 48) / 2, 188}
                                     : SDL_Rect{40, 70, 460, 260};
 }
 
@@ -1382,7 +1382,7 @@ SDL_Rect settings_voltage_rect(int width, int index)
 {
     const SDL_Rect card = settings_receiver_card_rect(width);
     if(settings_compact(width))
-        return {card.x + 16 + index * 118, card.y + 132, 106, 38};
+        return {card.x + 16 + index * 118, card.y + 144, 106, 38};
     return {card.x + 24 + index * 116, card.y + 188, 104, 50};
 }
 
@@ -1460,7 +1460,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
               lo_value.y + lo_value.h / 2, kText, compact ? 16 : 20, true);
     draw_button(renderer, text, plus_button, "+", kText, compact ? 16 : 20);
 
-    const int voltage_label_y = compact ? receiver_card.y + 118 : receiver_card.y + 156;
+    const int voltage_label_y = compact ? receiver_card.y + 122 : receiver_card.y + 156;
     text.draw("LNB Bias Voltage", receiver_card.x + (compact ? 16 : 24), voltage_label_y,
               kText, label_size);
     const char * voltage_labels[] = {"OFF", "13V", "18V"};
@@ -1489,9 +1489,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                   button.y + button.h / 2,
                   selected ? kGreen : kText, button_label_size, true);
     }
-    text.draw(compact ? "Restarts to apply" : "Restarts the app to apply",
-              display_card.x + (compact ? 16 : 24),
-              display_card.y + display_card.h - (compact ? 18 : 24), kTextDim, 14);
+    if(!compact)
+        text.draw("Restarts the app to apply", display_card.x + 24,
+                  display_card.y + display_card.h - 24, kTextDim, 14);
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan,
                 compact ? 14 : 16);
@@ -1541,14 +1541,11 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                   button.y + button.h / 2,
                   selected ? kGreen : kText, button_label_size, true);
     }
-    text.draw(compact
-                  ? (exit_behaviour_choice == 1 ? "EXIT stops the app"
-                                                 : "EXIT auto-restarts")
-                  : (exit_behaviour_choice == 1
-                         ? "EXIT stops the app - restart via desktop icon"
-                         : "EXIT restarts the app automatically"),
-              exit_card.x + (compact ? 16 : 24),
-              exit_card.y + exit_card.h - (compact ? 18 : 24), kTextDim, 14);
+    if(!compact)
+        text.draw(exit_behaviour_choice == 1
+                      ? "EXIT stops the app - restart via desktop icon"
+                      : "EXIT restarts the app automatically",
+                  exit_card.x + 24, exit_card.y + exit_card.h - 24, kTextDim, 14);
 }
 
 struct KeyboardKey {
