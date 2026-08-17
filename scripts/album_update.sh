@@ -62,6 +62,11 @@ figure figcaption{font-size:0.75rem;text-align:center;color:#aaa;margin-top:2px}
 .del button{background:rgba(20,20,20,0.75);color:#fff;border:none;border-radius:4px;
   width:26px;height:26px;padding:0;font-size:1rem;line-height:1;cursor:pointer}
 .del button:active{background:#a33232}
+figure.selected{outline:2px solid #2b8ea3;border-radius:6px}
+figure.selected img{opacity:0.85}
+.marquee{position:fixed;border:1px solid #2b8ea3;background:rgba(43,142,163,0.2);
+  z-index:10;pointer-events:none}
+.grid{user-select:none}
 </style></head><body>'
     echo "<h1>QO-100 DATV screenshots ($(ls -1 "$ALBUM_DIR"/*.png 2>/dev/null | wc -l))</h1>"
     echo '<div class="top">'
@@ -77,5 +82,75 @@ figure figcaption{font-size:0.75rem;text-align:center;color:#aaa;margin-top:2px}
         echo "<a href=\"$name\"><img src=\"thumbs/$name\" loading=\"lazy\"></a><figcaption>${name%.png}</figcaption>"
         echo "</figure>"
     done
-    echo '</div></body></html>'
+    echo '</div>'
+    echo '<script>
+(function () {
+  "use strict";
+  var grid = document.querySelector(".grid");
+  if (!grid) return;
+
+  function syncHighlight(cb) {
+    var fig = cb.closest("figure");
+    if (fig) fig.classList.toggle("selected", cb.checked);
+  }
+  // Manual checkbox taps (mouse or touch) keep the highlight in sync too,
+  // not just drag-selection below.
+  grid.querySelectorAll(".sel").forEach(function (cb) {
+    cb.addEventListener("change", function () { syncHighlight(cb); });
+  });
+
+  /* Mouse-only rubber-band select, Mac-Photos style: press and drag across
+   * thumbnails to select several at once. Deliberately not touch-enabled -
+   * on a phone the same drag gesture is how you scroll the page, and there
+   * is no good way to tell those two gestures apart early enough to avoid
+   * breaking scrolling. Touch users have the per-photo checkboxes instead. */
+  var startX, startY, dragging = false, box = null;
+  var threshold = 6;
+
+  function start(e) {
+    if (e.button !== 0) return;
+    if (e.target.closest(".sel, .del")) return;
+    startX = e.clientX;
+    startY = e.clientY;
+    dragging = false;
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", end);
+  }
+
+  function move(e) {
+    var dx = e.clientX - startX, dy = e.clientY - startY;
+    if (!dragging && Math.hypot(dx, dy) < threshold) return;
+    dragging = true;
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "marquee";
+      document.body.appendChild(box);
+    }
+    var x = Math.min(startX, e.clientX), y = Math.min(startY, e.clientY);
+    var w = Math.abs(dx), h = Math.abs(dy);
+    box.style.left = x + "px";
+    box.style.top = y + "px";
+    box.style.width = w + "px";
+    box.style.height = h + "px";
+    var rect = {left: x, top: y, right: x + w, bottom: y + h};
+    grid.querySelectorAll("figure").forEach(function (fig) {
+      var r = fig.getBoundingClientRect();
+      var overlap = !(r.right < rect.left || r.left > rect.right ||
+                       r.bottom < rect.top || r.top > rect.bottom);
+      var cb = fig.querySelector(".sel");
+      if (cb) { cb.checked = overlap; syncHighlight(cb); }
+    });
+  }
+
+  function end() {
+    if (box) { box.remove(); box = null; }
+    dragging = false;
+    document.removeEventListener("mousemove", move);
+    document.removeEventListener("mouseup", end);
+  }
+
+  grid.addEventListener("mousedown", start);
+})();
+    </script>'
+    echo '</body></html>'
 } > "$INDEX"
