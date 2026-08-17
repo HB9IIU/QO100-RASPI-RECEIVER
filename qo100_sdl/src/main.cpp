@@ -1374,7 +1374,7 @@ SDL_Rect settings_lo_button_rect(int width, bool increment)
 {
     const SDL_Rect card = settings_receiver_card_rect(width);
     if(settings_compact(width))
-        return {card.x + (increment ? card.w - 60 : 16), card.y + 62, 44, 38};
+        return {card.x + (increment ? card.w - 60 : 16), card.y + 70, 44, 38};
     return {card.x + (increment ? 228 : 24), card.y + 88, 48, 48};
 }
 
@@ -1412,13 +1412,14 @@ SDL_Rect settings_exit_behaviour_rect(int width, int index)
 }
 
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
-                        const SDL_Rect & card, const std::string & title)
+                        const SDL_Rect & card, const std::string & title, bool compact)
 {
     fill_panel(renderer, card);
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &card);
-    text.draw(title, card.x + 24, card.y + 16, kCyan, 14);
-    const SDL_Rect rule{card.x + 24, card.y + 40, card.w - 48, 1};
+    const int margin = compact ? 16 : 24;
+    text.draw(title, card.x + margin, card.y + 16, kCyan, 14);
+    const SDL_Rect rule{card.x + margin, card.y + 40, card.w - margin * 2, 1};
     set_colour(renderer, kBorder);
     SDL_RenderFillRect(renderer, &rule);
 }
@@ -1441,7 +1442,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     draw_button(renderer, text, page_back_rect(width), "BACK", kCyan);
 
     const SDL_Rect receiver_card = settings_receiver_card_rect(width);
-    draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING");
+    draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING", compact);
     const int lo_label_y = compact ? receiver_card.y + 46 : receiver_card.y + 56;
     text.draw("LNB LO Offset (MHz)", receiver_card.x + (compact ? 16 : 24), lo_label_y,
               kText, label_size);
@@ -1476,7 +1477,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     }
 
     const SDL_Rect display_card = settings_display_card_rect(width);
-    draw_settings_card(renderer, text, display_card, "DISPLAY RESOLUTION");
+    draw_settings_card(renderer, text, display_card, "DISPLAY RESOLUTION", compact);
     const char * display_labels[] = {"1024 x 600", "800 x 480"};
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_display_res_rect(width, index);
@@ -1497,7 +1498,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                 compact ? 14 : 16);
 
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
-    draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS");
+    draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS", compact);
     const int diagnostic_x = diagnostics_card.x + (compact ? 16 : 24);
     if(compact) {
         text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 46, kText, 14);
@@ -1528,7 +1529,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     }
 
     const SDL_Rect exit_card = settings_exit_card_rect(width);
-    draw_settings_card(renderer, text, exit_card, "EXIT BUTTON BEHAVIOUR");
+    draw_settings_card(renderer, text, exit_card, "EXIT BUTTON BEHAVIOUR", compact);
     const char * exit_labels[] = {"Restart", "Full Stop"};
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_exit_behaviour_rect(width, index);
