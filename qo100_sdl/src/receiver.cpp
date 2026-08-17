@@ -331,7 +331,22 @@ bool LongmyndProcess::running() const
 struct LongmyndClient::Impl {
     std::atomic<bool> running{false};
     std::thread thread;
-    std::atomic<lws_context *> context{nullptr};
+    /* Guards `context` against a genuine use-after-free race: run() (its
+     * owning thread) destroys the context right after the run loop exits,
+     * while stop()/queue() (called from the main thread) read `context` and
+     * call lws_cancel_service() on it to wake the loop up early. A plain
+     * atomic pointer only makes the *read* of the pointer safe, not the use
+     * of what it points to - a load() on the main thread can return a
+     * still-non-null pointer microseconds before run()'s thread starts
+     * lws_context_destroy() on that same object, so lws_cancel_service()
+     * and lws_context_destroy() can execute concurrently on the same
+     * context (observed in practice as a libwebsockets internal refcount
+     * assertion failure/SIGABRT during EXIT's shutdown). Holding this mutex
+     * across both "null out and hand off to destroy" (run()) and "read and
+     * call lws_cancel_service" (stop()/queue()) makes the two mutually
+     * exclusive. */
+    std::mutex context_mutex;
+    lws_context * context = nullptr;
     lws * monitor_wsi = nullptr;
     lws * control_wsi = nullptr;
     std::atomic<bool> monitor_is_connected{false};
@@ -521,7 +536,10 @@ struct LongmyndClient::Impl {
         info.connect_timeout_secs = 1;
         lws_context * active_context = lws_create_context(&info);
         if(active_context == nullptr) return;
-        context = active_context;
+        {
+            std::lock_guard<std::mutex> lock(context_mutex);
+            context = active_context;
+        }
         const auto wait_started = std::chrono::steady_clock::now();
         qo100::log( "[LONGMYND-WS] waiting for server port %d\n", kWebsocketPort);
         auto last_attempt = wait_started - kReconnectInterval;
@@ -560,7 +578,10 @@ struct LongmyndClient::Impl {
             else
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        context = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(context_mutex);
+            context = nullptr;
+        }
         lws_context_destroy(active_context);
         monitor_wsi = nullptr;
         control_wsi = nullptr;
@@ -575,7 +596,8 @@ struct LongmyndClient::Impl {
             while(pending_commands.size() >= kMaxPendingCommands) pending_commands.pop_front();
             pending_commands.push_back(std::move(command));
         }
-        if(lws_context * active_context = context.load()) lws_cancel_service(active_context);
+        std::lock_guard<std::mutex> lock(context_mutex);
+        if(context != nullptr) lws_cancel_service(context);
     }
 };
 
@@ -591,7 +613,10 @@ void LongmyndClient::start()
 void LongmyndClient::stop()
 {
     if(!impl_->running.exchange(false)) return;
-    if(lws_context * active_context = impl_->context.load()) lws_cancel_service(active_context);
+    {
+        std::lock_guard<std::mutex> lock(impl_->context_mutex);
+        if(impl_->context != nullptr) lws_cancel_service(impl_->context);
+    }
     if(impl_->thread.joinable()) impl_->thread.join();
 }
 

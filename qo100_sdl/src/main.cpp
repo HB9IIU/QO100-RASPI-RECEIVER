@@ -235,9 +235,28 @@ public:
     void close()
     {
         if(device_ == 0) return;
-        SDL_PauseAudioDevice(device_, 1);
-        SDL_CloseAudioDevice(device_);
+        const SDL_AudioDeviceID device = device_;
         device_ = 0;
+        SDL_PauseAudioDevice(device, 1);
+
+        /* SDL_CloseAudioDevice can hang indefinitely against some
+         * PulseAudio/PipeWire-pulse servers (seen on Raspberry Pi OS
+         * Trixie's pipewire-pulse) waiting for a teardown ack that never
+         * arrives. EXIT must never freeze the whole app on that - and it
+         * did, taking the systemd service down with it since a hung stop
+         * gets SIGKILLed and isn't restarted. Give it a bounded window on
+         * its own thread and abandon it if it doesn't return; harmless,
+         * since the process is exiting either way. */
+        auto closed = std::make_shared<std::atomic<bool>>(false);
+        std::thread closer([device, closed] {
+            SDL_CloseAudioDevice(device);
+            *closed = true;
+        });
+        closer.detach();
+        for(int attempt = 0; attempt < 30 && !closed->load(); ++attempt)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if(!closed->load())
+            qo100::log("[AUDIO] SDL_CloseAudioDevice did not return in time; abandoning\n");
     }
 
     void reset()
