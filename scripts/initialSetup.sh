@@ -25,7 +25,7 @@ fi
 step() { printf "\n${BLUE}%s${NC}\n" "$1"; }
 skip() { printf "${YELLOW}   ↷ %s${NC}\n" "$1"; }
 
-cat <<BANNER
+printf '%b' "$(cat <<BANNER
 
 ${BLUE}================================================================${NC}
 ${BLUE}  QO-100 DATV Receiver - first-time setup${NC}
@@ -56,6 +56,7 @@ ${GREEN}This script will NOT:${NC}
 
 Press ${GREEN}ENTER${NC} to continue, or ${YELLOW}Ctrl+C${NC} to cancel.
 BANNER
+)"
 read -r _
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
