@@ -139,6 +139,7 @@ thanks are owed to:
 - **BATC** (British Amateur Television Club), whose live wideband spectrum feed and QO-100 chat this app connects to.
 - **Andy Green**, author of libwebsockets, used throughout for all of the above.
 - **Tom, ZR6TG**, whose OpenTuner interface was the spark that got me wanting to build this in the first place.
+- **Steve, GH7VHG**, for testing the first release.
 - **Claude**, who helped me build, debug, and optimize this — patiently, over a lot of iterations.
 
 Feel free to use, copy, and modify any of this for your own QO-100 setup.
