@@ -111,7 +111,10 @@ cmake -S qo100_sdl -B qo100_sdl/build -DCMAKE_BUILD_TYPE=Release
 cmake --build qo100_sdl/build --target qo100sdl -j"$(nproc)"
 
 step "🚀 Setting up autostart..."
-"$REPO_DIR/scripts/setup_autostart.sh"
+# Don't launch the app here - it would pop up fullscreen mid-setup, hiding
+# this terminal (and the reboot notice/countdown coming up next) right when
+# it matters. The reboot a few steps down starts it for real.
+QO100_SKIP_SERVICE_START=1 "$REPO_DIR/scripts/setup_autostart.sh"
 
 printf "\n${GREEN}✅ Setup complete!${NC}\n\n"
 echo "🖼️  Screenshot album (optional): $REPO_DIR/scripts/setup_photo_album.sh"

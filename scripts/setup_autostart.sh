@@ -89,7 +89,19 @@ EOF
 
 systemctl --user daemon-reload
 systemctl --user enable qo100datv.service
-systemctl --user restart qo100datv.service
-echo "Installed, enabled, and started qo100datv.service - it will also start"
-echo "automatically at next login."
+if [ -z "$QO100_SKIP_SERVICE_START" ]; then
+    systemctl --user restart qo100datv.service
+    echo "Installed, enabled, and started qo100datv.service - it will also start"
+    echo "automatically at next login."
+else
+    # initialSetup.sh sets this: starting the app here would pop up
+    # fullscreen mid-setup, hiding the terminal (and its own "setup
+    # complete" message and reboot countdown) right as it's needed - and
+    # udev hasn't actually been triggered for real yet at this point in a
+    # first-time setup, so it could flash a misleading "No MiniTiouner
+    # detected" too. enable is enough; the imminent reboot starts it for
+    # real.
+    echo "Installed and enabled qo100datv.service - it will start automatically"
+    echo "at next boot."
+fi
 echo "To check status/logs: systemctl --user status qo100datv.service"
