@@ -2350,7 +2350,7 @@ int main(int argc, char ** argv)
         qo100::log("[SDL] init failed: %s\n", SDL_GetError());
         return 1;
     }
-    const DisplayConfig display = resolve_display_config(
+    DisplayConfig display = resolve_display_config(
         !options.screenshot.empty(), settings_file_exists, receiver_settings.display_800x480);
     if(TTF_Init() != 0) {
         qo100::log("[TTF] init failed: %s\n", TTF_GetError());
@@ -2383,6 +2383,24 @@ int main(int argc, char ** argv)
         return 1;
     }
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    /* SDL_WINDOW_FULLSCREEN_DESKTOP always sizes the window to match the
+     * current desktop mode, ignoring whatever width/height was requested at
+     * creation - so a saved/forced resolution smaller than the real screen
+     * (e.g. settings.json asking for 800x480 on a genuinely 1024x600 panel)
+     * would otherwise leave display.width/height wrong for the rest of the
+     * app, which draws everything using those values: the UI would render
+     * correctly but confined to an 800x480 box in the corner of the real,
+     * larger window, with the remaining desktop area left blank. Query the
+     * renderer's actual output size and use that from here on so layout
+     * always matches what's really on screen. */
+    if(display.fullscreen) {
+        int actual_width = display.width;
+        int actual_height = display.height;
+        SDL_GetRendererOutputSize(renderer, &actual_width, &actual_height);
+        display.width = actual_width;
+        display.height = actual_height;
+    }
 
     SDL_RendererInfo renderer_info{};
     SDL_GetRendererInfo(renderer, &renderer_info);
