@@ -1354,7 +1354,7 @@ SDL_Rect settings_display_res_rect(int width, int index)
 SDL_Rect settings_save_rect(int width)
 {
     const SDL_Rect card = settings_display_card_rect(width);
-    constexpr int save_width = 140;
+    constexpr int save_width = 200;
     return {(width - save_width) / 2, card.y + card.h + 20, save_width, 50};
 }
 
@@ -1432,9 +1432,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     text.draw("Restarts the app to apply", display_card.x + 24,
               display_card.y + display_card.h - 24, kTextDim, 14);
 
-    draw_button(renderer, text, settings_save_rect(width), "SAVE", kCyan);
+    draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan);
     if(saved)
-        text.draw("Saved", settings_save_rect(width).x + 160,
+        text.draw("Saved", settings_save_rect(width).x + 220,
                   settings_save_rect(width).y + 17, kGreen, 16);
 
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
