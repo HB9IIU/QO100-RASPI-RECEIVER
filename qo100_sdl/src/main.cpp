@@ -1323,6 +1323,12 @@ SDL_Rect settings_diagnostics_card_rect(int width)
     return {x, receiver.y, width - x - 40, 300};
 }
 
+SDL_Rect settings_exit_card_rect(int width)
+{
+    const SDL_Rect diagnostics = settings_diagnostics_card_rect(width);
+    return {diagnostics.x, diagnostics.y + diagnostics.h + 20, diagnostics.w, 140};
+}
+
 SDL_Rect settings_lo_button_rect(int width, bool increment)
 {
     const SDL_Rect card = settings_receiver_card_rect(width);
@@ -1347,6 +1353,12 @@ SDL_Rect settings_save_rect(int width)
     return {card.x + 24, card.y + card.h + 20, 140, 50};
 }
 
+SDL_Rect settings_exit_behaviour_rect(int width, int index)
+{
+    const SDL_Rect card = settings_exit_card_rect(width);
+    return {card.x + 24 + index * 216, card.y + 56, 200, 50};
+}
+
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
                         const SDL_Rect & card, const std::string & title)
 {
@@ -1361,7 +1373,8 @@ void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
 
 void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                         int width, int height, int lo_mhz,
-                        int voltage_choice, int display_choice, bool saved,
+                        int voltage_choice, int display_choice,
+                        int exit_behaviour_choice, bool saved,
                         const std::string & tuner_product,
                         bool longmynd_connected)
 {
@@ -1411,8 +1424,8 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                   button.y + button.h / 2,
                   selected ? kGreen : kText, 16, true);
     }
-    text.draw("Applies on next release - no effect yet",
-              display_card.x + 24, display_card.y + display_card.h - 24, kTextDim, 14);
+    text.draw("Restarts the app to apply", display_card.x + 24,
+              display_card.y + display_card.h - 24, kTextDim, 14);
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE", kGreen);
     if(saved)
@@ -1434,6 +1447,25 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     text.draw("Watch in VLC (same network)", diagnostic_x, diagnostics_card.y + 220, kText, 16);
     text.draw("Media > Open Network Stream:", diagnostic_x, diagnostics_card.y + 250, kTextDim, 14);
     text.draw(qo100::ts_stream_vlc_url(), diagnostic_x, diagnostics_card.y + 274, kCyan, 16);
+
+    const SDL_Rect exit_card = settings_exit_card_rect(width);
+    draw_settings_card(renderer, text, exit_card, "EXIT BUTTON BEHAVIOUR");
+    const char * exit_labels[] = {"Restart", "Full Stop"};
+    for(int index = 0; index < 2; ++index) {
+        const SDL_Rect button = settings_exit_behaviour_rect(width, index);
+        const bool selected = index == exit_behaviour_choice;
+        set_colour(renderer, selected ? Colour{0x1f, 0x4d, 0x33} : kPanel);
+        SDL_RenderFillRect(renderer, &button);
+        set_colour(renderer, selected ? kGreen : kBorder);
+        SDL_RenderDrawRect(renderer, &button);
+        text.draw(exit_labels[index], button.x + button.w / 2,
+                  button.y + button.h / 2,
+                  selected ? kGreen : kText, 16, true);
+    }
+    text.draw(exit_behaviour_choice == 1
+                  ? "EXIT stops the app - restart via desktop icon"
+                  : "EXIT restarts the app automatically",
+              exit_card.x + 24, exit_card.y + exit_card.h - 24, kTextDim, 14);
 }
 
 struct KeyboardKey {
@@ -2404,6 +2436,7 @@ int main(int argc, char ** argv)
     int settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
     int settings_display_choice = receiver_settings.display_800x480 ? 1 : 0;
+    int settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
     bool settings_saved = false;
     std::string chat_nick;
     std::string chat_message;
@@ -2724,6 +2757,7 @@ int main(int argc, char ** argv)
                             settings_voltage_choice == 2;
                         receiver_settings.audio_volume_percent = volume_percent;
                         receiver_settings.display_800x480 = settings_display_choice == 1;
+                        receiver_settings.exit_full_stop = settings_exit_behaviour_choice == 1;
                         const bool display_change_pending =
                             receiver_settings.display_800x480 != (display.width == 800);
                         settings_saved = qo100::save_receiver_settings(
@@ -2735,16 +2769,17 @@ int main(int argc, char ** argv)
                             selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
                                 current_tune_if_khz / 1000.0;
                             qo100::log(
-                                "[SETTINGS_UI] applied LO=%dMHz voltage=%s display=%s\n",
+                                "[SETTINGS_UI] applied LO=%dMHz voltage=%s display=%s exit=%s\n",
                                 settings_lo_mhz,
                                 settings_voltage_choice == 0 ? "OFF" :
                                     (settings_voltage_choice == 1 ? "13V" : "18V"),
-                                settings_display_choice == 1 ? "800x480" : "1024x600");
+                                settings_display_choice == 1 ? "800x480" : "1024x600",
+                                settings_exit_behaviour_choice == 1 ? "full-stop" : "restart");
                             /* Resolution is only picked up at process start
-                             * (qo100_sdl/launch.sh reads settings.json fresh
-                             * each launch) - restart to apply, the same way
-                             * EXIT does. Restart=always in the systemd unit
-                             * brings it back up in the new size. */
+                             * (qo100_sdl/service_launch.sh reads settings.json
+                             * fresh each launch) - restart to apply, the same
+                             * way EXIT does. Restart=always in the systemd
+                             * unit brings it back up in the new size. */
                             if(display_change_pending) {
                                 qo100::log(
                                     "[SETTINGS_UI] display resolution changed; "
@@ -2768,6 +2803,15 @@ int main(int argc, char ** argv)
                             if(point_in_rect(x, y,
                                              settings_display_res_rect(display.width, index))) {
                                 settings_display_choice = index;
+                                settings_saved = false;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        for(int index = 0; !matched && index < 2; ++index) {
+                            if(point_in_rect(x, y,
+                                             settings_exit_behaviour_rect(display.width, index))) {
+                                settings_exit_behaviour_choice = index;
                                 settings_saved = false;
                                 break;
                             }
@@ -2859,6 +2903,7 @@ int main(int argc, char ** argv)
                     settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
                         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
                     settings_display_choice = receiver_settings.display_800x480 ? 1 : 0;
+                    settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
                     settings_saved = false;
                     tuner_product = detect_tuner_product_string();
                     app_page = AppPage::Settings;
@@ -2882,8 +2927,22 @@ int main(int argc, char ** argv)
                 const SDL_Rect exit_button = status_button_rect(layout, 3);
                 if(x >= exit_button.x && x < exit_button.x + exit_button.w &&
                    y >= exit_button.y && y < exit_button.y + exit_button.h) {
-                    qo100::log(
-                        "[APP] EXIT tapped; closing application (system remains running)\n");
+                    if(receiver_settings.exit_full_stop) {
+                        /* systemctl stop is a real stop regardless of the
+                         * unit's Restart=always - unlike just exiting
+                         * cleanly, which Restart=always brings straight
+                         * back up. No-op (harmless) when not actually
+                         * running as the systemd service, e.g. a manual
+                         * build_and_run.sh session. */
+                        qo100::log(
+                            "[APP] EXIT tapped; stopping qo100datv.service "
+                            "(Full Stop selected)\n");
+                        std::system("systemctl --user stop qo100datv.service &");
+                    }
+                    else {
+                        qo100::log(
+                            "[APP] EXIT tapped; closing application (system remains running)\n");
+                    }
                     running = false;
                     continue;
                 }
@@ -3223,7 +3282,8 @@ int main(int argc, char ** argv)
         if(app_page == AppPage::Settings) {
             draw_settings_page(renderer, text, display.width, display.height,
                                settings_lo_mhz, settings_voltage_choice,
-                               settings_display_choice, settings_saved, tuner_product,
+                               settings_display_choice, settings_exit_behaviour_choice,
+                               settings_saved, tuner_product,
                                receiver_client.monitor_connected());
         }
         else if(app_page == AppPage::Chat) {

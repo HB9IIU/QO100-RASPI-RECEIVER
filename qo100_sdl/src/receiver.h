@@ -11,10 +11,14 @@ struct ReceiverSettings {
     bool lnb_voltage_enabled = false;
     bool lnb_voltage_horizontal = false;
     int audio_volume_percent = 50;
-    /* Placeholder for upcoming 800x480 display support - persisted so the
-     * Settings page radio choice survives a restart, but not yet wired to
-     * anything that actually changes the running resolution. */
     bool display_800x480 = false;
+    /* false (default): EXIT restarts the app (systemd Restart=always picks
+     * it back up a few seconds later) - unchanged, original behaviour.
+     * true: EXIT calls `systemctl --user stop` on itself instead, a real
+     * stop that Restart=always doesn't override, for anyone who wants EXIT
+     * to actually exit and expects to restart it manually (desktop icon /
+     * systemctl --user start) rather than have it come back on its own. */
+    bool exit_full_stop = false;
 };
 
 ReceiverSettings load_receiver_settings(const std::string & repository_root);

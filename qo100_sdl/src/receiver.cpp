@@ -185,11 +185,14 @@ ReceiverSettings load_receiver_settings(const std::string & repository_root)
         settings.audio_volume_percent = json_object_get_int(value);
     if(json_object_object_get_ex(root, "display_800x480", &value))
         settings.display_800x480 = json_object_get_boolean(value);
+    if(json_object_object_get_ex(root, "exit_full_stop", &value))
+        settings.exit_full_stop = json_object_get_boolean(value);
     json_object_put(root);
-    qo100::log( "[SETTINGS] LO=%.1fMHz voltage=%s/%s volume=%d%% display=%s\n",
+    qo100::log( "[SETTINGS] LO=%.1fMHz voltage=%s/%s volume=%d%% display=%s exit=%s\n",
         settings.lnb_lo_mhz, settings.lnb_voltage_enabled ? "on" : "off",
         settings.lnb_voltage_horizontal ? "18V" : "13V", settings.audio_volume_percent,
-        settings.display_800x480 ? "800x480" : "1024x600");
+        settings.display_800x480 ? "800x480" : "1024x600",
+        settings.exit_full_stop ? "full-stop" : "restart");
     return settings;
 }
 
@@ -209,6 +212,8 @@ bool save_receiver_settings(const std::string & repository_root,
                            json_object_new_int(settings.audio_volume_percent));
     json_object_object_add(root, "display_800x480",
                            json_object_new_boolean(settings.display_800x480));
+    json_object_object_add(root, "exit_full_stop",
+                           json_object_new_boolean(settings.exit_full_stop));
     const bool saved = json_object_to_file_ext(
         path.c_str(), root, JSON_C_TO_STRING_PRETTY) == 0;
     json_object_put(root);
