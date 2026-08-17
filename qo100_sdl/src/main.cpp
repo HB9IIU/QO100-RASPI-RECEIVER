@@ -151,13 +151,25 @@ struct DisplayConfig {
 };
 
 /* Requires SDL video already initialised (SDL_Init(SDL_INIT_VIDEO) must run
- * before this). With no explicit QO100_DISPLAY, defaults to the actual
- * physical screen size rather than a hardcoded 1024x600 - otherwise a Pi
- * with the smaller 800x480 panel opens a too-big window on first run, with
- * the SET button (needed to fix the resolution) pushed off-screen and
- * unreachable. Falls back to the 1024x600 reference size only if SDL can't
- * report a desktop mode at all. */
-DisplayConfig resolve_display_config(bool screenshot_mode)
+ * before this). Resolution priority:
+ *   1. QO100_DISPLAY env var, if set (e.g. a systemd unit pinned to a
+ *      genuinely different physical panel via setup_autostart.sh WxH).
+ *   2. The saved Display Resolution choice from settings.json, if that file
+ *      already exists - this is what makes the SET page's toggle actually
+ *      stick regardless of how the app is launched (systemd service via
+ *      service_launch.sh, the desktop icon via build_and_run.sh, or by
+ *      hand); relying on service_launch.sh alone to set QO100_DISPLAY left
+ *      the other launch paths silently ignoring the saved choice and
+ *      falling back to auto-detect, which could render a layout too big
+ *      for the real screen.
+ *   3. Auto-detected physical screen size, only when settings.json doesn't
+ *      exist yet (genuine first run) - otherwise a Pi with the smaller
+ *      800x480 panel would open a too-big window before the user ever gets
+ *      a chance to fix it from SET, with the SET button itself pushed
+ *      off-screen and unreachable. Falls back to the 1024x600 reference
+ *      size only if SDL can't report a desktop mode at all. */
+DisplayConfig resolve_display_config(bool screenshot_mode, bool settings_file_exists,
+                                      bool saved_800x480)
 {
     DisplayConfig config;
     if(const char * value = std::getenv("QO100_DISPLAY")) {
@@ -167,6 +179,13 @@ DisplayConfig resolve_display_config(bool screenshot_mode)
             config.width = width;
             config.height = height;
         }
+    }
+    else if(settings_file_exists) {
+        if(saved_800x480) {
+            config.width = 800;
+            config.height = 480;
+        }
+        // else: leave at the 1024x600 reference default (struct init).
     }
     else {
         SDL_DisplayMode mode{};
@@ -2260,11 +2279,17 @@ int main(int argc, char ** argv)
     qo100::reset_log_clock();
     log_startup_banner();
     const Options options = parse_options(argc, argv);
+    const std::string repository_root = repository_directory();
+    const std::string settings_path = repository_root + "/qo100_sdl/settings.json";
+    const bool settings_file_exists = std::ifstream(settings_path).good();
+    qo100::ReceiverSettings receiver_settings =
+        qo100::load_receiver_settings(repository_root);
     if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         qo100::log("[SDL] init failed: %s\n", SDL_GetError());
         return 1;
     }
-    const DisplayConfig display = resolve_display_config(!options.screenshot.empty());
+    const DisplayConfig display = resolve_display_config(
+        !options.screenshot.empty(), settings_file_exists, receiver_settings.display_800x480);
     if(TTF_Init() != 0) {
         qo100::log("[TTF] init failed: %s\n", TTF_GetError());
         SDL_Quit();
@@ -2318,21 +2343,6 @@ int main(int argc, char ** argv)
     }
 
     const Layout layout(display.width, display.height);
-    const std::string repository_root = repository_directory();
-    qo100::ReceiverSettings receiver_settings =
-        qo100::load_receiver_settings(repository_root);
-    /* display.width/height is the resolution actually in use this run
-     * (auto-detected, or QO100_DISPLAY) - keep the persisted preference in
-     * sync with it so the Settings page toggle never shows a stale choice
-     * left over from before an auto-detect or an external resolution
-     * change (e.g. swapping panels) updated the real running resolution. */
-    {
-        const bool actual_800x480 = (display.width == 800);
-        if(receiver_settings.display_800x480 != actual_800x480) {
-            receiver_settings.display_800x480 = actual_800x480;
-            qo100::save_receiver_settings(repository_root, receiver_settings);
-        }
-    }
     auto spectrum_texture = std::make_unique<SpectrumTexture>(
         renderer, layout.spectrum_plot.w, layout.spectrum_plot.h, layout.spectrum_max_db);
     if(!spectrum_texture->valid()) {
