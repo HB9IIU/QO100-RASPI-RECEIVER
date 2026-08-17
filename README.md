@@ -134,6 +134,11 @@ This prints a web address to open in a browser (e.g. `http://<pi's IP
 address>:8090/`). Keeps the most recent 300 screenshots by default; delete
 individual photos or select several for bulk delete right from the page.
 
+---
+
+Everything below this point is reference material for people modifying the
+code — nothing you need in order to just set up and use the receiver.
+
 ## Making code changes
 
 After editing the source, rebuild with:
