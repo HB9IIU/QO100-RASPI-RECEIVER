@@ -565,6 +565,12 @@ struct Layout {
     int bottom_y;
     int bottom_height;
     int video_width;
+    /* 800x480 has much less spare vertical space than 1024x600 - the
+     * frequency axis labels below the spectrum plot (see draw_spectrum())
+     * are skipped at this size and their reserved strip handed to the plot
+     * itself instead, so it shows more dB range rather than just axis
+     * chrome. Same dB-per-pixel scale either way, not a stretch. */
+    bool compact;
     SDL_Rect spectrum_panel;
     SDL_Rect spectrum_plot;
     SDL_Rect video_panel;
@@ -575,8 +581,10 @@ struct Layout {
         : width(w), height(h), spectrum_height(h * 230 / 480),
           bottom_y(4 + spectrum_height + 4), bottom_height(h - bottom_y - 4),
           video_width(w * 420 / 800),
+          compact(w <= 800),
           spectrum_panel{4, 4, w - 8, spectrum_height},
-          spectrum_plot{18, 18, w - 36, spectrum_height - 36},
+          spectrum_plot{18, 18, w - 36,
+                       spectrum_height - (compact ? 22 : 36)},
           video_panel{4, bottom_y, video_width, bottom_height},
           video_content{18, bottom_y + 14, video_width - 28, bottom_height - 28},
           status_panel{4 + video_width + 4, bottom_y,
@@ -1129,11 +1137,13 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         text.draw(spectrum_status_text(status), layout.spectrum_plot.x + 8,
                   layout.spectrum_plot.y + 8, status_colour);
     }
-    for(int number = 1; number <= 8; ++number) {
-        const int x = layout.spectrum_plot.x + number * layout.spectrum_plot.w / 9;
-        text.draw(std::to_string(10490 + number), x,
-                  layout.spectrum_plot.y + layout.spectrum_plot.h + 12,
-                  kTextDim, 14, true);
+    if(!layout.compact) {
+        for(int number = 1; number <= 8; ++number) {
+            const int x = layout.spectrum_plot.x + number * layout.spectrum_plot.w / 9;
+            text.draw(std::to_string(10490 + number), x,
+                      layout.spectrum_plot.y + layout.spectrum_plot.h + 12,
+                      kTextDim, 14, true);
+        }
     }
 }
 
