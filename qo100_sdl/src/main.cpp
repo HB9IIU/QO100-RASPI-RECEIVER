@@ -558,6 +558,11 @@ private:
     uint64_t rebases_ = 0;
 };
 
+/* The dB range (0..kDisplayMaxDb) the spectrum plot's colour/height mapping
+ * is tuned against - referenced by Layout below to compute extra headroom
+ * for the compact (800x480) plot without changing this base scale. */
+constexpr float kDisplayMaxDb = 10.0F;
+
 struct Layout {
     int width;
     int height;
@@ -568,9 +573,14 @@ struct Layout {
     /* 800x480 has much less spare vertical space than 1024x600 - the
      * frequency axis labels below the spectrum plot (see draw_spectrum())
      * are skipped at this size and their reserved strip handed to the plot
-     * itself instead, so it shows more dB range rather than just axis
-     * chrome. Same dB-per-pixel scale either way, not a stretch. */
+     * itself instead. spectrum_max_db raises the ceiling by exactly enough
+     * to keep the existing dB-per-pixel density unchanged (so today's
+     * signals render pixel-identical, not stretched) - the extra pixel rows
+     * become new headroom above the old 0..kDisplayMaxDb ceiling, mainly so
+     * a strong signal's label has somewhere to sit without being clipped
+     * or shoved aside. */
     bool compact;
+    float spectrum_max_db;
     SDL_Rect spectrum_panel;
     SDL_Rect spectrum_plot;
     SDL_Rect video_panel;
@@ -582,6 +592,10 @@ struct Layout {
           bottom_y(4 + spectrum_height + 4), bottom_height(h - bottom_y - 4),
           video_width(w * 420 / 800),
           compact(w <= 800),
+          spectrum_max_db(compact
+              ? kDisplayMaxDb * static_cast<float>(spectrum_height - 22 - 1) /
+                    static_cast<float>(spectrum_height - 36 - 1)
+              : kDisplayMaxDb),
           spectrum_panel{4, 4, w - 8, spectrum_height},
           spectrum_plot{18, 18, w - 36,
                        spectrum_height - (compact ? 22 : 36)},
@@ -604,7 +618,6 @@ constexpr double kSpectrumStartMhz = 10490.5;
 constexpr double kSpectrumSpanMhz = 9.0;
 constexpr float kServerUnitsPerDb = 3276.8F;
 constexpr float kDisplayZeroOffsetDb = 20.0F / 6.0F;
-constexpr float kDisplayMaxDb = 10.0F;
 
 uint8_t mix_channel(uint8_t start, uint8_t end, float amount)
 {
@@ -897,8 +910,8 @@ std::vector<uint16_t> make_offline_spectrum(size_t count)
 
 class SpectrumTexture {
 public:
-    SpectrumTexture(SDL_Renderer * renderer, int width, int height)
-        : renderer_(renderer), width_(width), height_(height),
+    SpectrumTexture(SDL_Renderer * renderer, int width, int height, float max_db)
+        : renderer_(renderer), width_(width), height_(height), max_db_(max_db),
           pixels_(static_cast<size_t>(width) * height)
     {
         texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB565,
@@ -931,8 +944,14 @@ public:
 
         std::vector<uint16_t> palette(height_);
         for(int y = 0; y < height_; ++y) {
+            /* Divide by max_db_ (may exceed kDisplayMaxDb - see Layout) so
+             * the existing 0..kDisplayMaxDb gradient keeps the same pixel
+             * density as before; any extra rows above that (real headroom,
+             * compact layout only) all land past spectrum_gradient()'s own
+             * clamp and just repeat its top colour - never actually
+             * distinguishable, real signals don't reach that high. */
             const float db = static_cast<float>(height_ - 1 - y) /
-                             std::max(1, height_ - 1) * kDisplayMaxDb;
+                             std::max(1, height_ - 1) * max_db_;
             const Colour colour = spectrum_gradient(db);
             palette[y] = rgb565(colour.r, colour.g, colour.b);
         }
@@ -943,8 +962,13 @@ public:
             const float fraction = position - static_cast<float>(first);
             const float server_value = bins[first] + fraction * (bins[second] - bins[first]);
             const float displayed_db = server_value / kServerUnitsPerDb - kDisplayZeroOffsetDb;
+            /* Clamp stays at the original kDisplayMaxDb - that's the real
+             * measured-signal ceiling, unrelated to plot size. Dividing by
+             * max_db_ instead of kDisplayMaxDb is what keeps this pixel
+             * height identical to the non-compact layout while leaving the
+             * extra rows empty above it as headroom. */
             const float limited_db = std::clamp(displayed_db, 0.0F, kDisplayMaxDb);
-            const int height = static_cast<int>(limited_db / kDisplayMaxDb * (height_ - 1));
+            const int height = static_cast<int>(limited_db / max_db_ * (height_ - 1));
             const int top = height_ - 1 - height;
             for(int y = top + 1; y < height_; ++y)
                 pixels_[static_cast<size_t>(y) * width_ + x] = palette[y];
@@ -964,6 +988,7 @@ private:
     SDL_Texture * texture_ = nullptr;
     int width_ = 0;
     int height_ = 0;
+    float max_db_ = kDisplayMaxDb;
     std::vector<uint16_t> pixels_;
     std::vector<DetectedSignal> signals_;
 };
@@ -1039,7 +1064,7 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         const float displayed_db = signal.strength / kServerUnitsPerDb - kDisplayZeroOffsetDb;
         const int trace_y = layout.spectrum_plot.y + layout.spectrum_plot.h - 1 -
             static_cast<int>(std::clamp(displayed_db, 0.0F, kDisplayMaxDb) /
-                             kDisplayMaxDb * (layout.spectrum_plot.h - 1));
+                             layout.spectrum_max_db * (layout.spectrum_plot.h - 1));
         const auto [first_width, line_height] = text.measure(first_line);
         const auto [second_width, ignored_height] = text.measure(second_line);
         (void)ignored_height;
@@ -2284,7 +2309,7 @@ int main(int argc, char ** argv)
     qo100::ReceiverSettings receiver_settings =
         qo100::load_receiver_settings(repository_root);
     auto spectrum_texture = std::make_unique<SpectrumTexture>(
-        renderer, layout.spectrum_plot.w, layout.spectrum_plot.h);
+        renderer, layout.spectrum_plot.w, layout.spectrum_plot.h, layout.spectrum_max_db);
     if(!spectrum_texture->valid()) {
         qo100::log("[SPECTRUM] texture failed: %s\n", SDL_GetError());
         return 1;
