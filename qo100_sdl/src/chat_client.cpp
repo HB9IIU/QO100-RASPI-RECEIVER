@@ -177,6 +177,16 @@ struct ChatClient::Impl {
         lws_context_creation_info info{};
         info.port = CONTEXT_PORT_NO_LISTEN;
         info.protocols = protocols;
+        /* This app also creates a separate lws_context for the BATC
+         * spectrum feed (SpectrumFeed in main.cpp), which sets this same
+         * flag too - both need it, SSL connections fail outright
+         * ("SSL_new failed") from whichever context doesn't have it. The
+         * two contexts destroying themselves both expecting to release
+         * shared global SSL state isn't safe in this libwebsockets
+         * version, though (confirmed with gdb: an internal assertion,
+         * lwsl_refcount_cx, and SIGABRT during EXIT's shutdown) - see the
+         * lws_context_destroy() comment in SpectrumFeed::run() for how
+         * that's actually avoided, on that side rather than this one. */
         info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
         info.user = this;
         lws_context * active_context = lws_create_context(&info);

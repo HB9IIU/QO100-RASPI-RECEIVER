@@ -935,6 +935,17 @@ private:
         lws_context_creation_info info{};
         info.port = CONTEXT_PORT_NO_LISTEN;
         info.protocols = protocols;
+        /* This app also creates a separate lws_context in chat_client.cpp
+         * (ChatClient), which sets this same flag. Each context genuinely
+         * needs it on its own to make outgoing SSL connections work at
+         * all - confirmed by testing: dropping it from one context broke
+         * every SSL connect attempt from that context outright
+         * ("SSL_new failed"), even well after the other context's global
+         * init had already completed, so this isn't just a one-time
+         * process-wide init that any single context can do on everyone
+         * else's behalf. See the lws_context_destroy() comment below for
+         * the other half of this - both contexts need the flag, but only
+         * one of them can safely act on it at destroy time. */
         info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
         info.user = this;
         lws_context * context = lws_create_context(&info);
@@ -954,7 +965,21 @@ private:
                 connect(context, protocols[0].name);
             }
         }
-        lws_context_destroy(context);
+        /* Deliberately NOT calling lws_context_destroy() here. Two
+         * lws_contexts that both set LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT
+         * (this one and ChatClient's, both alive in this same process)
+         * isn't safely refcounted across contexts in this libwebsockets
+         * version: destroying the second one re-releases global SSL state
+         * the first one's destroy already fully released, tripping an
+         * internal assertion (lwsl_refcount_cx) and SIGABRT - confirmed
+         * with gdb during EXIT's shutdown, where ChatClient::stop() runs
+         * first (see main()'s shutdown sequence) and always destroys
+         * cleanly, and this context is always the second, always-crashing
+         * one. Skipping the explicit destroy here just leaks this
+         * lws_context until the process exits a moment later either way -
+         * which is exactly what "the app is exiting, don't bother cleaning
+         * up further" already means in a few other places in this
+         * codebase (see AudioOutput::close()). */
         websocket_ = nullptr;
     }
 
