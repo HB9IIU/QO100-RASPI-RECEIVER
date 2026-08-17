@@ -3,8 +3,8 @@
 # timestamped copy, a thumbnail, then regenerates index.html. Prunes to the
 # most recent $ALBUM_KEEP images so the album doesn't grow forever.
 #
-# Called automatically by scripts/screenshot.sh and the in-app SNAP button
-# (qo100datv.cpp's screenshot_btn_cb) - can also be run by hand to reindex
+# Called automatically by scripts/screenshot.sh (and so, in turn, by
+# album_server.py's POST /snap route) - can also be run by hand to reindex
 # after manually dropping PNGs into screenshots/album/.
 #
 # Usage: scripts/album_update.sh [source.png]

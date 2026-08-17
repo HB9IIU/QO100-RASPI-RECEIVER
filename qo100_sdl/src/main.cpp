@@ -1774,7 +1774,7 @@ SDL_Rect status_button_rect(const Layout & layout, int index)
 {
     constexpr int gap = 8;
     constexpr int margin = 8;
-    const int button_width = (layout.status_panel.w - 2 * margin - 4 * gap) / 5;
+    const int button_width = (layout.status_panel.w - 2 * margin - 3 * gap) / 4;
     const int button_y = layout.status_panel.y + layout.status_panel.h - kStatusButtonBlockH;
     return {layout.status_panel.x + margin + index * (button_width + gap),
             button_y, button_width, kStatusButtonHeight};
@@ -1786,7 +1786,7 @@ SDL_Rect status_button_rect(const Layout & layout, int index)
  * after the fixed-height rows below it (VOL bar, VU meter, button block) -
  * rather than a fixed formula that can outgrow the panel at smaller
  * resolutions and push the button row off the bottom (observed at 800x480:
- * the VU meter and SNAP/CHAT/... buttons overlapped by a few pixels). */
+ * the VU meter and CHAT/SET/... buttons overlapped by a few pixels). */
 int status_row_height(const Layout & layout)
 {
     constexpr int kRowCount = 6;
@@ -2041,11 +2041,11 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
         SDL_RenderFillRect(renderer, &segment);
     }
 
-    const char * labels[] = {"SNAP", "CHAT", "SET", "SCAN", "EXIT"};
-    const Colour colours[] = {kGreen, kCyan, kYellow, kPurple, kRed};
-    for(int i = 0; i < 5; ++i) {
+    const char * labels[] = {"CHAT", "SET", "SCAN", "EXIT"};
+    const Colour colours[] = {kCyan, kYellow, kPurple, kRed};
+    for(int i = 0; i < 4; ++i) {
         draw_button(renderer, text, status_button_rect(layout, i),
-                    labels[i], colours[i], 16, i == 3 && scan_active);
+                    labels[i], colours[i], 16, i == 2 && scan_active);
     }
 }
 
@@ -2106,27 +2106,6 @@ bool save_screenshot(SDL_Renderer * renderer, int width, int height, const std::
     if(!saved) qo100::log("[SCREENSHOT] %s\n", SDL_GetError());
     SDL_FreeSurface(surface);
     return saved;
-}
-
-bool save_display_screenshot(const std::string & path)
-{
-    const pid_t child = fork();
-    if(child == 0) {
-        execlp("grim", "grim", path.c_str(), static_cast<char *>(nullptr));
-        _exit(127);
-    }
-    if(child < 0) {
-        qo100::log("[SCREENSHOT] could not start grim: %s\n", std::strerror(errno));
-        return false;
-    }
-
-    int status = 0;
-    while(waitpid(child, &status, 0) < 0) {
-        if(errno == EINTR) continue;
-        qo100::log("[SCREENSHOT] could not wait for grim: %s\n", std::strerror(errno));
-        return false;
-    }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 struct Options {
@@ -2865,27 +2844,7 @@ int main(int argc, char ** argv)
                         x, y);
                     continue;
                 }
-                const SDL_Rect snap_button = status_button_rect(layout, 0);
-                if(x >= snap_button.x && x < snap_button.x + snap_button.w &&
-                   y >= snap_button.y && y < snap_button.y + snap_button.h) {
-                    const std::string screenshot_path =
-                        repository_root + "/screenshots/latest.png";
-                    qo100::log("[SCREENSHOT] SNAP tapped; capturing display\n");
-                    if(save_display_screenshot(screenshot_path)) {
-                        qo100::log("[SCREENSHOT] saved %s\n", screenshot_path.c_str());
-                        /* Backgrounded (trailing &) - it shells out to
-                         * `convert` and rewrites index.html, which would
-                         * otherwise block this input-handling loop longer
-                         * than the grim capture itself. */
-                        const std::string album_cmd = repository_root +
-                            "/scripts/album_update.sh " + screenshot_path + " &";
-                        std::system(album_cmd.c_str());
-                    }
-                    else
-                        qo100::log("[SCREENSHOT] failed to save %s\n", screenshot_path.c_str());
-                    continue;
-                }
-                const SDL_Rect chat_button = status_button_rect(layout, 1);
+                const SDL_Rect chat_button = status_button_rect(layout, 0);
                 if(point_in_rect(x, y, chat_button)) {
                     app_page = AppPage::Chat;
                     chat_follow_latest = true;
@@ -2893,7 +2852,7 @@ int main(int argc, char ** argv)
                     qo100::log("[CHAT_UI] opened\n");
                     continue;
                 }
-                const SDL_Rect settings_button = status_button_rect(layout, 2);
+                const SDL_Rect settings_button = status_button_rect(layout, 1);
                 if(point_in_rect(x, y, settings_button)) {
                     settings_lo_mhz = static_cast<int>(
                         std::lround(receiver_settings.lnb_lo_mhz));
@@ -2906,7 +2865,7 @@ int main(int argc, char ** argv)
                     qo100::log("[SETTINGS_UI] opened\n");
                     continue;
                 }
-                const SDL_Rect scan_button = status_button_rect(layout, 3);
+                const SDL_Rect scan_button = status_button_rect(layout, 2);
                 if(point_in_rect(x, y, scan_button)) {
                     scan_active = !scan_active;
                     if(scan_active) {
@@ -2920,7 +2879,7 @@ int main(int argc, char ** argv)
                     else qo100::log("[SCAN] stopped\n");
                     continue;
                 }
-                const SDL_Rect exit_button = status_button_rect(layout, 4);
+                const SDL_Rect exit_button = status_button_rect(layout, 3);
                 if(x >= exit_button.x && x < exit_button.x + exit_button.w &&
                    y >= exit_button.y && y < exit_button.y + exit_button.h) {
                     qo100::log(

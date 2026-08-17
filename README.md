@@ -105,8 +105,6 @@ This shows whether it's running, and if not, why.
 ## Using the app
 
 - **Tap anywhere on the spectrum display** to tune to that signal.
-- **SNAP** — takes a screenshot (saved to `screenshots/`, also added to the
-  photo album if you set that up — see below).
 - **CHAT** — opens the QO-100 wideband chat.
 - **SET** — LNB settings (local oscillator offset, bias voltage) and screen
   resolution.
@@ -115,16 +113,18 @@ This shows whether it's running, and if not, why.
 
 ## Optional: photo album on your LAN
 
-Every screenshot (from **SNAP**, or running `scripts/screenshot.sh`) is
-kept as a small gallery you can browse from any device on your home
-network. To turn it on:
+A small gallery you can browse from any device on your home network,
+including a **Take Screenshot** button on the page itself (useful when the
+app is fullscreen with no touch access — it captures whatever's currently
+on screen, not just this app). To turn it on:
 
 ```bash
 scripts/setup_photo_album.sh
 ```
 
 This prints a web address to open in a browser (e.g. `http://<pi's IP
-address>:8090/`). Keeps the most recent 300 screenshots by default.
+address>:8090/`). Keeps the most recent 300 screenshots by default; delete
+individual photos or select several for bulk delete right from the page.
 
 ## Making code changes
 
@@ -143,7 +143,7 @@ app itself.)
 |---|---|
 | `longmynd_ws/` | The tuner driver (a modified version of an existing open-source project), talks to the MiniTiouner over USB. |
 | `qo100_sdl/` | The actual app — the touchscreen UI you see and use. |
-| `screenshots/` | Where **SNAP** saves screenshots. |
+| `screenshots/` | Where the photo album keeps screenshots. |
 | `scripts/` | The setup scripts described above. |
 
 Default tuning at startup is the QO-100 beacon: 741474 kHz, 1500 ksps.
