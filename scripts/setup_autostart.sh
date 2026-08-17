@@ -89,6 +89,7 @@ EOF
 
 systemctl --user daemon-reload
 systemctl --user enable qo100datv.service
-echo "Installed and enabled qo100datv.service - it will start automatically at next login."
-echo "To start it right now: systemctl --user start qo100datv.service"
-echo "To check status/logs:  systemctl --user status qo100datv.service"
+systemctl --user restart qo100datv.service
+echo "Installed, enabled, and started qo100datv.service - it will also start"
+echo "automatically at next login."
+echo "To check status/logs: systemctl --user status qo100datv.service"

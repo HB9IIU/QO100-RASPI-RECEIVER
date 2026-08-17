@@ -88,11 +88,7 @@ scripts/setup_autostart.sh
 ```
 
 This makes the app start by itself every time the Pi boots up and you log
-in, fullscreen, ready to go. To start it right now without rebooting:
-
-```bash
-systemctl --user start qo100datv.service
-```
+in, fullscreen, ready to go — and starts it right now too, no reboot needed.
 
 ### 6. Reboot and check
 
