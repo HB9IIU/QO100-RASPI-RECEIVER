@@ -127,12 +127,12 @@ cd ~/DATVreceiver
 scripts/uninstall.sh
 ```
 
-Undoes everything the setup steps above did: stops and removes both
+Undoes everything the setup steps above did — stops and removes both
 background services, the desktop shortcut, the MiniTiouner udev rule, and
-the UDP-buffer system tweak. Leaves your screenshots and saved settings
-alone unless you add `--purge-data`. Doesn't delete the `DATVreceiver`
-folder itself or any installed software packages — see the script's own
-comments for why.
+the UDP-buffer system tweak — then **deletes the `DATVreceiver` folder
+itself**, screenshots and saved settings included. No confirmation prompt;
+back up anything you want to keep first. Installed software packages (apt)
+are left alone — see the script's own comments for why.
 
 ## Repo layout
 
