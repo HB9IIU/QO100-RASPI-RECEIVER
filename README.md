@@ -8,9 +8,8 @@ tune, and connects to the QO-100 wideband chat.
 ## What you need
 
 - Raspberry Pi 5, running Raspberry Pi OS (Bookworm or newer) with a desktop.
-- A MiniTiouner tuner (USB `0403:6010`). Tested with the **Pro TS2** and the
-  **S** — other variants (Express, original) likely work too but haven't
-  been tried.
+- A MiniTiouner tuner. Tested with the **Pro TS2** and the **S** — other
+  variants (Express, original) likely work too but haven't been tried.
 - A touchscreen — either a 1024x600 DSI panel or the official 800x480
   Raspberry Pi touchscreen (switchable any time from the app itself, see
   Step 5 below).
