@@ -12,6 +12,12 @@ tune, and connects to the QO-100 wideband chat.
   variants (Express, original) likely work too but haven't been tried.
 - A touchscreen — either a 1024x600 DSI panel or the official 800x480
   Raspberry Pi touchscreen (switchable any time from **SET** in the app).
+- Something to play audio through. The Pi 5 has no 3.5mm audio jack, and a
+  DSI touchscreen has no speaker of its own, so there's no built-in audio
+  output for this kind of kiosk setup — **a Bluetooth speaker is the
+  easiest fix**, pair it once in Raspberry Pi OS's Bluetooth settings and
+  it just works. A USB audio adapter or an HDMI-connected display with
+  speakers works too, if you'd rather avoid Bluetooth.
 - Internet access on the Pi — needed for setup, and also ongoing during
   normal use (the spectrum display and chat both come from live internet
   feeds, separate from the tuner itself).
