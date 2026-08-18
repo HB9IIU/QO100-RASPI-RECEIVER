@@ -12,8 +12,8 @@ touch — no keyboard or mouse needed once it's set up.
   (Bookworm or newer) with a desktop.
 - A MiniTiouner tuner. Tested with the **Pro TS2** and the **S** — other
   variants (Express, original) likely work too but haven't been tried.
-- A touchscreen — either a 1024x600 DSI panel or the official 800x480
-  Raspberry Pi touchscreen (switchable any time from **SET** in the app).
+- A touchscreen — either the official 800x480 Raspberry Pi touchscreen or
+  a 1024x600 DSI panel (switchable any time from **SET** in the app).
 - Something to play audio through. The Pi 5 has no 3.5mm audio jack (the
   Pi 4 does); either way, a DSI touchscreen has no speaker of its own, so
   there's no built-in audio output for a Pi 5 kiosk setup like this one —
