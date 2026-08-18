@@ -11,7 +11,8 @@ touch — no keyboard or mouse needed once it's set up.
 <td width="50%"><img src="assets/demo1.png" alt="QO-100 DATV Receiver screenshot" width="100%"></td>
 <td width="50%" valign="top">
 <a href="https://youtu.be/jz0K4KcEiIY">
-<img src="https://img.youtube.com/vi/jz0K4KcEiIY/0.jpg" alt="Watch the demo video on YouTube" width="100%">
+<img src="https://img.youtube.com/vi/jz0K4KcEiIY/0.jpg" alt="Watch the demo video on YouTube" width="100%"><br>
+▶ Tap to play video
 </a>
 </td>
 </tr>
