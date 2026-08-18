@@ -1426,7 +1426,7 @@ bool settings_compact(int width)
 
 SDL_Rect settings_receiver_card_rect(int width)
 {
-    return settings_compact(width) ? SDL_Rect{16, 50, (width - 48) / 2, 188}
+    return settings_compact(width) ? SDL_Rect{16, 56, (width - 48) / 2, 188}
                                     : SDL_Rect{40, 70, 460, 260};
 }
 
@@ -1434,7 +1434,7 @@ SDL_Rect settings_display_card_rect(int width)
 {
     const SDL_Rect receiver = settings_receiver_card_rect(width);
     const int gap = settings_compact(width) ? 12 : 20;
-    const int height = settings_compact(width) ? 92 : 140;
+    const int height = settings_compact(width) ? 102 : 140;
     return {receiver.x, receiver.y + receiver.h + gap, receiver.w, height};
 }
 
@@ -1454,7 +1454,7 @@ SDL_Rect settings_exit_card_rect(int width)
 {
     const SDL_Rect diagnostics = settings_diagnostics_card_rect(width);
     const int gap = settings_compact(width) ? 12 : 20;
-    const int height = settings_compact(width) ? 92 : 140;
+    const int height = settings_compact(width) ? 102 : 140;
     return {diagnostics.x, diagnostics.y + diagnostics.h + gap, diagnostics.w, height};
 }
 
@@ -1579,11 +1579,14 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                   button.y + button.h / 2,
                   selected ? kGreen : (disabled ? kTextDim : kText), button_label_size, true);
     }
-    if(!can_use_1024x600)
-        text.draw(compact ? "1024x600 too big for this screen"
-                          : "1024x600 doesn't fit this screen",
-                  display_card.x + (compact ? 16 : 24),
-                  display_card.y + display_card.h - (compact ? 18 : 24), kTextDim, 14);
+    if(!can_use_1024x600 && compact)
+        text.draw("1024x600 too big for this screen",
+                  display_card.x + display_card.w / 2,
+                  display_card.y + display_card.h - 14, kTextDim, 14, true);
+    else if(!can_use_1024x600)
+        text.draw("1024x600 doesn't fit this screen",
+                  display_card.x + 24,
+                  display_card.y + display_card.h - 24, kTextDim, 14);
     else if(!compact)
         text.draw("Restarts the app to apply", display_card.x + 24,
                   display_card.y + display_card.h - 24, kTextDim, 14);
