@@ -44,3 +44,7 @@ screenshots/
 # Editor/OS temp
 *~
 *.swp
+
+# Claude Code's own local settings/permissions - machine-specific, not
+# project config
+.claude/
