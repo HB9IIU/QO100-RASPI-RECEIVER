@@ -1945,7 +1945,7 @@ void draw_video_notice(TextCache & text, const SDL_Rect & bounds, VideoNotice no
             message = "WAIT - TUNING";
             break;
         case VideoNotice::NoVideoStream:
-            message = "POOR";
+            message = "POOR SIGNAL";
             colour = kRed;
             break;
         case VideoNotice::None:
