@@ -2468,6 +2468,12 @@ int main(int argc, char ** argv)
         SDL_Quit();
         return 1;
     }
+    /* Everything here is touch-driven - a visible mouse pointer is just
+     * clutter on a kiosk screen, and this Pi likely has no mouse plugged in
+     * anyway. Only in fullscreen (the real deployment); QO100_WINDOWED/
+     * screenshot mode keep it, since those are for development on an
+     * actual desktop with a real mouse. */
+    if(display.fullscreen) SDL_ShowCursor(SDL_DISABLE);
 
     Uint32 renderer_flags = SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC;
     if(!options.screenshot.empty()) renderer_flags = SDL_RENDERER_SOFTWARE;
