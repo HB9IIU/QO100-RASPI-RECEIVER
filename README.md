@@ -6,6 +6,17 @@ touchscreen app that shows the spectrum, decodes the video, lets you tap to
 tune, and connects to the QO-100 wideband chat. Everything is operated by
 touch — no keyboard or mouse needed once it's set up.
 
+<table>
+<tr>
+<td width="50%"><img src="assets/demo1.png" alt="QO-100 DATV Receiver screenshot" width="100%"></td>
+<td width="50%" valign="top">
+<a href="https://www.youtube.com/watch?v=vRQPl3TMsPM">
+<img src="https://img.youtube.com/vi/vRQPl3TMsPM/0.jpg" alt="Watch the demo video on YouTube" width="100%">
+</a>
+</td>
+</tr>
+</table>
+
 ## What you need
 
 - Raspberry Pi 4 Model B or Raspberry Pi 5, running Raspberry Pi OS
