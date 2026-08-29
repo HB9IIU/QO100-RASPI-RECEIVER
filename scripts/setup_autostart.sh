@@ -5,9 +5,14 @@
 #    (builds via build_and_run.sh, so source changes are picked up).
 # 2. Installs and enables a systemd --user service that launches the
 #    prebuilt binary directly at login (no build step, no toolchain
-#    dependency at boot). Waits for the X11 socket before launching, since
-#    XWayland starts on demand and this service can otherwise race ahead
-#    of it (app runs with audio but no visible window).
+#    dependency at boot). Tied to graphical-session.target - the standard
+#    "the desktop session is actually up" marker that labwc activates once
+#    it has finished starting - rather than the generic default.target,
+#    which is reached as soon as the user's systemd --user manager exists
+#    and says nothing about whether the compositor has finished setting up
+#    the graphical session (including wiring the touchscreen into it). Also
+#    keeps a belt-and-braces wait for the X11 socket, since XWayland starts
+#    on demand and could theoretically still lag a hair behind the target.
 #
 # Usage: scripts/setup_autostart.sh [WxH]
 #   No argument (the normal case): resolution comes from settings.json's
@@ -60,20 +65,34 @@ if [ ! -x "$APP_BIN" ]; then
 fi
 
 mkdir -p "$SERVICE_DIR"
+if [ -f "$SERVICE_FILE" ]; then
+    # Disable against whatever [Install] section is currently on disk before
+    # overwriting it below - otherwise a service previously installed with
+    # WantedBy=default.target would leave a stale default.target.wants
+    # symlink behind, which would keep pulling the service in early (racing
+    # ahead of the desktop session again) even after this script switches it
+    # to graphical-session.target.
+    systemctl --user disable qo100datv.service 2>/dev/null || true
+fi
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=QO-100 DATV Receiver UI
-After=default.target
+# graphical-session.target is what labwc activates once the desktop session
+# has actually finished starting (compositor up, touchscreen wired in).
+# PartOf ties our lifecycle to it: if the graphical session ever restarts,
+# this service restarts with it instead of surviving as an orphan pointed
+# at a dead session.
+PartOf=graphical-session.target
+After=graphical-session.target
 
 [Service]
 Type=simple
 Environment=DISPLAY=:0.0
 $([ -n "$DISPLAY_RES" ] && echo "Environment=QO100_DISPLAY=$DISPLAY_RES")
 WorkingDirectory=$REPO_DIR/qo100_sdl
-# labwc starts XWayland on demand; at boot this service can otherwise race
-# ahead of it and connect to a DISPLAY that isn't ready yet. The app then
-# runs (decoding/rendering internally, audio audible) with no visible
-# window. Wait for the X11 socket before launching.
+# Secondary safety net on top of the graphical-session.target ordering
+# above: XWayland itself starts on demand, so wait for its socket too
+# before launching, in case there's still a hair of a race.
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 60); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 0.5; done; echo "X11 socket never appeared"; exit 1'
 ExecStart=$APP_LAUNCHER
 # always, not on-failure: EXIT (running=false) exits cleanly with status 0,
@@ -84,7 +103,7 @@ Restart=always
 RestartSec=3
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
 
 systemctl --user daemon-reload
