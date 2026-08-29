@@ -3,16 +3,22 @@
 #
 # 1. Creates ~/Desktop/qo100datv.desktop if it doesn't already exist
 #    (builds via build_and_run.sh, so source changes are picked up).
-# 2. Installs and enables a systemd --user service that launches the
-#    prebuilt binary directly at login (no build step, no toolchain
-#    dependency at boot). Tied to graphical-session.target - the standard
-#    "the desktop session is actually up" marker that labwc activates once
-#    it has finished starting - rather than the generic default.target,
-#    which is reached as soon as the user's systemd --user manager exists
-#    and says nothing about whether the compositor has finished setting up
-#    the graphical session (including wiring the touchscreen into it). Also
-#    keeps a belt-and-braces wait for the X11 socket, since XWayland starts
-#    on demand and could theoretically still lag a hair behind the target.
+# 2. Installs (but does not itself enable-at-boot) a systemd --user service
+#    that launches the prebuilt binary directly at login (no build step, no
+#    toolchain dependency at boot) - kept for process supervision: it's what
+#    gives us Restart=always, `systemctl --user status`, and journal logs.
+# 3. Installs an XDG autostart entry (~/.config/autostart/qo100datv.desktop)
+#    that starts that service. This - not any systemd target - is the actual
+#    "desktop is ready" hook on this labwc-based image: /etc/xdg/labwc/
+#    autostart runs pcmanfm-pi, wf-panel-pi, kanshi, then as its LAST step
+#    invokes lxsession-xdg-autostart, which is what processes .desktop files
+#    under ~/.config/autostart. By the time that runs, labwc's own startup
+#    (compositor, input backend, touchscreen wiring) is already done, since
+#    labwc doesn't get to running its autostart script until it is.
+#    graphical-session.target was tried first and turned out to be dead
+#    weight on this image (never activated - not even wf-panel-pi, the
+#    desktop's own panel, uses it), so it's left in the unit as a harmless,
+#    inert fallback rather than relied upon.
 #
 # Usage: scripts/setup_autostart.sh [WxH]
 #   No argument (the normal case): resolution comes from settings.json's
@@ -38,6 +44,8 @@ APP_ICON="$REPO_DIR/assets/qo100datv-icon.png"
 DESKTOP_FILE="$HOME/Desktop/qo100datv.desktop"
 SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/qo100datv.service"
+AUTOSTART_DIR="$HOME/.config/autostart"
+AUTOSTART_FILE="$AUTOSTART_DIR/qo100datv.desktop"
 
 if [ -f "$DESKTOP_FILE" ]; then
     echo "Desktop shortcut already exists at $DESKTOP_FILE, leaving it alone."
@@ -105,6 +113,18 @@ RestartSec=3
 [Install]
 WantedBy=graphical-session.target
 EOF
+
+mkdir -p "$AUTOSTART_DIR"
+cat > "$AUTOSTART_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=QO-100 DATV Receiver (autostart)
+Exec=systemctl --user start qo100datv.service
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+EOF
+echo "Installed XDG autostart entry at $AUTOSTART_FILE"
 
 systemctl --user daemon-reload
 systemctl --user enable qo100datv.service

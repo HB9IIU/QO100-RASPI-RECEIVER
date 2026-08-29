@@ -1,12 +1,13 @@
 #!/bin/bash
 # Reverses everything scripts/initialSetup.sh, scripts/setup_autostart.sh,
 # and scripts/setup_photo_album.sh set up: stops and removes both systemd
-# --user services, the desktop shortcut, the MiniTiouner udev rule, and the
-# UDP-buffer sysctl tweak - then deletes the repo folder itself as the last
-# step. This is the real, final step - there's no confirmation prompt and
-# nothing is recoverable afterward (any uncommitted local changes, saved
-# settings, and the whole screenshot album go with it). If you want to keep
-# any of that, back it up before running this.
+# --user services, the XDG autostart entry, the desktop shortcut, the
+# MiniTiouner udev rule, and the UDP-buffer sysctl tweak - then deletes the
+# repo folder itself as the last step. This is the real, final step - there's
+# no confirmation prompt and nothing is recoverable afterward (any
+# uncommitted local changes, saved settings, and the whole screenshot album
+# go with it). If you want to keep any of that, back it up before running
+# this.
 #
 # What this does NOT do, on purpose:
 #   - Remove apt packages (build-essential, SDL2, FFmpeg, etc.) - other
@@ -38,6 +39,15 @@ for unit in qo100datv.service qo100album.service; do
     fi
 done
 systemctl --user daemon-reload 2>/dev/null || true
+
+step "🚀 Removing XDG autostart entry..."
+AUTOSTART_FILE="$HOME/.config/autostart/qo100datv.desktop"
+if [ -f "$AUTOSTART_FILE" ]; then
+    rm -f "$AUTOSTART_FILE"
+    echo "   removed $AUTOSTART_FILE"
+else
+    echo "   not present, skipping"
+fi
 
 step "🖥️  Removing desktop shortcut..."
 DESKTOP_FILE="$HOME/Desktop/qo100datv.desktop"
