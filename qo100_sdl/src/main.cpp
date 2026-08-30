@@ -1460,15 +1460,18 @@ bool settings_compact(int width)
 
 SDL_Rect settings_receiver_card_rect(int width)
 {
+    /* Non-compact height/y are squeezed (was 70/260) so the AUTO START AT
+     * BOOT card and SAVE & APPLY/EXIT row below no longer run past the
+     * bottom of a 1024x600 screen - compact (800x480) is untouched. */
     return settings_compact(width) ? SDL_Rect{16, 56, (width - 48) / 2, 188}
-                                    : SDL_Rect{40, 70, 460, 260};
+                                    : SDL_Rect{40, 60, 460, 230};
 }
 
 SDL_Rect settings_display_card_rect(int width)
 {
     const SDL_Rect receiver = settings_receiver_card_rect(width);
-    const int gap = settings_compact(width) ? 12 : 20;
-    const int height = settings_compact(width) ? 102 : 140;
+    const int gap = settings_compact(width) ? 12 : 14;
+    const int height = settings_compact(width) ? 102 : 124;
     return {receiver.x, receiver.y + receiver.h + gap, receiver.w, height};
 }
 
@@ -1487,16 +1490,16 @@ SDL_Rect settings_diagnostics_card_rect(int width)
 SDL_Rect settings_exit_card_rect(int width)
 {
     const SDL_Rect diagnostics = settings_diagnostics_card_rect(width);
-    const int gap = settings_compact(width) ? 12 : 20;
-    const int height = settings_compact(width) ? 102 : 140;
+    const int gap = settings_compact(width) ? 12 : 14;
+    const int height = settings_compact(width) ? 102 : 124;
     return {diagnostics.x, diagnostics.y + diagnostics.h + gap, diagnostics.w, height};
 }
 
 SDL_Rect settings_autostart_card_rect(int width)
 {
     const SDL_Rect exit_card = settings_exit_card_rect(width);
-    const int gap = settings_compact(width) ? 12 : 20;
-    const int height = settings_compact(width) ? 102 : 140;
+    const int gap = settings_compact(width) ? 12 : 14;
+    const int height = settings_compact(width) ? 102 : 124;
     return {exit_card.x, exit_card.y + exit_card.h + gap, exit_card.w, height};
 }
 
@@ -1505,7 +1508,7 @@ SDL_Rect settings_lo_button_rect(int width, bool increment)
     const SDL_Rect card = settings_receiver_card_rect(width);
     if(settings_compact(width))
         return {card.x + (increment ? card.w - 60 : 16), card.y + 70, 44, 38};
-    return {card.x + (increment ? 228 : 24), card.y + 88, 48, 48};
+    return {card.x + (increment ? 228 : 24), card.y + 78, 48, 48};
 }
 
 SDL_Rect settings_voltage_rect(int width, int index)
@@ -1513,7 +1516,7 @@ SDL_Rect settings_voltage_rect(int width, int index)
     const SDL_Rect card = settings_receiver_card_rect(width);
     if(settings_compact(width))
         return {card.x + 16 + index * 118, card.y + 144, 106, 38};
-    return {card.x + 24 + index * 116, card.y + 188, 104, 50};
+    return {card.x + 24 + index * 116, card.y + 164, 104, 50};
 }
 
 SDL_Rect settings_display_res_rect(int width, int index)
@@ -1521,7 +1524,7 @@ SDL_Rect settings_display_res_rect(int width, int index)
     const SDL_Rect card = settings_display_card_rect(width);
     if(settings_compact(width))
         return {card.x + 16 + index * 178, card.y + 40, 166, 34};
-    return {card.x + 24 + index * 216, card.y + 56, 200, 50};
+    return {card.x + 24 + index * 216, card.y + 48, 200, 40};
 }
 
 SDL_Rect settings_save_rect(int width)
@@ -1529,7 +1532,7 @@ SDL_Rect settings_save_rect(int width)
     const SDL_Rect card = settings_display_card_rect(width);
     const SDL_Rect autostart_card = settings_autostart_card_rect(width);
     const int button_width = settings_compact(width) ? 150 : 200;
-    const int height = settings_compact(width) ? 38 : 50;
+    const int height = settings_compact(width) ? 38 : 40;
     /* Left-aligned with the DISPLAY RESOLUTION card above it, and vertically
      * centred on AUTO START AT BOOT - the card it ends up sitting beside now
      * that EXIT (right-aligned with that same card, see settings_exit_page_
@@ -1550,7 +1553,7 @@ SDL_Rect settings_exit_behaviour_rect(int width, int index)
     const SDL_Rect card = settings_exit_card_rect(width);
     if(settings_compact(width))
         return {card.x + 16 + index * 178, card.y + 40, 166, 34};
-    return {card.x + 24 + index * 216, card.y + 56, 200, 50};
+    return {card.x + 24 + index * 216, card.y + 48, 200, 40};
 }
 
 SDL_Rect settings_autostart_rect(int width, int index)
@@ -1558,7 +1561,7 @@ SDL_Rect settings_autostart_rect(int width, int index)
     const SDL_Rect card = settings_autostart_card_rect(width);
     if(settings_compact(width))
         return {card.x + 16 + index * 178, card.y + 40, 166, 34};
-    return {card.x + 24 + index * 216, card.y + 56, 200, 50};
+    return {card.x + 24 + index * 216, card.y + 48, 200, 40};
 }
 
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
@@ -1607,7 +1610,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
 
     const SDL_Rect receiver_card = settings_receiver_card_rect(width);
     draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING", compact);
-    const int lo_label_y = compact ? receiver_card.y + 46 : receiver_card.y + 56;
+    const int lo_label_y = compact ? receiver_card.y + 46 : receiver_card.y + 50;
     text.draw("LNB LO Offset (MHz)", receiver_card.x + (compact ? 16 : 24), lo_label_y,
               kText, label_size);
     const SDL_Rect minus_button = settings_lo_button_rect(width, false);
@@ -1627,7 +1630,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     draw_button(renderer, text, plus_button, "+", kText, compact ? 16 : 20,
                 false, is_pressed(touch, plus_button));
 
-    const int voltage_label_y = compact ? receiver_card.y + 122 : receiver_card.y + 156;
+    const int voltage_label_y = compact ? receiver_card.y + 122 : receiver_card.y + 132;
     text.draw("LNB Bias Voltage", receiver_card.x + (compact ? 16 : 24), voltage_label_y,
               kText, label_size);
     const char * voltage_labels[] = {"OFF", "13V", "18V"};
@@ -1656,10 +1659,10 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     else if(!can_use_1024x600)
         text.draw("1024x600 doesn't fit this screen",
                   display_card.x + 24,
-                  display_card.y + display_card.h - 24, kTextDim, 14);
+                  display_card.y + display_card.h - 20, kTextDim, 14);
     else if(!compact)
         text.draw("Restarts the app to apply", display_card.x + 24,
-                  display_card.y + display_card.h - 24, kTextDim, 14);
+                  display_card.y + display_card.h - 20, kTextDim, 14);
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan,
                 compact ? 14 : 16, false, is_pressed(touch, settings_save_rect(width)));
@@ -1684,22 +1687,22 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                   diagnostics_card.y + 150, kCyan, 14);
     }
     else {
-        text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 58, kText, 16);
+        text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 55, kText, 16);
         text.draw(tuner_product.empty() ? "Not detected" : tuner_product,
-                  diagnostic_x, diagnostics_card.y + 82,
+                  diagnostic_x, diagnostics_card.y + 76,
                   tuner_product.empty() ? kRed : kText, 16);
-        text.draw("Longmynd Link", diagnostic_x, diagnostics_card.y + 122, kText, 16);
+        text.draw("Longmynd Link", diagnostic_x, diagnostics_card.y + 109, kText, 16);
         text.draw(longmynd_connected ? "Connected" : "Not connected",
-                  diagnostic_x, diagnostics_card.y + 146,
+                  diagnostic_x, diagnostics_card.y + 130,
                   longmynd_connected ? kGreen : kRed, 16);
-        text.draw("Watch in VLC (same network)", diagnostic_x, diagnostics_card.y + 186, kText, 16);
-        text.draw("Media > Open Network Stream:", diagnostic_x, diagnostics_card.y + 210, kTextDim, 14);
-        text.draw(qo100::ts_stream_vlc_url(), diagnostic_x, diagnostics_card.y + 230, kCyan, 16);
+        text.draw("Watch in VLC (same network)", diagnostic_x, diagnostics_card.y + 163, kText, 16);
+        text.draw("Media > Open Network Stream:", diagnostic_x, diagnostics_card.y + 184, kTextDim, 14);
+        text.draw(qo100::ts_stream_vlc_url(), diagnostic_x, diagnostics_card.y + 201, kCyan, 16);
     }
 
     const SDL_Rect exit_card = settings_exit_card_rect(width);
     draw_settings_card(renderer, text, exit_card, "EXIT BUTTON BEHAVIOUR", compact);
-    const char * exit_labels[] = {"Restart", "Full Stop"};
+    const char * exit_labels[] = {"Restart", "FULL STOP"};
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_exit_behaviour_rect(width, index);
         draw_choice_button(renderer, text, button, exit_labels[index],
@@ -1710,7 +1713,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         text.draw(exit_behaviour_choice == 1
                       ? "EXIT stops the app - restart via desktop icon"
                       : "EXIT restarts the app automatically",
-                  exit_card.x + 24, exit_card.y + exit_card.h - 24, kTextDim, 14);
+                  exit_card.x + 24, exit_card.y + exit_card.h - 20, kTextDim, 14);
 
     const SDL_Rect autostart_card = settings_autostart_card_rect(width);
     draw_settings_card(renderer, text, autostart_card, "AUTO START AT BOOT", compact);
@@ -1725,7 +1728,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     }
     if(!compact)
         text.draw("Launches automatically at power-on (kiosk mode)",
-                  autostart_card.x + 24, autostart_card.y + autostart_card.h - 24,
+                  autostart_card.x + 24, autostart_card.y + autostart_card.h - 20,
                   kTextDim, 14);
 }
 
