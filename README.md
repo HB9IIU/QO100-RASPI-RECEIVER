@@ -90,7 +90,11 @@ offset, bias voltage) match your hardware.
 - **Tap anywhere on the spectrum display** to tune to that signal.
 - **CHAT** — opens the QO-100 wideband chat.
 - **SET** — LNB settings (local oscillator offset, bias voltage), screen
-  resolution, and what **EXIT** does (see below).
+  resolution, what **EXIT** does (see below), and whether the app auto
+  starts at boot. The **SET** page's own **EXIT** button just closes
+  the SET page and returns to the main screen — a different action from
+  the main screen's **EXIT** button described next, despite sharing the
+  name.
 - **SCAN** — automatically hops between detected signals.
 - **EXIT** — closes the app; it restarts itself a few seconds later by
   default. **SET** has an Exit Button Behaviour option to change this to
