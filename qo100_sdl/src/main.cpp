@@ -102,6 +102,21 @@ std::string repository_directory()
     return realpath(candidate.c_str(), resolved) != nullptr ? resolved : candidate;
 }
 
+/* ~/.config/autostart/qo100datv.desktop is the actual boot-time trigger
+ * (see scripts/setup_autostart.sh) - its mere presence/absence on disk *is*
+ * the "auto start at boot" setting, so there's nothing to load from
+ * settings.json or keep in sync: just check the file. */
+std::string autostart_desktop_file_path()
+{
+    const char * home = std::getenv("HOME");
+    return std::string(home ? home : "") + "/.config/autostart/qo100datv.desktop";
+}
+
+bool autostart_enabled()
+{
+    return access(autostart_desktop_file_path().c_str(), F_OK) == 0;
+}
+
 std::string detect_tuner_product_string()
 {
     DIR * directory = opendir("/sys/bus/usb/devices");
@@ -1454,7 +1469,8 @@ SDL_Rect settings_exit_card_rect(int width)
 {
     const SDL_Rect diagnostics = settings_diagnostics_card_rect(width);
     const int gap = settings_compact(width) ? 12 : 20;
-    const int height = settings_compact(width) ? 102 : 140;
+    /* Tall enough for two button rows (exit behaviour, then autostart). */
+    const int height = settings_compact(width) ? 188 : 270;
     return {diagnostics.x, diagnostics.y + diagnostics.h + gap, diagnostics.w, height};
 }
 
@@ -1497,6 +1513,14 @@ SDL_Rect settings_exit_behaviour_rect(int width, int index)
     if(settings_compact(width))
         return {card.x + 16 + index * 178, card.y + 40, 166, 34};
     return {card.x + 24 + index * 216, card.y + 56, 200, 50};
+}
+
+SDL_Rect settings_autostart_rect(int width, int index)
+{
+    const SDL_Rect card = settings_exit_card_rect(width);
+    if(settings_compact(width))
+        return {card.x + 16 + index * 178, card.y + 144, 166, 34};
+    return {card.x + 24 + index * 216, card.y + 188, 200, 50};
 }
 
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
@@ -1643,6 +1667,26 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         text.draw(exit_behaviour_choice == 1
                       ? "EXIT stops the app - restart via desktop icon"
                       : "EXIT restarts the app automatically",
+                  exit_card.x + 24, exit_card.y + 116, kTextDim, 14);
+
+    const int autostart_label_y = compact ? exit_card.y + 122 : exit_card.y + 156;
+    text.draw("Auto Start At Boot", exit_card.x + (compact ? 16 : 24), autostart_label_y,
+              kText, label_size);
+    const bool autostart_on = autostart_enabled();
+    const char * autostart_labels[] = {"On", "Off"};
+    for(int index = 0; index < 2; ++index) {
+        const SDL_Rect button = settings_autostart_rect(width, index);
+        const bool selected = (index == 0) == autostart_on;
+        set_colour(renderer, selected ? Colour{0x1f, 0x4d, 0x33} : kPanel);
+        SDL_RenderFillRect(renderer, &button);
+        set_colour(renderer, selected ? kGreen : kBorder);
+        SDL_RenderDrawRect(renderer, &button);
+        text.draw(autostart_labels[index], button.x + button.w / 2,
+                  button.y + button.h / 2,
+                  selected ? kGreen : kText, button_label_size, true);
+    }
+    if(!compact)
+        text.draw("Launches automatically at power-on (kiosk mode)",
                   exit_card.x + 24, exit_card.y + exit_card.h - 24, kTextDim, 14);
 }
 
@@ -3062,6 +3106,28 @@ int main(int argc, char ** argv)
                             if(point_in_rect(x, y,
                                              settings_exit_behaviour_rect(display.width, index))) {
                                 settings_exit_behaviour_choice = index;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        for(int index = 0; !matched && index < 2; ++index) {
+                            if(point_in_rect(x, y,
+                                             settings_autostart_rect(display.width, index))) {
+                                /* Takes effect immediately, unlike the rest of
+                                 * this page - it's a standalone boot-time
+                                 * policy, not part of receiver_settings, so
+                                 * there's nothing for SAVE & APPLY to do here. */
+                                if(index == 0) {
+                                    qo100::log("[SETTINGS_UI] autostart enabled\n");
+                                    std::system(("QO100_SKIP_SERVICE_START=1 '" +
+                                                 repository_root +
+                                                 "/scripts/setup_autostart.sh' &").c_str());
+                                }
+                                else {
+                                    qo100::log("[SETTINGS_UI] autostart disabled\n");
+                                    std::system(("rm -f '" +
+                                                 autostart_desktop_file_path() + "'").c_str());
+                                }
                                 break;
                             }
                         }

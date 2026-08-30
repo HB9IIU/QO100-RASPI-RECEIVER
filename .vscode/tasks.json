@@ -31,7 +31,7 @@
         {
             "label": "build and RUN qo100-sdl-release",
             "type": "shell",
-            "command": "cd '${workspaceFolder}' && cmake -S qo100_sdl -B qo100_sdl/build && cmake --build qo100_sdl/build -j2 && DISPLAY=:0.0 ./qo100_sdl/build/qo100sdl 2>&1 | tee qo100_sdl_test.log",
+            "command": "cd '${workspaceFolder}' && cmake -S qo100_sdl -B qo100_sdl/build && cmake --build qo100_sdl/build -j2 && unset WAYLAND_DISPLAY; DISPLAY=:0.0 XAUTHORITY=$HOME/.Xauthority ./qo100_sdl/build/qo100sdl 2>&1 | tee qo100_sdl_test.log",
             "problemMatcher": ["$gcc"],
             "dependsOn": ["stop-any-qo100datv-instance"],
             "dependsOrder": "sequence",
@@ -43,7 +43,7 @@
         {
             "label": "build and RUN qo100-sdl @ 800x480 (windowed preview)",
             "type": "shell",
-            "command": "cd '${workspaceFolder}' && cmake -S qo100_sdl -B qo100_sdl/build && cmake --build qo100_sdl/build -j2 && DISPLAY=:0.0 QO100_DISPLAY=800x480 QO100_WINDOWED=1 ./qo100_sdl/build/qo100sdl 2>&1 | tee qo100_sdl_800x480_test.log",
+            "command": "cd '${workspaceFolder}' && cmake -S qo100_sdl -B qo100_sdl/build && cmake --build qo100_sdl/build -j2 && unset WAYLAND_DISPLAY; DISPLAY=:0.0 XAUTHORITY=$HOME/.Xauthority QO100_DISPLAY=800x480 QO100_WINDOWED=1 ./qo100_sdl/build/qo100sdl 2>&1 | tee qo100_sdl_800x480_test.log",
             "problemMatcher": ["$gcc"],
             "dependsOn": ["stop-any-qo100datv-instance"],
             "dependsOrder": "sequence",
