@@ -85,6 +85,16 @@ in. If it doesn't lock onto a signal: make sure the antenna/LNB is actually
 pointed at QO-100, and check the **SET** page for the LNB settings (LO
 offset, bias voltage) match your hardware.
 
+## Updating
+
+```bash
+cd ~/DATVreceiver
+git pull
+scripts/initialSetup.sh
+```
+
+Same script as the initial install, safe to re-run any time there's a new version to pick up.
+
 ## Using the app
 
 - **Tap anywhere on the spectrum display** to tune to that signal.

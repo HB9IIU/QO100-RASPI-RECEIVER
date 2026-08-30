@@ -77,6 +77,26 @@ void set_colour(SDL_Renderer * renderer, Colour colour)
     SDL_SetRenderDrawColor(renderer, colour.r, colour.g, colour.b, colour.a);
 }
 
+/* Tracks where a touch/click is currently held down, so buttons can draw a
+ * pressed highlight the instant a finger lands on them rather than only
+ * reacting on release. */
+struct TouchState {
+    bool active = false;
+    int x = 0;
+    int y = 0;
+};
+
+bool point_in_rect(int x, int y, const SDL_Rect & rect)
+{
+    return x >= rect.x && x < rect.x + rect.w &&
+           y >= rect.y && y < rect.y + rect.h;
+}
+
+bool is_pressed(const TouchState & touch, const SDL_Rect & rect)
+{
+    return touch.active && point_in_rect(touch.x, touch.y, rect);
+}
+
 uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue)
 {
     return static_cast<uint16_t>(((red & 0xf8U) << 8U) |
@@ -1353,13 +1373,17 @@ void draw_rounded_rect(SDL_Renderer * renderer, const SDL_Rect & rect,
 
 void draw_button(SDL_Renderer * renderer, TextCache & text, SDL_Rect rect,
                  const std::string & label, Colour colour, int font_size = 16,
-                 bool active = false)
+                 bool active = false, bool pressed = false)
 {
     constexpr int kButtonRadius = 10;
     fill_rounded_rect(renderer, rect, kButtonRadius, active ? colour : kPanel);
     draw_rounded_rect(renderer, rect, kButtonRadius, colour);
     text.draw(label, rect.x + rect.w / 2, rect.y + rect.h / 2,
               active ? kBackground : colour, font_size, true);
+    /* A translucent wash on top of whatever's already drawn, rather than
+     * a distinct pressed colour per button - works the same regardless of
+     * the button's own colour or active/outline state. */
+    if(pressed) fill_rounded_rect(renderer, rect, kButtonRadius, {255, 255, 255, 60});
 }
 
 enum class TunerPopupKind { None, Detected, NotFound };
@@ -1382,7 +1406,8 @@ SDL_Rect tuner_popup_close_rect(int screen_width, int screen_height)
 
 void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
                       int screen_width, int screen_height,
-                      TunerPopupKind kind, const std::string & product)
+                      TunerPopupKind kind, const std::string & product,
+                      const TouchState & touch)
 {
     if(kind == TunerPopupKind::None) return;
 
@@ -1407,20 +1432,14 @@ void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
                   popup.y + 92, kText, 20, true);
         text.draw("Check the cable and power, then restart the app.", centre_x,
                   popup.y + 122, kText, 20, true);
-        draw_button(renderer, text,
-                    tuner_popup_close_rect(screen_width, screen_height),
-                    "CLOSE", kRed, 16);
+        const SDL_Rect close_button = tuner_popup_close_rect(screen_width, screen_height);
+        draw_button(renderer, text, close_button, "CLOSE", kRed, 16,
+                    false, is_pressed(touch, close_button));
     }
 }
 
 enum class AppPage { Main, Settings, Chat };
 enum class ChatInput { None, Nick, Message };
-
-bool point_in_rect(int x, int y, const SDL_Rect & rect)
-{
-    return x >= rect.x && x < rect.x + rect.w &&
-           y >= rect.y && y < rect.y + rect.h;
-}
 
 SDL_Rect page_back_rect(int width)
 {
@@ -1555,12 +1574,27 @@ void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &rule);
 }
 
+void draw_choice_button(SDL_Renderer * renderer, TextCache & text,
+                        const SDL_Rect & button, const std::string & label,
+                        bool selected, bool disabled, bool pressed,
+                        int font_size)
+{
+    set_colour(renderer, selected ? Colour{0x1f, 0x4d, 0x33} : kPanel);
+    SDL_RenderFillRect(renderer, &button);
+    set_colour(renderer, selected ? kGreen : kBorder);
+    SDL_RenderDrawRect(renderer, &button);
+    text.draw(label, button.x + button.w / 2, button.y + button.h / 2,
+              selected ? kGreen : (disabled ? kTextDim : kText), font_size, true);
+    if(pressed) fill_rounded_rect(renderer, button, 0, {255, 255, 255, 60});
+}
+
 void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                         int width, int height, int lo_mhz,
                         int voltage_choice, int display_choice,
                         int exit_behaviour_choice,
                         const std::string & tuner_product,
-                        bool longmynd_connected, bool can_use_1024x600)
+                        bool longmynd_connected, bool can_use_1024x600,
+                        const TouchState & touch)
 {
     const bool compact = settings_compact(width);
     const int label_size = compact ? 14 : 16;
@@ -1578,7 +1612,8 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
               kText, label_size);
     const SDL_Rect minus_button = settings_lo_button_rect(width, false);
     const SDL_Rect plus_button = settings_lo_button_rect(width, true);
-    draw_button(renderer, text, minus_button, "-", kText, compact ? 16 : 20);
+    draw_button(renderer, text, minus_button, "-", kText, compact ? 16 : 20,
+                false, is_pressed(touch, minus_button));
     const SDL_Rect lo_value{minus_button.x + minus_button.w + (compact ? 8 : 8),
                             minus_button.y,
                             plus_button.x - (minus_button.x + minus_button.w) - 16,
@@ -1589,7 +1624,8 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderDrawRect(renderer, &lo_value);
     text.draw(std::to_string(lo_mhz), lo_value.x + lo_value.w / 2,
               lo_value.y + lo_value.h / 2, kText, compact ? 16 : 20, true);
-    draw_button(renderer, text, plus_button, "+", kText, compact ? 16 : 20);
+    draw_button(renderer, text, plus_button, "+", kText, compact ? 16 : 20,
+                false, is_pressed(touch, plus_button));
 
     const int voltage_label_y = compact ? receiver_card.y + 122 : receiver_card.y + 156;
     text.draw("LNB Bias Voltage", receiver_card.x + (compact ? 16 : 24), voltage_label_y,
@@ -1597,13 +1633,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     const char * voltage_labels[] = {"OFF", "13V", "18V"};
     for(int index = 0; index < 3; ++index) {
         const SDL_Rect button = settings_voltage_rect(width, index);
-        set_colour(renderer, index == voltage_choice ? Colour{0x1f, 0x4d, 0x33} : kPanel);
-        SDL_RenderFillRect(renderer, &button);
-        set_colour(renderer, index == voltage_choice ? kGreen : kBorder);
-        SDL_RenderDrawRect(renderer, &button);
-        text.draw(voltage_labels[index], button.x + button.w / 2,
-                  button.y + button.h / 2,
-                  index == voltage_choice ? kGreen : kText, button_label_size, true);
+        draw_choice_button(renderer, text, button, voltage_labels[index],
+                           index == voltage_choice, false,
+                           is_pressed(touch, button), button_label_size);
     }
 
     const SDL_Rect display_card = settings_display_card_rect(width);
@@ -1613,13 +1645,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         const SDL_Rect button = settings_display_res_rect(width, index);
         const bool disabled = index == 0 && !can_use_1024x600;
         const bool selected = !disabled && index == display_choice;
-        set_colour(renderer, selected ? Colour{0x1f, 0x4d, 0x33} : kPanel);
-        SDL_RenderFillRect(renderer, &button);
-        set_colour(renderer, selected ? kGreen : kBorder);
-        SDL_RenderDrawRect(renderer, &button);
-        text.draw(display_labels[index], button.x + button.w / 2,
-                  button.y + button.h / 2,
-                  selected ? kGreen : (disabled ? kTextDim : kText), button_label_size, true);
+        draw_choice_button(renderer, text, button, display_labels[index],
+                           selected, disabled,
+                           !disabled && is_pressed(touch, button), button_label_size);
     }
     if(!can_use_1024x600 && compact)
         text.draw("1024x600 too big for this screen",
@@ -1634,9 +1662,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                   display_card.y + display_card.h - 24, kTextDim, 14);
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan,
-                compact ? 14 : 16);
+                compact ? 14 : 16, false, is_pressed(touch, settings_save_rect(width)));
     draw_button(renderer, text, settings_exit_page_rect(width), "EXIT", kCyan,
-                compact ? 14 : 16);
+                compact ? 14 : 16, false, is_pressed(touch, settings_exit_page_rect(width)));
 
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
     draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS", compact);
@@ -1674,14 +1702,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     const char * exit_labels[] = {"Restart", "Full Stop"};
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_exit_behaviour_rect(width, index);
-        const bool selected = index == exit_behaviour_choice;
-        set_colour(renderer, selected ? Colour{0x1f, 0x4d, 0x33} : kPanel);
-        SDL_RenderFillRect(renderer, &button);
-        set_colour(renderer, selected ? kGreen : kBorder);
-        SDL_RenderDrawRect(renderer, &button);
-        text.draw(exit_labels[index], button.x + button.w / 2,
-                  button.y + button.h / 2,
-                  selected ? kGreen : kText, button_label_size, true);
+        draw_choice_button(renderer, text, button, exit_labels[index],
+                           index == exit_behaviour_choice, false,
+                           is_pressed(touch, button), button_label_size);
     }
     if(!compact)
         text.draw(exit_behaviour_choice == 1
@@ -1696,13 +1719,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_autostart_rect(width, index);
         const bool selected = (index == 0) == autostart_on;
-        set_colour(renderer, selected ? Colour{0x1f, 0x4d, 0x33} : kPanel);
-        SDL_RenderFillRect(renderer, &button);
-        set_colour(renderer, selected ? kGreen : kBorder);
-        SDL_RenderDrawRect(renderer, &button);
-        text.draw(autostart_labels[index], button.x + button.w / 2,
-                  button.y + button.h / 2,
-                  selected ? kGreen : kText, button_label_size, true);
+        draw_choice_button(renderer, text, button, autostart_labels[index],
+                           selected, false, is_pressed(touch, button),
+                           button_label_size);
     }
     if(!compact)
         text.draw("Launches automatically at power-on (kiosk mode)",
@@ -1770,7 +1789,8 @@ std::vector<KeyboardKey> keyboard_keys(int screen_width, int screen_height,
 }
 
 void draw_keyboard(SDL_Renderer * renderer, TextCache & text,
-                   int width, int height, bool symbols, bool shifted)
+                   int width, int height, bool symbols, bool shifted,
+                   const TouchState & touch)
 {
     const SDL_Rect background{0, height - 258, width, 258};
     set_colour(renderer, kPanel);
@@ -1783,7 +1803,8 @@ void draw_keyboard(SDL_Renderer * renderer, TextCache & text,
         else if(key.label == "CANCEL" || key.label == "BACK") colour = kRed;
         else if(key.label == "SYM" || key.label == "ABC" || key.label == "SHIFT")
             colour = kYellow;
-        draw_button(renderer, text, key.rect, key.label, colour, 16);
+        draw_button(renderer, text, key.rect, key.label, colour, 16,
+                    false, is_pressed(touch, key.rect));
     }
 }
 
@@ -1946,7 +1967,7 @@ void draw_chat_page(SDL_Renderer * renderer, TextCache & text,
                     const std::string & nick, const std::string & message,
                     ChatInput active_input, bool symbols, bool shifted,
                     size_t & first_visible, size_t & last_visible,
-                    bool & follow_latest)
+                    bool & follow_latest, const TouchState & touch)
 {
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
@@ -1959,7 +1980,8 @@ void draw_chat_page(SDL_Renderer * renderer, TextCache & text,
         ? kGreen : kYellow;
     text.draw(status, 330, 17, status_colour, 14);
     text.draw("VIEWERS: " + state.viewers, width - 260, 17, kTextDim, 14);
-    draw_button(renderer, text, page_back_rect(width), "BACK", kCyan);
+    draw_button(renderer, text, page_back_rect(width), "BACK", kCyan, 16,
+                false, is_pressed(touch, page_back_rect(width)));
 
     const bool keyboard_open = active_input != ChatInput::None;
     const int content_bottom = keyboard_open ? height - 316 : height - 68;
@@ -1979,12 +2001,16 @@ void draw_chat_page(SDL_Renderer * renderer, TextCache & text,
 
     draw_text_input(renderer, text, chat_nick_rect(height, keyboard_open),
                     nick, "CALLSIGN", active_input == ChatInput::Nick);
-    draw_button(renderer, text, chat_set_rect(height, keyboard_open), "SET", kYellow);
+    const SDL_Rect set_button = chat_set_rect(height, keyboard_open);
+    draw_button(renderer, text, set_button, "SET", kYellow, 16,
+                false, is_pressed(touch, set_button));
     draw_text_input(renderer, text, chat_message_rect(width, height, keyboard_open),
                     message, "Type a message...", active_input == ChatInput::Message);
-    draw_button(renderer, text, chat_send_rect(width, height, keyboard_open),
-                "SEND", kCyan);
-    if(keyboard_open) draw_keyboard(renderer, text, width, height, symbols, shifted);
+    const SDL_Rect send_button = chat_send_rect(width, height, keyboard_open);
+    draw_button(renderer, text, send_button, "SEND", kCyan, 16,
+                false, is_pressed(touch, send_button));
+    if(keyboard_open)
+        draw_keyboard(renderer, text, width, height, symbols, shifted, touch);
 }
 
 void erase_last_utf8(std::string & value)
@@ -2143,7 +2169,7 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
                  long tuned_symbol_rate_ksps,
                  const std::string & video_codec,
                  const std::string & audio_codec,
-                 bool scan_active)
+                 bool scan_active, const TouchState & touch)
 {
     fill_panel(renderer, layout.status_panel);
     const bool locked = receiver.locked();
@@ -2318,8 +2344,9 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     const char * labels[] = {"CHAT", "SET", "SCAN", "EXIT"};
     const Colour colours[] = {kCyan, kYellow, kPurple, kRed};
     for(int i = 0; i < 4; ++i) {
-        draw_button(renderer, text, status_button_rect(layout, i),
-                    labels[i], colours[i], 16, i == 2 && scan_active);
+        const SDL_Rect button = status_button_rect(layout, i);
+        draw_button(renderer, text, button, labels[i], colours[i], 16,
+                    i == 2 && scan_active, is_pressed(touch, button));
     }
 }
 
@@ -2745,6 +2772,7 @@ int main(int argc, char ** argv)
     int chat_drag_start_y = 0;
     bool volume_dragging = false;
     size_t chat_drag_start_first = 0;
+    TouchState touch;
     double selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
                                     beacon_frequency_khz / 1000.0;
     SpectrumMarker spectrum_marker{
@@ -2965,6 +2993,25 @@ int main(int argc, char ** argv)
                     event.motion.x -= render_offset_x;
                     event.motion.y -= render_offset_y;
                 }
+            }
+            /* Tracked separately from each page's own click handling below
+             * (which only fires on release) purely so buttons can draw a
+             * pressed highlight the instant a finger touches down - placed
+             * first, before any of that handling's `continue`s, so it always
+             * runs regardless of which page/popup consumes the event. */
+            if(event.type == SDL_MOUSEBUTTONDOWN &&
+               event.button.button == SDL_BUTTON_LEFT) {
+                touch.active = true;
+                touch.x = event.button.x;
+                touch.y = event.button.y;
+            }
+            else if(event.type == SDL_MOUSEMOTION && touch.active) {
+                touch.x = event.motion.x;
+                touch.y = event.motion.y;
+            }
+            else if(event.type == SDL_MOUSEBUTTONUP &&
+                    event.button.button == SDL_BUTTON_LEFT) {
+                touch.active = false;
             }
             if(event.type == SDL_QUIT) {
                 running = false;
@@ -3619,14 +3666,14 @@ int main(int argc, char ** argv)
                                settings_lo_mhz, settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
                                tuner_product, receiver_client.monitor_connected(),
-                               can_use_1024x600);
+                               can_use_1024x600, touch);
         }
         else if(app_page == AppPage::Chat) {
             draw_chat_page(renderer, text, display.width, display.height,
                            chat_client.state(), chat_nick, chat_message,
                            chat_input, chat_symbols, chat_shifted,
                            chat_first_visible, chat_last_visible,
-                           chat_follow_latest);
+                           chat_follow_latest, touch);
         }
         else if(fullscreen_video) {
             if(have_video_frame) {
@@ -3663,10 +3710,10 @@ int main(int argc, char ** argv)
                         receiver_client.received_updates() != 0,
                         selected_frequency_mhz, current_tune_if_khz,
                         current_tune_symbol_rate_ksps,
-                        video_codec, audio_codec, scan_active);
+                        video_codec, audio_codec, scan_active, touch);
         }
         draw_tuner_popup(renderer, text, display.width, display.height,
-                         tuner_popup, tuner_product);
+                         tuner_popup, tuner_product, touch);
         SDL_RenderPresent(renderer);
 
         const auto now = Clock::now();
@@ -3764,7 +3811,7 @@ int main(int argc, char ** argv)
                     receiver_client.received_updates() != 0,
                     selected_frequency_mhz, current_tune_if_khz,
                     current_tune_symbol_rate_ksps,
-                    video_codec, audio_codec, scan_active);
+                    video_codec, audio_codec, scan_active, TouchState{});
         SDL_RenderPresent(renderer);
         if(!save_screenshot(renderer, display.width, display.height, options.screenshot))
             qo100::log( "[SCREENSHOT] failed to save %s\n", options.screenshot.c_str());
