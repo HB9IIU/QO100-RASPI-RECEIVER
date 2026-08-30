@@ -1504,7 +1504,13 @@ SDL_Rect settings_save_rect(int width)
     const int save_width = settings_compact(width) ? 150 : 200;
     const int gap = settings_compact(width) ? 12 : 20;
     const int height = settings_compact(width) ? 38 : 50;
-    return {(width - save_width) / 2, card.y + card.h + gap, save_width, height};
+    /* Centred under the left column (not the full page width) - it used to
+     * be full-width-centred, which already reached into the right column's
+     * x-range and only avoided overlapping it because both columns
+     * happened to end at the same height. Growing EXIT BUTTON BEHAVIOUR's
+     * card for the autostart row broke that coincidence and the right
+     * column started painting over this button. */
+    return {card.x + (card.w - save_width) / 2, card.y + card.h + gap, save_width, height};
 }
 
 SDL_Rect settings_exit_behaviour_rect(int width, int index)
