@@ -1469,9 +1469,16 @@ SDL_Rect settings_exit_card_rect(int width)
 {
     const SDL_Rect diagnostics = settings_diagnostics_card_rect(width);
     const int gap = settings_compact(width) ? 12 : 20;
-    /* Tall enough for two button rows (exit behaviour, then autostart). */
-    const int height = settings_compact(width) ? 188 : 270;
+    const int height = settings_compact(width) ? 102 : 140;
     return {diagnostics.x, diagnostics.y + diagnostics.h + gap, diagnostics.w, height};
+}
+
+SDL_Rect settings_autostart_card_rect(int width)
+{
+    const SDL_Rect exit_card = settings_exit_card_rect(width);
+    const int gap = settings_compact(width) ? 12 : 20;
+    const int height = settings_compact(width) ? 102 : 140;
+    return {exit_card.x, exit_card.y + exit_card.h + gap, exit_card.w, height};
 }
 
 SDL_Rect settings_lo_button_rect(int width, bool increment)
@@ -1501,16 +1508,25 @@ SDL_Rect settings_display_res_rect(int width, int index)
 SDL_Rect settings_save_rect(int width)
 {
     const SDL_Rect card = settings_display_card_rect(width);
-    const int save_width = settings_compact(width) ? 150 : 200;
+    const int button_width = settings_compact(width) ? 150 : 200;
+    const int button_gap = settings_compact(width) ? 12 : 16;
     const int gap = settings_compact(width) ? 12 : 20;
     const int height = settings_compact(width) ? 38 : 50;
+    const int pair_width = button_width * 2 + button_gap;
     /* Centred under the left column (not the full page width) - it used to
      * be full-width-centred, which already reached into the right column's
      * x-range and only avoided overlapping it because both columns
      * happened to end at the same height. Growing EXIT BUTTON BEHAVIOUR's
      * card for the autostart row broke that coincidence and the right
      * column started painting over this button. */
-    return {card.x + (card.w - save_width) / 2, card.y + card.h + gap, save_width, height};
+    return {card.x + (card.w - pair_width) / 2, card.y + card.h + gap, button_width, height};
+}
+
+SDL_Rect settings_exit_page_rect(int width)
+{
+    const SDL_Rect save = settings_save_rect(width);
+    const int button_gap = settings_compact(width) ? 12 : 16;
+    return {save.x + save.w + button_gap, save.y, save.w, save.h};
 }
 
 SDL_Rect settings_exit_behaviour_rect(int width, int index)
@@ -1523,10 +1539,10 @@ SDL_Rect settings_exit_behaviour_rect(int width, int index)
 
 SDL_Rect settings_autostart_rect(int width, int index)
 {
-    const SDL_Rect card = settings_exit_card_rect(width);
+    const SDL_Rect card = settings_autostart_card_rect(width);
     if(settings_compact(width))
-        return {card.x + 16 + index * 178, card.y + 144, 166, 34};
-    return {card.x + 24 + index * 216, card.y + 188, 200, 50};
+        return {card.x + 16 + index * 178, card.y + 40, 166, 34};
+    return {card.x + 24 + index * 216, card.y + 56, 200, 50};
 }
 
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
@@ -1557,7 +1573,6 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     const SDL_Rect screen{0, 0, width, height};
     SDL_RenderFillRect(renderer, &screen);
     text.draw("SETTINGS", 12, 12, kCyan, 20);
-    draw_button(renderer, text, page_back_rect(width), "BACK", kCyan);
 
     const SDL_Rect receiver_card = settings_receiver_card_rect(width);
     draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING", compact);
@@ -1623,6 +1638,8 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan,
                 compact ? 14 : 16);
+    draw_button(renderer, text, settings_exit_page_rect(width), "EXIT", kCyan,
+                compact ? 14 : 16);
 
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
     draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS", compact);
@@ -1673,11 +1690,10 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         text.draw(exit_behaviour_choice == 1
                       ? "EXIT stops the app - restart via desktop icon"
                       : "EXIT restarts the app automatically",
-                  exit_card.x + 24, exit_card.y + 116, kTextDim, 14);
+                  exit_card.x + 24, exit_card.y + exit_card.h - 24, kTextDim, 14);
 
-    const int autostart_label_y = compact ? exit_card.y + 122 : exit_card.y + 156;
-    text.draw("Auto Start At Boot", exit_card.x + (compact ? 16 : 24), autostart_label_y,
-              kText, label_size);
+    const SDL_Rect autostart_card = settings_autostart_card_rect(width);
+    draw_settings_card(renderer, text, autostart_card, "AUTO START AT BOOT", compact);
     const bool autostart_on = autostart_enabled();
     const char * autostart_labels[] = {"On", "Off"};
     for(int index = 0; index < 2; ++index) {
@@ -1693,7 +1709,8 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     }
     if(!compact)
         text.draw("Launches automatically at power-on (kiosk mode)",
-                  exit_card.x + 24, exit_card.y + exit_card.h - 24, kTextDim, 14);
+                  autostart_card.x + 24, autostart_card.y + autostart_card.h - 24,
+                  kTextDim, 14);
 }
 
 struct KeyboardKey {
@@ -3030,7 +3047,7 @@ int main(int argc, char ** argv)
                     continue;
                 }
                 if(app_page == AppPage::Settings) {
-                    if(point_in_rect(x, y, page_back_rect(display.width))) {
+                    if(point_in_rect(x, y, settings_exit_page_rect(display.width))) {
                         app_page = AppPage::Main;
                         qo100::log("[SETTINGS_UI] back to main\n");
                     }
