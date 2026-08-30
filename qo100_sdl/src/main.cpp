@@ -1510,24 +1510,20 @@ SDL_Rect settings_save_rect(int width)
     const SDL_Rect card = settings_display_card_rect(width);
     const SDL_Rect autostart_card = settings_autostart_card_rect(width);
     const int button_width = settings_compact(width) ? 150 : 200;
-    const int button_gap = settings_compact(width) ? 12 : 16;
     const int height = settings_compact(width) ? 38 : 50;
-    const int pair_width = button_width * 2 + button_gap;
-    /* Centred under the left column (not the full page width) - it used to
-     * be full-width-centred, which already reached into the right column's
-     * x-range and only avoided overlapping it because both columns
-     * happened to end at the same height. Growing EXIT BUTTON BEHAVIOUR's
-     * card for the autostart row broke that coincidence and the right
-     * column started painting over this button. */
-    return {card.x + (card.w - pair_width) / 2,
-            autostart_card.y + (autostart_card.h - height) / 2, button_width, height};
+    /* Left-aligned with the DISPLAY RESOLUTION card above it, and vertically
+     * centred on AUTO START AT BOOT - the card it ends up sitting beside now
+     * that EXIT (right-aligned with that same card, see settings_exit_page_
+     * rect) shares this row. */
+    return {card.x, autostart_card.y + (autostart_card.h - height) / 2,
+            button_width, height};
 }
 
 SDL_Rect settings_exit_page_rect(int width)
 {
+    const SDL_Rect card = settings_display_card_rect(width);
     const SDL_Rect save = settings_save_rect(width);
-    const int button_gap = settings_compact(width) ? 12 : 16;
-    return {save.x + save.w + button_gap, save.y, save.w, save.h};
+    return {card.x + card.w - save.w, save.y, save.w, save.h};
 }
 
 SDL_Rect settings_exit_behaviour_rect(int width, int index)
