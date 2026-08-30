@@ -1508,9 +1508,9 @@ SDL_Rect settings_display_res_rect(int width, int index)
 SDL_Rect settings_save_rect(int width)
 {
     const SDL_Rect card = settings_display_card_rect(width);
+    const SDL_Rect autostart_card = settings_autostart_card_rect(width);
     const int button_width = settings_compact(width) ? 150 : 200;
     const int button_gap = settings_compact(width) ? 12 : 16;
-    const int gap = settings_compact(width) ? 12 : 20;
     const int height = settings_compact(width) ? 38 : 50;
     const int pair_width = button_width * 2 + button_gap;
     /* Centred under the left column (not the full page width) - it used to
@@ -1519,7 +1519,8 @@ SDL_Rect settings_save_rect(int width)
      * happened to end at the same height. Growing EXIT BUTTON BEHAVIOUR's
      * card for the autostart row broke that coincidence and the right
      * column started painting over this button. */
-    return {card.x + (card.w - pair_width) / 2, card.y + card.h + gap, button_width, height};
+    return {card.x + (card.w - pair_width) / 2,
+            autostart_card.y + (autostart_card.h - height) / 2, button_width, height};
 }
 
 SDL_Rect settings_exit_page_rect(int width)
