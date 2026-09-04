@@ -1,6 +1,6 @@
 # QO-100 DATV Receiver (Raspberry Pi 4/5)
 
-A standalone QO-100 (Es'hail-2) digital amateur TV receiver. Runs on a
+A standalone QO-100 (Es'hail-2) digital amateur TV receiver. Runs on a 
 **Raspberry Pi 4 or 5**, driving a **MiniTiouner** tuner, with a fullscreen
 touchscreen app that shows the spectrum, decodes the video, lets you tap to
 tune, and connects to the QO-100 wideband chat. Everything is operated by
