@@ -17,8 +17,13 @@
 #    labwc doesn't get to running its autostart script until it is.
 #    graphical-session.target was tried first and turned out to be dead
 #    weight on this image (never activated - not even wf-panel-pi, the
-#    desktop's own panel, uses it), so it's left in the unit as a harmless,
-#    inert fallback rather than relied upon.
+#    desktop's own panel, uses it) - and NOT harmless to leave in the unit
+#    even as an unused fallback: PartOf=graphical-session.target binds this
+#    unit's restart eligibility to that target's state, and since the
+#    target never actually activates, Restart=always silently stopped
+#    firing after a clean exit (confirmed directly: a plain transient unit
+#    with the same ExecStart restarted fine, this one didn't, until
+#    PartOf/After/WantedBy were all removed). Not referenced at all now.
 #
 # Usage: scripts/setup_autostart.sh [WxH]
 #   No argument (the normal case): resolution comes from settings.json's
@@ -75,32 +80,23 @@ fi
 mkdir -p "$SERVICE_DIR"
 if [ -f "$SERVICE_FILE" ]; then
     # Disable against whatever [Install] section is currently on disk before
-    # overwriting it below - otherwise a service previously installed with
-    # WantedBy=default.target would leave a stale default.target.wants
-    # symlink behind, which would keep pulling the service in early (racing
-    # ahead of the desktop session again) even after this script switches it
-    # to graphical-session.target.
+    # overwriting it below - otherwise a stale WantedBy=...target.wants
+    # symlink from a previous version of this script could hang around.
     systemctl --user disable qo100datv.service 2>/dev/null || true
 fi
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=QO-100 DATV Receiver UI
-# graphical-session.target is what labwc activates once the desktop session
-# has actually finished starting (compositor up, touchscreen wired in).
-# PartOf ties our lifecycle to it: if the graphical session ever restarts,
-# this service restarts with it instead of surviving as an orphan pointed
-# at a dead session.
-PartOf=graphical-session.target
-After=graphical-session.target
 
 [Service]
 Type=simple
 Environment=DISPLAY=:0.0
 $([ -n "$DISPLAY_RES" ] && echo "Environment=QO100_DISPLAY=$DISPLAY_RES")
 WorkingDirectory=$REPO_DIR/qo100_sdl
-# Secondary safety net on top of the graphical-session.target ordering
-# above: XWayland itself starts on demand, so wait for its socket too
-# before launching, in case there's still a hair of a race.
+# The real "desktop is ready" gate is XDG autostart timing (see below) for
+# the initial launch; this covers every launch (including a Restart=always
+# relaunch) since XWayland itself starts on demand and could in principle
+# still not be up yet.
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 60); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 0.5; done; echo "X11 socket never appeared"; exit 1'
 ExecStart=$APP_LAUNCHER
 # always, not on-failure: EXIT (running=false) exits cleanly with status 0,
@@ -109,10 +105,10 @@ ExecStart=$APP_LAUNCHER
 # intended behaviour here.
 Restart=always
 RestartSec=3
-
-[Install]
-WantedBy=graphical-session.target
 EOF
+# No [Install] section - this unit is never started via `systemctl enable`/
+# target activation, only ever explicitly (the XDG autostart entry below,
+# or manually). Nothing to install.
 
 mkdir -p "$AUTOSTART_DIR"
 cat > "$AUTOSTART_FILE" <<EOF
@@ -127,10 +123,9 @@ EOF
 echo "Installed XDG autostart entry at $AUTOSTART_FILE"
 
 systemctl --user daemon-reload
-systemctl --user enable qo100datv.service
 if [ -z "$QO100_SKIP_SERVICE_START" ]; then
     systemctl --user restart qo100datv.service
-    echo "Installed, enabled, and started qo100datv.service - it will also start"
+    echo "Installed and started qo100datv.service - it will also start"
     echo "automatically at next login."
 else
     # initialSetup.sh sets this: starting the app here would pop up
@@ -138,9 +133,9 @@ else
     # complete" message and reboot countdown) right as it's needed - and
     # udev hasn't actually been triggered for real yet at this point in a
     # first-time setup, so it could flash a misleading "No MiniTiouner
-    # detected" too. enable is enough; the imminent reboot starts it for
-    # real.
-    echo "Installed and enabled qo100datv.service - it will start automatically"
-    echo "at next boot."
+    # detected" too. The XDG autostart entry above is enough; the imminent
+    # reboot starts it for real.
+    echo "Installed qo100datv.service and its autostart entry - it will start"
+    echo "automatically at next boot."
 fi
 echo "To check status/logs: systemctl --user status qo100datv.service"
