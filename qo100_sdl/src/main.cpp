@@ -32,6 +32,7 @@
 
 #include <limits.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1446,6 +1447,78 @@ void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
     }
 }
 
+enum class UpdatePopupKind { None, Available, Installing, Failed };
+
+SDL_Rect update_popup_rect(int screen_width, int screen_height, UpdatePopupKind kind)
+{
+    const int width = std::min(600, screen_width - 80);
+    const int height = kind == UpdatePopupKind::Available ? 240 : 190;
+    return {(screen_width - width) / 2, (screen_height - height) / 2,
+            width, height};
+}
+
+SDL_Rect update_popup_button_rect(int screen_width, int screen_height,
+                                  UpdatePopupKind kind, bool yes)
+{
+    const SDL_Rect popup = update_popup_rect(screen_width, screen_height, kind);
+    if(kind != UpdatePopupKind::Available)
+        return {popup.x + (popup.w - 150) / 2, popup.y + popup.h - 62, 150, 44};
+    constexpr int button_width = 150;
+    constexpr int gap = 20;
+    const int total = button_width * 2 + gap;
+    const int left = popup.x + (popup.w - total) / 2;
+    return {yes ? left : left + button_width + gap, popup.y + popup.h - 62,
+            button_width, 44};
+}
+
+void draw_update_popup(SDL_Renderer * renderer, TextCache & text,
+                       int screen_width, int screen_height,
+                       UpdatePopupKind kind, const TouchState & touch)
+{
+    if(kind == UpdatePopupKind::None) return;
+
+    const SDL_Rect screen{0, 0, screen_width, screen_height};
+    set_colour(renderer, {0, 0, 0, 180});
+    SDL_RenderFillRect(renderer, &screen);
+
+    const SDL_Rect popup = update_popup_rect(screen_width, screen_height, kind);
+    constexpr int kPopupRadius = 16;
+    fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
+    draw_rounded_rect(renderer, popup, kPopupRadius,
+                      kind == UpdatePopupKind::Failed ? kRed : kCyan);
+
+    const int centre_x = popup.x + popup.w / 2;
+    if(kind == UpdatePopupKind::Available) {
+        text.draw("UPDATE AVAILABLE", centre_x, popup.y + 40, kCyan, 32, true);
+        text.draw("A new version of this app is ready to install.",
+                  centre_x, popup.y + 92, kText, 20, true);
+        text.draw("See github.com/HB9IIU/QO100-RASPI-RECEIVER for what's new.",
+                  centre_x, popup.y + 122, kTextDim, 16, true);
+        const SDL_Rect yes_button =
+            update_popup_button_rect(screen_width, screen_height, kind, true);
+        const SDL_Rect no_button =
+            update_popup_button_rect(screen_width, screen_height, kind, false);
+        draw_button(renderer, text, yes_button, "YES", kGreen, 16,
+                    false, is_pressed(touch, yes_button));
+        draw_button(renderer, text, no_button, "NO", kText, 16,
+                    false, is_pressed(touch, no_button));
+    }
+    else if(kind == UpdatePopupKind::Installing) {
+        text.draw("UPDATING...", centre_x, popup.y + 55, kCyan, 32, true);
+        text.draw("This takes a minute or two, then the Pi reboots on its own.",
+                  centre_x, popup.y + 112, kText, 16, true);
+    }
+    else {
+        text.draw("UPDATE FAILED", centre_x, popup.y + 45, kRed, 32, true);
+        text.draw("Check the internet connection and try again later.",
+                  centre_x, popup.y + 100, kText, 16, true);
+        const SDL_Rect close_button =
+            update_popup_button_rect(screen_width, screen_height, kind, true);
+        draw_button(renderer, text, close_button, "CLOSE", kRed, 16,
+                    false, is_pressed(touch, close_button));
+    }
+}
+
 enum class AppPage { Main, Settings, Chat };
 enum class ChatInput { None, Nick, Message };
 
@@ -2533,6 +2606,119 @@ void log_startup_banner()
         "===============================================================\n");
 }
 
+std::string run_command_capture_output(const std::string & command)
+{
+    FILE * pipe = popen(command.c_str(), "r");
+    if(pipe == nullptr) return {};
+    std::string output;
+    char buffer[256];
+    while(std::fgets(buffer, sizeof(buffer), pipe) != nullptr) output += buffer;
+    pclose(pipe);
+    while(!output.empty() && (output.back() == '\n' || output.back() == '\r'))
+        output.pop_back();
+    return output;
+}
+
+/* Checks once, in the background, whether origin/main has moved past the
+ * commit this build was checked out from - a plain `git ls-remote` query,
+ * no download, wrapped in `timeout` so no/slow internet can't hang
+ * anything. Runs once per app startup (not on a repeating timer): EXIT
+ * restarts the app on its own in the default configuration, and a reboot
+ * obviously restarts it too, so "check once at startup" already recurs
+ * often enough without extra machinery. */
+class UpdateChecker {
+public:
+    void start(std::string repository_root)
+    {
+        std::thread([this, repository_root = std::move(repository_root)] {
+            run(repository_root);
+        }).detach();
+    }
+
+    bool available() const { return available_.load(); }
+
+private:
+    void run(const std::string & repository_root)
+    {
+        const std::string local = run_command_capture_output(
+            "git -C '" + repository_root + "' rev-parse HEAD 2>/dev/null");
+        const std::string remote_line = run_command_capture_output(
+            "timeout 8 git -C '" + repository_root +
+            "' ls-remote --heads origin main 2>/dev/null");
+        if(local.empty() || remote_line.empty()) return;
+        const std::string remote = remote_line.substr(0, remote_line.find('\t'));
+        if(!remote.empty() && remote != local) {
+            available_.store(true);
+            qo100::log("[UPDATE] new version available (local=%.10s remote=%.10s)\n",
+                       local.c_str(), remote.c_str());
+        }
+    }
+
+    std::atomic<bool> available_{false};
+};
+
+/* Runs scripts/initialSetup.sh in the background to apply an update the
+ * user confirmed from the touchscreen (see UpdatePopupKind::Available) - it
+ * already does exactly the right idempotent pull+rebuild(+reboot), so this
+ * just launches it non-interactively rather than reimplementing a second,
+ * leaner update path that could drift out of sync with what a real install
+ * actually needs. `set -e` in that script means a failure partway through
+ * (no internet, a build error) stops it before it ever reaches `sudo
+ * reboot` - so a failed update leaves the currently-running app completely
+ * untouched, never restarted. */
+class UpdateInstaller {
+public:
+    bool start(const std::string & repository_root)
+    {
+        if(pid_ > 0) return true;
+        const std::string script = repository_root + "/scripts/initialSetup.sh";
+        const std::string log_path = repository_root + "/qo100_sdl/update.log";
+        const pid_t child = fork();
+        if(child < 0) {
+            qo100::log("[UPDATE] fork failed: %s\n", std::strerror(errno));
+            return false;
+        }
+        if(child == 0) {
+            setenv("QO100_NONINTERACTIVE", "1", 1);
+            const int descriptor =
+                open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if(descriptor >= 0) {
+                dup2(descriptor, STDOUT_FILENO);
+                dup2(descriptor, STDERR_FILENO);
+                close(descriptor);
+            }
+            execl("/bin/bash", "bash", script.c_str(), static_cast<char *>(nullptr));
+            _exit(127);
+        }
+        pid_ = child;
+        qo100::log("[UPDATE] installer started pid=%d log=%s\n", pid_, log_path.c_str());
+        return true;
+    }
+
+    /* Call once per frame while installing_. Returns true while still
+     * running. A successful run ends in `sudo reboot` and never returns
+     * here at all - the whole point of a WNOHANG poll rather than a
+     * blocking wait is so the "Updating..." screen keeps animating/
+     * responding right up until that reboot actually happens. */
+    bool poll()
+    {
+        if(pid_ <= 0) return false;
+        int status = 0;
+        const pid_t result = waitpid(pid_, &status, WNOHANG);
+        if(result == 0) return true;
+        qo100::log("[UPDATE] installer exited before rebooting; treating as failed\n");
+        pid_ = -1;
+        failed_ = true;
+        return false;
+    }
+
+    bool failed() const { return failed_; }
+
+private:
+    pid_t pid_ = -1;
+    bool failed_ = false;
+};
+
 } // namespace
 
 int main(int argc, char ** argv)
@@ -2707,6 +2893,18 @@ int main(int argc, char ** argv)
         else
             qo100::log("[TUNER_USB] detected product=%s\n", tuner_product.c_str());
     }
+    UpdateChecker update_checker;
+    update_checker.start(repository_root);
+    UpdateInstaller update_installer;
+    UpdatePopupKind update_popup = UpdatePopupKind::None;
+    /* Set the first time the "available" popup is shown, regardless of
+     * whether the user then taps YES or NO - so it doesn't keep popping
+     * back up for the rest of this run. It'll naturally ask again next
+     * time the app starts (see UpdateChecker's own comment for why that's
+     * a reasonable enough cadence without a snooze/remember-my-choice
+     * setting to add on top). */
+    bool update_prompt_shown = false;
+
     int volume_percent = std::clamp(receiver_settings.audio_volume_percent, 0, 100);
     AudioOutput audio_output;
     if(use_tuner) {
@@ -3154,6 +3352,32 @@ int main(int argc, char ** argv)
                     }
                     continue;
                 }
+                if(update_popup == UpdatePopupKind::Available) {
+                    const SDL_Rect yes_button = update_popup_button_rect(
+                        display.width, display.height, update_popup, true);
+                    const SDL_Rect no_button = update_popup_button_rect(
+                        display.width, display.height, update_popup, false);
+                    if(point_in_rect(x, y, yes_button)) {
+                        qo100::log("[UPDATE] install confirmed\n");
+                        if(update_installer.start(repository_root))
+                            update_popup = UpdatePopupKind::Installing;
+                        else
+                            update_popup = UpdatePopupKind::Failed;
+                    }
+                    else if(point_in_rect(x, y, no_button)) {
+                        update_popup = UpdatePopupKind::None;
+                        qo100::log("[UPDATE] install declined for this session\n");
+                    }
+                    continue;
+                }
+                if(update_popup == UpdatePopupKind::Failed) {
+                    const SDL_Rect close_button = update_popup_button_rect(
+                        display.width, display.height, update_popup, true);
+                    if(point_in_rect(x, y, close_button))
+                        update_popup = UpdatePopupKind::None;
+                    continue;
+                }
+                if(update_popup == UpdatePopupKind::Installing) continue;
                 if(app_page == AppPage::Settings) {
                     /* LO Offset -/+ are handled entirely on press-down (see
                      * SDL_MOUSEBUTTONDOWN above), not here on release - that's
@@ -3622,6 +3846,17 @@ int main(int argc, char ** argv)
             lo_next_repeat_at = Clock::now() + kLoRepeatInterval;
         }
 
+        if(update_popup == UpdatePopupKind::Installing) {
+            if(!update_installer.poll() && update_installer.failed())
+                update_popup = UpdatePopupKind::Failed;
+        }
+        else if(!update_prompt_shown && update_checker.available() &&
+                tuner_popup == TunerPopupKind::None) {
+            update_prompt_shown = true;
+            update_popup = UpdatePopupKind::Available;
+            qo100::log("[UPDATE] prompting user\n");
+        }
+
         if(beacon_return_armed && Clock::now() >= beacon_return_deadline) {
             beacon_return_armed = false;
             const double beacon_mhz = receiver_settings.lnb_lo_mhz +
@@ -3778,6 +4013,8 @@ int main(int argc, char ** argv)
         }
         draw_tuner_popup(renderer, text, display.width, display.height,
                          tuner_popup, tuner_product, touch);
+        draw_update_popup(renderer, text, display.width, display.height,
+                          update_popup, touch);
         SDL_RenderPresent(renderer);
 
         const auto now = Clock::now();

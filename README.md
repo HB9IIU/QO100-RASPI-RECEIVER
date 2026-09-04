@@ -87,13 +87,19 @@ offset, bias voltage) match your hardware.
 
 ## Updating
 
+The app checks for updates on its own each time it starts, and offers to
+install one right from the touchscreen if it finds one - no keyboard or
+computer needed.
+
+To update by hand instead:
+
 ```bash
 cd ~/DATVreceiver
-git pull
 scripts/initialSetup.sh
 ```
 
-Same script as the initial install, safe to re-run any time there's a new version to pick up.
+Same script as the initial install (now pulls the latest version itself
+before rebuilding), safe to re-run any time.
 
 ## Using the app
 

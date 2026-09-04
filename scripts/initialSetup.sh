@@ -25,6 +25,11 @@ fi
 step() { printf "\n${BLUE}%s${NC}\n" "$1"; }
 skip() { printf "${YELLOW}   ↷ %s${NC}\n" "$1"; }
 
+# Set by the app itself when it runs this script in the background to apply
+# an update (no keyboard on a touchscreen kiosk to press Enter with, and
+# nobody's watching a terminal for this banner anyway - the app shows its
+# own on-screen "Updating..." status instead).
+if [ -z "$QO100_NONINTERACTIVE" ]; then
 printf '%b' "$(cat <<BANNER
 
 ${BLUE}================================================================${NC}
@@ -58,9 +63,16 @@ Press ${GREEN}ENTER${NC} to continue, or ${YELLOW}Ctrl+C${NC} to cancel.
 BANNER
 )"
 read -r _
+fi
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
+
+step "⬇️  Pulling the latest version..."
+# A no-op on a fresh clone (already at the latest commit); the actual point
+# of this step is re-running this script later to pick up an update - see
+# the "Updating" section in README.md, and the in-app update check.
+git pull --ff-only
 
 step "📦 Installing build dependencies..."
 sudo apt update
