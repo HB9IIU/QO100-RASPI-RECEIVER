@@ -89,9 +89,12 @@ offset, bias voltage) match your hardware.
 
 The app checks for updates on its own each time it starts, and offers to
 install one right from the touchscreen if it finds one - no keyboard or
-computer needed.
+computer needed. This covers routine code updates (pulls the latest
+version and rebuilds); it doesn't touch system packages, udev rules, or
+reboot, so it never needs a password.
 
-To update by hand instead:
+If an update ever needs more than that (a new dependency, a udev rule
+change), do a full update by hand instead:
 
 ```bash
 cd ~/DATVreceiver

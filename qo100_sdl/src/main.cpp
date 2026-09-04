@@ -1505,7 +1505,7 @@ void draw_update_popup(SDL_Renderer * renderer, TextCache & text,
     }
     else if(kind == UpdatePopupKind::Installing) {
         text.draw("UPDATING...", centre_x, popup.y + 55, kCyan, 32, true);
-        text.draw("This takes a minute or two, then the Pi reboots on its own.",
+        text.draw("This takes a minute or two, then the app restarts on its own.",
                   centre_x, popup.y + 112, kText, 16, true);
     }
     else {
@@ -2657,21 +2657,23 @@ private:
     std::atomic<bool> available_{false};
 };
 
-/* Runs scripts/initialSetup.sh in the background to apply an update the
- * user confirmed from the touchscreen (see UpdatePopupKind::Available) - it
- * already does exactly the right idempotent pull+rebuild(+reboot), so this
- * just launches it non-interactively rather than reimplementing a second,
- * leaner update path that could drift out of sync with what a real install
- * actually needs. `set -e` in that script means a failure partway through
- * (no internet, a build error) stops it before it ever reaches `sudo
- * reboot` - so a failed update leaves the currently-running app completely
- * untouched, never restarted. */
+/* Runs scripts/apply_update.sh in the background to apply an update the
+ * user confirmed from the touchscreen (see UpdatePopupKind::Available).
+ * Deliberately NOT scripts/initialSetup.sh - that needs sudo (apt, udev,
+ * reboot), and there's no way to supply a sudo password here: no
+ * keyboard on this touchscreen kiosk, and no terminal for sudo to prompt
+ * through even if there were one (confirmed in practice: it failed
+ * immediately with "sudo: a terminal is required to read the password").
+ * apply_update.sh only pulls and rebuilds - no sudo needed for that at
+ * all. The trade-off: a future update that adds a new apt dependency or
+ * udev rule change needs a real, manual run of initialSetup.sh - the
+ * in-app path only ever handles routine code updates. */
 class UpdateInstaller {
 public:
     bool start(const std::string & repository_root)
     {
         if(pid_ > 0) return true;
-        const std::string script = repository_root + "/scripts/initialSetup.sh";
+        const std::string script = repository_root + "/scripts/apply_update.sh";
         const std::string log_path = repository_root + "/qo100_sdl/update.log";
         const pid_t child = fork();
         if(child < 0) {
@@ -2679,7 +2681,6 @@ public:
             return false;
         }
         if(child == 0) {
-            setenv("QO100_NONINTERACTIVE", "1", 1);
             const int descriptor =
                 open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if(descriptor >= 0) {
@@ -2695,27 +2696,35 @@ public:
         return true;
     }
 
-    /* Call once per frame while installing_. Returns true while still
-     * running. A successful run ends in `sudo reboot` and never returns
-     * here at all - the whole point of a WNOHANG poll rather than a
-     * blocking wait is so the "Updating..." screen keeps animating/
-     * responding right up until that reboot actually happens. */
+    /* Call once per frame while installing. Returns true while still
+     * running. Once it returns false, check succeeded()/failed() to see
+     * how it ended - unlike the old initialSetup.sh-based approach, this
+     * script always returns here (it never reboots), so both outcomes
+     * are real, observed exit codes rather than "no exit = success". */
     bool poll()
     {
         if(pid_ <= 0) return false;
         int status = 0;
         const pid_t result = waitpid(pid_, &status, WNOHANG);
         if(result == 0) return true;
-        qo100::log("[UPDATE] installer exited before rebooting; treating as failed\n");
         pid_ = -1;
-        failed_ = true;
+        if(WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            qo100::log("[UPDATE] installer finished successfully\n");
+            succeeded_ = true;
+        }
+        else {
+            qo100::log("[UPDATE] installer failed (status=%d)\n", status);
+            failed_ = true;
+        }
         return false;
     }
 
+    bool succeeded() const { return succeeded_; }
     bool failed() const { return failed_; }
 
 private:
     pid_t pid_ = -1;
+    bool succeeded_ = false;
     bool failed_ = false;
 };
 
@@ -3846,9 +3855,21 @@ int main(int argc, char ** argv)
             lo_next_repeat_at = Clock::now() + kLoRepeatInterval;
         }
 
-        if(update_popup == UpdatePopupKind::Installing) {
-            if(!update_installer.poll() && update_installer.failed())
+        if(update_popup == UpdatePopupKind::Installing && !update_installer.poll()) {
+            if(update_installer.succeeded()) {
+                /* Just exit cleanly, same as EXIT's own "Restart" mode -
+                 * Restart=always in the systemd unit brings the app back
+                 * up a few seconds later running the freshly-built
+                 * binary. Deliberately not routed through EXIT's own
+                 * exit_full_stop preference: whatever that's set to, an
+                 * update that just succeeded should always restart into
+                 * itself, not silently stay stopped. */
+                qo100::log("[UPDATE] restarting to apply\n");
+                running = false;
+            }
+            else {
                 update_popup = UpdatePopupKind::Failed;
+            }
         }
         else if(!update_prompt_shown && update_checker.available() &&
                 tuner_popup == TunerPopupKind::None) {
