@@ -1592,7 +1592,7 @@ void draw_choice_button(SDL_Renderer * renderer, TextCache & text,
 }
 
 void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
-                        int width, int height, int lo_mhz,
+                        int width, int height, int lo_centimhz,
                         int voltage_choice, int display_choice,
                         int exit_behaviour_choice,
                         const std::string & tuner_product,
@@ -1625,7 +1625,9 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &lo_value);
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &lo_value);
-    text.draw(std::to_string(lo_mhz), lo_value.x + lo_value.w / 2,
+    char lo_text[16];
+    std::snprintf(lo_text, sizeof(lo_text), "%.2f", lo_centimhz / 100.0);
+    text.draw(lo_text, lo_value.x + lo_value.w / 2,
               lo_value.y + lo_value.h / 2, kText, compact ? 16 : 20, true);
     draw_button(renderer, text, plus_button, "+", kText, compact ? 16 : 20,
                 false, is_pressed(touch, plus_button));
@@ -2753,7 +2755,13 @@ int main(int argc, char ** argv)
     AppPage app_page = AppPage::Main;
     bool fullscreen_video = false;
     bool have_video_frame = false;
-    int settings_lo_mhz = static_cast<int>(std::lround(receiver_settings.lnb_lo_mhz));
+    /* In hundredths of a MHz (10kHz steps) rather than a double, so
+     * repeated +/- taps can't drift from floating-point rounding - LNB LO
+     * offsets often need correcting by under a MHz (a real report: an LNB
+     * 150kHz off nominal, unreachable when this only stepped by whole
+     * MHz). */
+    int settings_lo_centimhz =
+        static_cast<int>(std::lround(receiver_settings.lnb_lo_mhz * 100.0));
     int settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
     /* Reflects the resolution actually resolved/clamped for this run
@@ -3100,14 +3108,14 @@ int main(int argc, char ** argv)
                     }
                     else if(point_in_rect(
                                 x, y, settings_lo_button_rect(display.width, false))) {
-                        settings_lo_mhz = std::max(1000, settings_lo_mhz - 1);
+                        settings_lo_centimhz = std::max(100000, settings_lo_centimhz - 1);
                     }
                     else if(point_in_rect(
                                 x, y, settings_lo_button_rect(display.width, true))) {
-                        settings_lo_mhz = std::min(20000, settings_lo_mhz + 1);
+                        settings_lo_centimhz = std::min(2000000, settings_lo_centimhz + 1);
                     }
                     else if(point_in_rect(x, y, settings_save_rect(display.width))) {
-                        receiver_settings.lnb_lo_mhz = settings_lo_mhz;
+                        receiver_settings.lnb_lo_mhz = settings_lo_centimhz / 100.0;
                         receiver_settings.lnb_voltage_enabled =
                             settings_voltage_choice != 0;
                         receiver_settings.lnb_voltage_horizontal =
@@ -3126,8 +3134,8 @@ int main(int argc, char ** argv)
                             selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
                                 current_tune_if_khz / 1000.0;
                             qo100::log(
-                                "[SETTINGS_UI] applied LO=%dMHz voltage=%s display=%s exit=%s\n",
-                                settings_lo_mhz,
+                                "[SETTINGS_UI] applied LO=%.2fMHz voltage=%s display=%s exit=%s\n",
+                                receiver_settings.lnb_lo_mhz,
                                 settings_voltage_choice == 0 ? "OFF" :
                                     (settings_voltage_choice == 1 ? "13V" : "18V"),
                                 settings_display_choice == 1 ? "800x480" : "1024x600",
@@ -3283,8 +3291,8 @@ int main(int argc, char ** argv)
                 }
                 const SDL_Rect settings_button = status_button_rect(layout, 1);
                 if(point_in_rect(x, y, settings_button)) {
-                    settings_lo_mhz = static_cast<int>(
-                        std::lround(receiver_settings.lnb_lo_mhz));
+                    settings_lo_centimhz = static_cast<int>(
+                        std::lround(receiver_settings.lnb_lo_mhz * 100.0));
                     settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
                         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
                     settings_display_choice = display.width == 800 ? 1 : 0;
@@ -3666,7 +3674,7 @@ int main(int argc, char ** argv)
         SDL_RenderSetViewport(renderer, &content_viewport);
         if(app_page == AppPage::Settings) {
             draw_settings_page(renderer, text, display.width, display.height,
-                               settings_lo_mhz, settings_voltage_choice,
+                               settings_lo_centimhz, settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
                                tuner_product, receiver_client.monitor_connected(),
                                can_use_1024x600, touch);
