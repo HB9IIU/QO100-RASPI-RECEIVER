@@ -28,12 +28,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <libusb-1.0/libusb.h>
 #include <memory.h>
 #include <unistd.h>
 #include "errors.h"
 #include "ftdi_usb.h"
 #include "ftdi.h"
+
+/* BATC's PicoTuner - see is_picotuner below for why this matters here. */
+#define PICOTUNER_VID 0x2E8A
+#define PICOTUNER_PID 0xBA2C
 
 /* -------------------------------------------------------------------------------------------------- */
 /* ----------------- DEFINES ------------------------------------------------------------------------ */
@@ -100,6 +105,20 @@ static libusb_device_handle *usb_device_handle_i2c; // interface 0, endpoints: 0
 static libusb_device_handle *usb_device_handle_ts; // interface 1, endpoints: 0x83, 0x04
 static libusb_context *usb_context_i2c;
 static libusb_context *usb_context_ts;
+
+/* PicoTuner (BATC's Pi Pico-based MiniTiouner alternative, VID:PID
+ * 0x2E8A:0xBA2C) exposes the exact same 2-interface/endpoint-address shape
+ * as the FTDI FT2232H, so ftdi_usb_init() below opens it identically to a
+ * real FTDI device - this flag just remembers which one we actually got,
+ * for the two places downstream that do need to differ (see
+ * ftdi_usb_ts_read() and ftdi_usb_is_picotuner()). Reference: BATC's
+ * PicoTuner firmware (dev_lowlevel_descriptors.h/PicoTuner.ino) and
+ * OpenTuner's PicoTunerInterface.cs. */
+static bool is_picotuner = false;
+
+bool ftdi_usb_is_picotuner(void) {
+    return is_picotuner;
+}
 
 /* -------------------------------------------------------------------------------------------------- */
 /* ----------------- ROUTINES ----------------------------------------------------------------------- */
@@ -339,6 +358,11 @@ static uint8_t ftdi_usb_init(libusb_context **usb_context_ptr, libusb_device_han
         }
     }
 
+    if (err==ERROR_NONE) {
+        is_picotuner = (vid==PICOTUNER_VID) && (pid==PICOTUNER_PID);
+        if (is_picotuner) printf("      Status: this is a PicoTuner, not an FTDI-based MiniTiouner\n");
+    }
+
     return err;
 }
 
@@ -348,6 +372,41 @@ uint8_t ftdi_usb_init_i2c(uint8_t usb_bus, uint8_t usb_addr, uint16_t vid, uint1
 
 uint8_t ftdi_usb_init_ts(uint8_t usb_bus, uint8_t usb_addr, uint16_t vid, uint16_t pid) {
     return ftdi_usb_init(&usb_context_ts, &usb_device_handle_ts, 1, usb_bus, usb_addr, vid, pid);
+}
+
+/* Only the PicoTuner needs this - its firmware deliberately prepends a fake
+ * 2-byte FTDI modem-status header to every 512-byte packet on the TS
+ * endpoint too, "like the FTDI chip does" (PicoTuner.ino comments at the
+ * TS2Buf/TS1Buf fill code) - real MiniTiouner TS traffic on this same
+ * endpoint (0x83) has no such header, which is why the plain read below
+ * (used for FTDI) never had to strip anything. */
+static uint8_t ts_rx_raw[FTDI_RX_CHUNK_SIZE];
+
+static uint8_t ftdi_usb_ts_read_picotuner(uint8_t *buffer, uint16_t *len, uint32_t frame_size) {
+    uint8_t err=ERROR_NONE;
+    int rxed=0;
+    int res=0;
+    uint32_t raw_request = frame_size;
+
+    if (raw_request > sizeof(ts_rx_raw)) raw_request = sizeof(ts_rx_raw);
+
+    res=libusb_bulk_transfer(usb_device_handle_ts, 0x83, ts_rx_raw, raw_request, &rxed, USB_FAST_TIMEOUT);
+
+    if (res<0) {
+        printf("ERROR: USB TS Data Read %i (%s), received %i\n",res,libusb_error_name(res),rxed);
+        err=ERROR_USB_TS_READ;
+    } else if (rxed % 512 != 0) {
+        /* a short/misaligned packet - the firmware always sends whole
+         * 512-byte framed chunks, so just drop it rather than guess */
+        *len=0;
+    } else {
+        int chunks = rxed / 512;
+        int c;
+        for (c=0; c<chunks; c++) memcpy(&buffer[c*510], &ts_rx_raw[c*512 + 2], 510);
+        *len = (uint16_t)(chunks * 510);
+    }
+
+    return err;
 }
 
 /* -------------------------------------------------------------------------------------------------- */
@@ -361,6 +420,8 @@ uint8_t ftdi_usb_ts_read(uint8_t *buffer, uint16_t *len, uint32_t frame_size) {
     uint8_t err=ERROR_NONE;
     int rxed=0;
     int res=0;
+
+    if (is_picotuner) return ftdi_usb_ts_read_picotuner(buffer, len, frame_size);
 
     /* the TS traffic is on endpoint 0x83 */
     res=libusb_bulk_transfer(usb_device_handle_ts, 0x83, buffer, frame_size, &rxed, USB_FAST_TIMEOUT);

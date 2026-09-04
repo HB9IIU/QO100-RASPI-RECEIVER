@@ -9,3 +9,6 @@ SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTRS{prod
 SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTRS{product}=="MiniTiouner_Pro_TS2", MODE:="0666"
 # Minitiouner S uses plain "MiniTiouner" product string
 SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTRS{product}=="MiniTiouner", MODE:="0666"
+
+# PicoTuner (BATC's Pi Pico-based MiniTiouner alternative) - own VID:PID, not FTDI's
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="ba2c", MODE:="0666"

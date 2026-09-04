@@ -41,6 +41,20 @@
 #define FTDI_VID 0x0403
 #define FTDI_PID 0x6010
 
+/* BATC's PicoTuner - a Raspberry Pi Pico-based, cheaper alternative to the
+ * FTDI-based MiniTiouner (see https://wiki.batc.org.uk/PicoTuner and BATC's
+ * PicoTuner firmware repo). Its firmware exposes the same 2-interface USB
+ * shape (interface 0 = i2c, interface 1 = TS) at the same endpoint numbers
+ * as the FTDI FT2232H, and even frames I2C reads with the same fake 2-byte
+ * FTDI status header - so ftdi_usb_init()/ftdi_usb_i2c_read()/_write() work
+ * for it completely unchanged. Only two things actually differ, both
+ * handled in ftdi_usb.c: which VID:PID gets opened, and TS read framing
+ * (see ftdi_usb_ts_read_picotuner()). Detected only in auto-detect mode
+ * (no -b/-d bus/device override), as a fallback when no FTDI device is
+ * found - untested against real hardware as of this writing. */
+#define PICOTUNER_VID 0x2E8A
+#define PICOTUNER_PID 0xBA2C
+
 #define FTDI_NUM_TRIES 10
 #define FTDI_STOP_START_REPEATS 4
 #define FTDI_RDWR_TIMEOUT 100
@@ -574,12 +588,21 @@ uint8_t ftdi_init(uint8_t usb_bus, uint8_t usb_addr) {
     printf("Flow: FTDI init\n");
 
     err=ftdi_usb_init_i2c(usb_bus, usb_addr, FTDI_VID, FTDI_PID);
-    if (err==ERROR_NONE) err=ftdi_usb_set_mpsse_mode_i2c();
-    if (err==ERROR_NONE) err=ftdi_usb_init_ts(usb_bus, usb_addr, FTDI_VID, FTDI_PID);
-    if (err==ERROR_NONE) err=ftdi_usb_set_mpsse_mode_ts();
+    if ((err==ERROR_FTDI_USB_VID_PID) && (usb_bus==0) && (usb_addr==0)) {
+        /* no FTDI-based MiniTiouner found - try a PicoTuner before giving up */
+        printf("Flow: No FTDI MiniTiouner found, trying PicoTuner (VID:PID %04X:%04X)\n", PICOTUNER_VID, PICOTUNER_PID);
+        err=ftdi_usb_init_i2c(usb_bus, usb_addr, PICOTUNER_VID, PICOTUNER_PID);
+    }
+    /* the PicoTuner firmware doesn't implement the FTDI vendor-specific USB
+     * control requests (reset/purge/bitmode) this sends - it only speaks
+     * MPSSE-style commands over the bulk endpoints, set up below by
+     * ftdi_setup_ftdi_io() - see PICOTUNER_PID comment above. */
+    if ((err==ERROR_NONE) && !ftdi_usb_is_picotuner()) err=ftdi_usb_set_mpsse_mode_i2c();
+    if (err==ERROR_NONE) err=ftdi_usb_init_ts(usb_bus, usb_addr, ftdi_usb_is_picotuner() ? PICOTUNER_VID : FTDI_VID, ftdi_usb_is_picotuner() ? PICOTUNER_PID : FTDI_PID);
+    if ((err==ERROR_NONE) && !ftdi_usb_is_picotuner()) err=ftdi_usb_set_mpsse_mode_ts();
     if (err==ERROR_NONE) err=ftdi_setup_ftdi_io();
     if (err==ERROR_NONE) err=ftdi_nim_reset();
-    
+
     if (err!=ERROR_NONE) printf("ERROR: FTDI init\n");
 
     return err;
