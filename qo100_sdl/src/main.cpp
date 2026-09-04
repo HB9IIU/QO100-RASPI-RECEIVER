@@ -480,28 +480,36 @@ public:
         fonts_.clear();
     }
 
-    bool load_font(const std::string & path, int size)
+    /* `mono` picks a second, monospace font family (DejaVu Sans Mono),
+     * stored in the same `size`-keyed map by offsetting the key - avoids
+     * a second map/changing the key type just to support one extra
+     * family. Sizes are always small (14-32px), nowhere near the offset. */
+    static constexpr int kMonoKeyOffset = 1000;
+
+    bool load_font(const std::string & path, int size, bool mono = false)
     {
-        if(fonts_.count(size) != 0) return true;
+        const int key = mono ? size + kMonoKeyOffset : size;
+        if(fonts_.count(key) != 0) return true;
         TTF_Font * font = TTF_OpenFont(path.c_str(), size);
         if(font == nullptr) {
             qo100::log( "[FONT] cannot open %s at %dpx: %s\n",
                          path.c_str(), size, TTF_GetError());
             return false;
         }
-        fonts_[size] = font;
+        fonts_[key] = font;
         return true;
     }
 
     void draw(const std::string & text, int x, int y, Colour colour, int size = 14,
-              bool centred = false)
+              bool centred = false, bool mono = false)
     {
-        const std::string key = std::to_string(size) + ":" +
+        const int font_key = mono ? size + kMonoKeyOffset : size;
+        const std::string key = std::to_string(font_key) + ":" +
             std::to_string(colour.r) + ":" + std::to_string(colour.g) + ":" +
             std::to_string(colour.b) + ":" + text;
         auto found = textures_.find(key);
         if(found == textures_.end()) {
-            auto font = fonts_.find(size);
+            auto font = fonts_.find(font_key);
             if(font == fonts_.end()) return;
             const SDL_Color sdl_colour{colour.r, colour.g, colour.b, colour.a};
             SDL_Surface * surface = TTF_RenderUTF8_Blended(font->second, text.c_str(), sdl_colour);
@@ -1628,7 +1636,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     char lo_text[16];
     std::snprintf(lo_text, sizeof(lo_text), "%.2f", lo_centimhz / 100.0);
     text.draw(lo_text, lo_value.x + lo_value.w / 2,
-              lo_value.y + lo_value.h / 2, kText, compact ? 16 : 20, true);
+              lo_value.y + lo_value.h / 2, kText, compact ? 16 : 20, true, true);
     draw_button(renderer, text, plus_button, "+", kText, compact ? 16 : 20,
                 false, is_pressed(touch, plus_button));
 
@@ -2640,6 +2648,22 @@ int main(int argc, char ** argv)
             return 1;
         }
     }
+    /* Monospace, for the LNB LO Offset value only - fixed-width digits
+     * mean the display doesn't visibly shift as it changes (holding
+     * -/+ repeats the step; a proportional font like Montserrat noticeably
+     * jitters left/right as digit widths vary). Sizes match where it's
+     * actually drawn (16 compact, 20 wide) - not preloaded at every size
+     * like Montserrat, since nothing else uses it. */
+    const std::string mono_font_path = executable_directory() + "/DejaVuSansMono.ttf";
+    for(int size : {16, 20}) {
+        if(!text.load_font(mono_font_path, size, true)) {
+            SDL_DestroyRenderer(renderer);
+            SDL_DestroyWindow(window);
+            TTF_Quit();
+            SDL_Quit();
+            return 1;
+        }
+    }
 
     const Layout layout(display.width, display.height);
     auto spectrum_texture = std::make_unique<SpectrumTexture>(
@@ -2784,6 +2808,20 @@ int main(int argc, char ** argv)
     bool volume_dragging = false;
     size_t chat_drag_start_first = 0;
     TouchState touch;
+    /* Resting a finger on the LNB LO Offset -/+ buttons repeats the step
+     * instead of requiring one tap per 10kHz - useful now that offset can
+     * be fine-tuned (see settings_lo_centimhz), where correcting a LO by
+     * e.g. 150kHz would otherwise take 15 separate taps. 0 = not held,
+     * -1/+1 = which button. */
+    int lo_hold_direction = 0;
+    auto lo_next_repeat_at = Clock::time_point{};
+    constexpr auto kLoRepeatInitialDelay = std::chrono::milliseconds(450);
+    constexpr auto kLoRepeatInterval = std::chrono::milliseconds(110);
+    const auto step_lo_centimhz = [&](int direction) {
+        settings_lo_centimhz = direction < 0
+            ? std::max(100000, settings_lo_centimhz - 1)
+            : std::min(2000000, settings_lo_centimhz + 1);
+    };
     double selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
                                     beacon_frequency_khz / 1000.0;
     SpectrumMarker spectrum_marker{
@@ -3015,6 +3053,20 @@ int main(int argc, char ** argv)
                 touch.active = true;
                 touch.x = event.button.x;
                 touch.y = event.button.y;
+                if(app_page == AppPage::Settings) {
+                    if(point_in_rect(touch.x, touch.y,
+                                     settings_lo_button_rect(display.width, false))) {
+                        lo_hold_direction = -1;
+                        step_lo_centimhz(-1);
+                        lo_next_repeat_at = Clock::now() + kLoRepeatInitialDelay;
+                    }
+                    else if(point_in_rect(touch.x, touch.y,
+                                          settings_lo_button_rect(display.width, true))) {
+                        lo_hold_direction = 1;
+                        step_lo_centimhz(1);
+                        lo_next_repeat_at = Clock::now() + kLoRepeatInitialDelay;
+                    }
+                }
             }
             else if(event.type == SDL_MOUSEMOTION && touch.active) {
                 touch.x = event.motion.x;
@@ -3023,6 +3075,7 @@ int main(int argc, char ** argv)
             else if(event.type == SDL_MOUSEBUTTONUP &&
                     event.button.button == SDL_BUTTON_LEFT) {
                 touch.active = false;
+                lo_hold_direction = 0;
             }
             if(event.type == SDL_QUIT) {
                 running = false;
@@ -3102,17 +3155,12 @@ int main(int argc, char ** argv)
                     continue;
                 }
                 if(app_page == AppPage::Settings) {
+                    /* LO Offset -/+ are handled entirely on press-down (see
+                     * SDL_MOUSEBUTTONDOWN above), not here on release - that's
+                     * what lets holding the button repeat the step. */
                     if(point_in_rect(x, y, settings_exit_page_rect(display.width))) {
                         app_page = AppPage::Main;
                         qo100::log("[SETTINGS_UI] back to main\n");
-                    }
-                    else if(point_in_rect(
-                                x, y, settings_lo_button_rect(display.width, false))) {
-                        settings_lo_centimhz = std::max(100000, settings_lo_centimhz - 1);
-                    }
-                    else if(point_in_rect(
-                                x, y, settings_lo_button_rect(display.width, true))) {
-                        settings_lo_centimhz = std::min(2000000, settings_lo_centimhz + 1);
                     }
                     else if(point_in_rect(x, y, settings_save_rect(display.width))) {
                         receiver_settings.lnb_lo_mhz = settings_lo_centimhz / 100.0;
@@ -3567,6 +3615,11 @@ int main(int argc, char ** argv)
                 }
             }
             receiver_was_locked = locked_now;
+        }
+
+        if(lo_hold_direction != 0 && Clock::now() >= lo_next_repeat_at) {
+            step_lo_centimhz(lo_hold_direction);
+            lo_next_repeat_at = Clock::now() + kLoRepeatInterval;
         }
 
         if(beacon_return_armed && Clock::now() >= beacon_return_deadline) {

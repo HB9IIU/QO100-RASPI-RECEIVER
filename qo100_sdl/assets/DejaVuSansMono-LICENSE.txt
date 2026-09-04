@@ -1,0 +1,5 @@
+DejaVu Sans Mono is derived from Bitstream Vera, copyright (c) 2003
+Bitstream, Inc. DejaVu changes are public domain. Licensed under the
+Bitstream Vera license, which permits free use, copying, and redistribution
+(including as part of a larger project) provided this notice stays with the
+font file itself. Full text: https://dejavu-fonts.github.io/License.html

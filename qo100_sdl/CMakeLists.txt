@@ -37,3 +37,14 @@ if(EXISTS "${QO100_FONT_SOURCE}")
 else()
     message(FATAL_ERROR "Montserrat font not found at ${QO100_FONT_SOURCE}")
 endif()
+
+set(QO100_MONO_FONT_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/DejaVuSansMono.ttf")
+if(EXISTS "${QO100_MONO_FONT_SOURCE}")
+    add_custom_command(TARGET qo100sdl POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${QO100_MONO_FONT_SOURCE}"
+            "$<TARGET_FILE_DIR:qo100sdl>/DejaVuSansMono.ttf")
+else()
+    message(FATAL_ERROR "DejaVu Sans Mono font not found at ${QO100_MONO_FONT_SOURCE}")
+endif()
