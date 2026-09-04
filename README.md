@@ -183,4 +183,3 @@ thanks are owed to:
 Feel free to use, copy, and modify any of this for your own QO-100 setup.
 If you get stuck, open an issue and I'll try to help when I can, though I
 can't promise a quick turnaround.
-
