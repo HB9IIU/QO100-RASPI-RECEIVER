@@ -18,6 +18,28 @@ touch — no keyboard or mouse needed once it's set up.
 </tr>
 </table>
 
+## 🆕 What's NEW!!! — Manual Tune
+
+A new **TUNE** page lets you dial in any frequency the MiniTiouner can
+reach (144–2450 MHz) instead of only what happens to show up on the
+spectrum — handy for checking a specific transponder, a local test
+signal, or anything else off the beaten path.
+
+<img src="assets/tune_page.png" alt="Manual Tune page, locked on a test card" width="70%">
+
+- Tap **TUNE** on the main screen to open it — it starts you on Preset 1
+  for a known-good, live signal.
+- **Drag a digit up or down** to change it, like spinning the dial on a
+  real frequency counter — no keyboard involved.
+- **Tap the Symbol Rate** to cycle through the standard rates.
+- **Presets** (the row of frequency buttons): tap one to load it
+  instantly, or **press and hold** one to save whatever you're currently
+  tuned to into that slot — a "SAVED ..." banner confirms it.
+- **Tap the picture** to go fullscreen, tap it again to come back.
+- Tap **QO-100** to leave the Tune page — this always retunes straight
+  back to the beacon, so you can't wander off and lose track of where you
+  left the dial.
+
 ## What you need
 
 - Raspberry Pi 4 Model B or Raspberry Pi 5, running Raspberry Pi OS
@@ -115,6 +137,8 @@ before rebuilding), safe to re-run any time.
   the main screen's **EXIT** button described next, despite sharing the
   name.
 - **SCAN** — automatically hops between detected signals.
+- **TUNE** — opens the Manual Tune page (see **What's NEW!!!** above) to
+  dial in any frequency by hand.
 - **EXIT** — closes the app; it restarts itself a few seconds later by
   default. **SET** has an Exit Button Behaviour option to change this to
   Full Stop instead, where EXIT closes it for good until you start it

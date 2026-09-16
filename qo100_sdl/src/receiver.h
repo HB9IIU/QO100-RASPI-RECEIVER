@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace qo100 {
 
@@ -25,6 +26,21 @@ struct ReceiverSettings {
 ReceiverSettings load_receiver_settings(const std::string & repository_root);
 bool save_receiver_settings(const std::string & repository_root,
                             const ReceiverSettings & settings);
+
+/* A saved Manual Tune frequency/symbol-rate. No name - the button that
+ * loads it is just labelled with its own frequency (see draw_tune_page
+ * in main.cpp), so there's nothing to type or store beyond the two
+ * values a retune actually needs. Capped at a small fixed count
+ * (kMaxTunePresets there) since the sidebar card they live in doesn't
+ * scroll. */
+struct TunePreset {
+    long if_khz = 0;
+    long symbol_rate_ksps = 0;
+};
+
+std::vector<TunePreset> load_tune_presets(const std::string & repository_root);
+bool save_tune_presets(const std::string & repository_root,
+                       const std::vector<TunePreset> & presets);
 
 /* Network stream URL to paste into VLC (Media > Open Network Stream) to
  * watch the same feed the app is decoding, e.g. "udp://@239.1.1.1:5600".

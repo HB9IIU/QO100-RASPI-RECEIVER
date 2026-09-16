@@ -35,6 +35,9 @@ longmynd_ws/longmynd_main_ts
 # sensible defaults baked in, see load_settings() in qo100datv.cpp
 qo100_sdl/settings.json
 
+# User-saved Manual Tune presets - starts empty, nothing to seed in git
+qo100_sdl/tune_presets.json
+
 # Logs
 *.log
 

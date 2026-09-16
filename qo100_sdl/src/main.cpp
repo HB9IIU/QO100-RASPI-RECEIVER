@@ -481,15 +481,18 @@ public:
         fonts_.clear();
     }
 
-    /* `mono` picks a second, monospace font family (DejaVu Sans Mono),
-     * stored in the same `size`-keyed map by offsetting the key - avoids
-     * a second map/changing the key type just to support one extra
-     * family. Sizes are always small (14-32px), nowhere near the offset. */
+    /* `mono`/`seven_seg` each pick a further font family (DejaVu Sans Mono,
+     * DSEG7-Classic), stored in the same `size`-keyed map by offsetting
+     * the key - avoids a growing map/changing the key type per extra
+     * family. Sizes stay well under 1000px, nowhere near either offset. */
     static constexpr int kMonoKeyOffset = 1000;
+    static constexpr int kSevenSegKeyOffset = 2000;
 
-    bool load_font(const std::string & path, int size, bool mono = false)
+    bool load_font(const std::string & path, int size, bool mono = false,
+                   bool seven_seg = false)
     {
-        const int key = mono ? size + kMonoKeyOffset : size;
+        const int key = seven_seg ? size + kSevenSegKeyOffset
+                                  : mono ? size + kMonoKeyOffset : size;
         if(fonts_.count(key) != 0) return true;
         TTF_Font * font = TTF_OpenFont(path.c_str(), size);
         if(font == nullptr) {
@@ -502,9 +505,10 @@ public:
     }
 
     void draw(const std::string & text, int x, int y, Colour colour, int size = 14,
-              bool centred = false, bool mono = false)
+              bool centred = false, bool mono = false, bool seven_seg = false)
     {
-        const int font_key = mono ? size + kMonoKeyOffset : size;
+        const int font_key = seven_seg ? size + kSevenSegKeyOffset
+                                       : mono ? size + kMonoKeyOffset : size;
         const std::string key = std::to_string(font_key) + ":" +
             std::to_string(colour.r) + ":" + std::to_string(colour.g) + ":" +
             std::to_string(colour.b) + ":" + text;
@@ -536,6 +540,13 @@ public:
             destination.x -= destination.w / 2;
             destination.y -= destination.h / 2;
         }
+        /* The cache key above is RGB-only (alpha isn't baked into the
+         * surface at creation, or every fade frame of the same text/
+         * colour would mint a new cached texture) - applied here instead,
+         * every draw, so a caller doing its own fade (e.g. the Manual
+         * Tune "SAVED" toast) actually sees it change frame to frame. A
+         * no-op for every caller that always draws at full alpha. */
+        SDL_SetTextureAlphaMod(found->second.texture, colour.a);
         SDL_RenderCopy(renderer_, found->second.texture, nullptr, &destination);
     }
 
@@ -1519,7 +1530,7 @@ void draw_update_popup(SDL_Renderer * renderer, TextCache & text,
     }
 }
 
-enum class AppPage { Main, Settings, Chat };
+enum class AppPage { Main, Settings, Chat, Tune };
 enum class ChatInput { None, Nick, Message };
 
 SDL_Rect page_back_rect(int width)
@@ -2156,11 +2167,15 @@ constexpr int kStatusButtonBlockH = 57;
 constexpr int kVolRowH = 20;
 constexpr int kVuRowH = 22;
 
+/* CHAT/SET/SCAN/TUNE/EXIT - TUNE (manual frequency entry) added as
+ * button 5. */
+constexpr int kStatusButtonCount = 5;
+
 SDL_Rect status_button_rect(const Layout & layout, int index)
 {
     constexpr int gap = 8;
     constexpr int margin = 8;
-    const int button_width = (layout.status_panel.w - 2 * margin - 3 * gap) / 4;
+    const int button_width = (layout.status_panel.w - 2 * margin - (kStatusButtonCount - 1) * gap) / kStatusButtonCount;
     const int button_y = layout.status_panel.y + layout.status_panel.h - kStatusButtonBlockH;
     return {layout.status_panel.x + margin + index * (button_width + gap),
             button_y, button_width, kStatusButtonHeight};
@@ -2427,9 +2442,9 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
         SDL_RenderFillRect(renderer, &segment);
     }
 
-    const char * labels[] = {"CHAT", "SET", "SCAN", "EXIT"};
-    const Colour colours[] = {kCyan, kYellow, kPurple, kRed};
-    for(int i = 0; i < 4; ++i) {
+    const char * labels[] = {"CHAT", "SET", "SCAN", "TUNE", "EXIT"};
+    const Colour colours[] = {kCyan, kYellow, kPurple, kGreen, kRed};
+    for(int i = 0; i < kStatusButtonCount; ++i) {
         const SDL_Rect button = status_button_rect(layout, i);
         draw_button(renderer, text, button, labels[i], colours[i], 16,
                     i == 2 && scan_active, is_pressed(touch, button));
@@ -2480,6 +2495,526 @@ SDL_Rect aspect_fit(int source_width, int source_height, const SDL_Rect & bounds
         result.x += (bounds.w - result.w) / 2;
     }
     return result;
+}
+
+/* The whole-screen picture shown while fullscreen_video is set, reused
+ * as-is by both the main page and the Manual Tune page (see
+ * tune_video_panel_rect's comment) - tapping either page's video panel
+ * enters this, tapping again anywhere leaves it (see the
+ * SDL_MOUSEBUTTONUP handling in main()). */
+void draw_fullscreen_video(SDL_Renderer * renderer, TextCache & text,
+                           int width, int height, SDL_Texture * video_texture,
+                           bool have_video_frame, int video_source_width,
+                           int video_source_height, VideoNotice video_notice,
+                           double video_notice_elapsed_seconds)
+{
+    const SDL_Rect screen_bounds{0, 0, width, height};
+    if(have_video_frame) {
+        const SDL_Rect destination = aspect_fit(
+            video_source_width, video_source_height, screen_bounds);
+        SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
+    }
+    draw_video_notice(text, screen_bounds, video_notice, video_notice_elapsed_seconds);
+}
+
+/* Bottom-right corner of the page - replaces the old top-bar QO-100 tab
+ * as the way back to the main dashboard, styled like the main page's own
+ * CHAT/SET/SCAN/TUNE/EXIT row. Same width and right/bottom inset as the
+ * PRESETS card above it (kPad/kRightColW must match
+ * tune_lower_cards_rect's/draw_tune_page's), so the two read as one
+ * aligned column rather than the button looking like an afterthought
+ * tacked on at a different width. */
+SDL_Rect tune_back_button_rect(int width, int height)
+{
+    constexpr int kPad = 16;
+    constexpr int kRightColW = 190;
+    const int right_col_x = width - kPad - kRightColW;
+    return {right_col_x, height - kPad - kStatusButtonHeight,
+            kRightColW, kStatusButtonHeight};
+}
+
+/* Hard ceiling regardless of how much space is actually available (see
+ * tune_preset_capacity) - just a sanity backstop, not expected to bind in
+ * practice. */
+constexpr size_t kMaxTunePresets = 8;
+constexpr int kTunePresetGap = 8;
+
+/* How long the "SAVED ..." toast (see draw_tune_page) stays up after a
+ * long-press overwrite, including its fade-out - shared between main()
+ * (which times how long to keep showing it) and draw_tune_page (which
+ * fades it out over the last third of that time), so the two can't drift
+ * apart. */
+constexpr auto kTuneToastDuration = std::chrono::milliseconds(1500);
+
+/* Shared by the drawing code and the tap/long-press hit-test below, so
+ * the two can't drift apart. Sits between the status card (fixed height)
+ * and the back button (see tune_back_button_rect), taking whatever
+ * height is left between them. */
+SDL_Rect tune_presets_card_rect(int width, int height)
+{
+    constexpr int kPad = 16;
+    constexpr int kRightColW = 190;
+    constexpr int kStatusRowH = 22;
+    constexpr int kStatusH = 30 + 4 * kStatusRowH + 10;
+    const int right_col_x = width - kPad - kRightColW;
+    const int status_card_y = kPad;
+    const SDL_Rect back_button = tune_back_button_rect(width, height);
+    return {right_col_x, status_card_y + kStatusH + 10,
+            kRightColW, back_button.y - 10 - (status_card_y + kStatusH + 10)};
+}
+
+/* The compact (800-wide) presets card is much shorter than the wide
+ * one's (see tune_presets_card_rect) - a button height tuned for wide
+ * left almost no room for gaps once squeezed in, which is what made
+ * compact look cramped. */
+int tune_preset_button_height(int width) { return settings_compact(width) ? 38 : kStatusButtonHeight; }
+
+/* However many preset buttons actually fit the card at this display's
+ * size (see tune_presets_card_rect) - the point of "fill available
+ * space with buttons" rather than a fixed small count. Uses the minimum
+ * gap (kTunePresetGap) to find the ceiling; tune_preset_button_rect then
+ * spreads that many buttons out with equal, larger gaps to actually fill
+ * the card, rather than packing them at the minimum and leaving the rest
+ * empty. Clamped to at least 2 (even a very short card gets that many)
+ * and at most kMaxTunePresets.
+ *
+ * This is deliberately re-evaluated every run rather than baked into
+ * what's persisted - main() shows min(tune_presets.size(), this) rather
+ * than the raw list length, so switching to a shorter screen just shows
+ * fewer of the saved presets (nothing lost - they reappear on a taller
+ * screen) instead of cramming the same count in regardless. */
+int tune_preset_capacity(int width, int height)
+{
+    const SDL_Rect card = tune_presets_card_rect(width, height);
+    const int button_h = tune_preset_button_height(width);
+    const int n = (card.h - kTunePresetGap) / (button_h + kTunePresetGap);
+    return std::clamp(n, 2, static_cast<int>(kMaxTunePresets));
+}
+
+/* Button `index` of `count` total, evenly spread top-to-bottom across
+ * the whole card (equal gap above the first, between each pair, and
+ * below the last) - same rounded-rect look as tune_back_button_rect/the
+ * main page's own button row (see draw_button), just stacked instead of
+ * side by side. `count` is min(tune_presets.size(), tune_preset_capacity)
+ * in practice (see tune_preset_capacity's comment), not the raw saved
+ * list length, but isn't hardcoded to that here so this stays a pure
+ * layout function. */
+SDL_Rect tune_preset_button_rect(int width, int height, int index, int count)
+{
+    const SDL_Rect card = tune_presets_card_rect(width, height);
+    const int button_h = tune_preset_button_height(width);
+    const int gap = (card.h - count * button_h) / (count + 1);
+    const int y = card.y + gap * (index + 1) + button_h * index;
+    return {card.x + 8, y, card.w - 16, button_h};
+}
+
+/* The MiniTiouner's tuner front end only goes up to ~2450MHz (longmynd
+ * enforces this - see main.c: "Freq (%d) must be <= 2450 MHz"), so the
+ * leading (thousands) digit of a 4-digit MHz frequency can never be more
+ * than 2 - 3000+ MHz is never a real, reachable frequency on this
+ * hardware. */
+constexpr int tune_digit_max(int index) { return index == 0 ? 2 : 9; }
+
+/* The standard QO-100/DATV symbol rates, in ascending order - the SR card
+ * scrolls through this list directly rather than spinning individual
+ * digits (a symbol rate is chosen from a short list of standard values,
+ * not typed digit-by-digit like a frequency). */
+constexpr const char * kTuneSrRates[] = {
+    "25", "33", "50", "66", "125", "250", "333", "500", "1000", "1500", "2000"};
+/* Same order as kTuneSrRates, as actual kS/s values for apply_tune (the
+ * strings above are for display only - kept separate rather than parsed
+ * from the string, since a couple of these are rounded display labels
+ * for oddball rates like 66 - 66.666..). */
+constexpr long kTuneSrValues[] = {25, 33, 50, 66, 125, 250, 333, 500, 1000, 1500, 2000};
+constexpr int kTuneSrRateCount = sizeof(kTuneSrRates) / sizeof(kTuneSrRates[0]);
+
+/* Reads the seven digit wheels as an IF frequency in kHz, matching the
+ * units apply_tune/beacon_frequency_khz use - digits[0..3] are the whole
+ * MHz part, digits[4..6] are already kHz (a MHz's third decimal place is
+ * exactly 1kHz), so no rounding is involved. */
+long tune_digits_to_if_khz(const int (&digits)[7])
+{
+    const long mhz = digits[0] * 1000L + digits[1] * 100L + digits[2] * 10L + digits[3];
+    const long khz_remainder = digits[4] * 100L + digits[5] * 10L + digits[6];
+    return mhz * 1000L + khz_remainder;
+}
+
+/* Inverse of tune_digits_to_if_khz - for loading a saved preset back onto
+ * the digit wheels. Clamps into the digit wheels' own representable range
+ * (0-2999.999MHz) first, so a preset saved before tune_digit_max existed,
+ * or corrupted by hand-editing tune_presets.json, can't produce
+ * out-of-range digits. */
+void tune_if_khz_to_digits(long if_khz, int (&digits)[7])
+{
+    if_khz = std::clamp(if_khz, 0L, 2999999L);
+    const long mhz = if_khz / 1000;
+    const long khz_remainder = if_khz % 1000;
+    digits[0] = static_cast<int>(mhz / 1000 % 10);
+    digits[1] = static_cast<int>(mhz / 100 % 10);
+    digits[2] = static_cast<int>(mhz / 10 % 10);
+    digits[3] = static_cast<int>(mhz % 10);
+    digits[4] = static_cast<int>(khz_remainder / 100 % 10);
+    digits[5] = static_cast<int>(khz_remainder / 10 % 10);
+    digits[6] = static_cast<int>(khz_remainder % 10);
+}
+
+/* Nearest kTuneSrValues entry to a preset's stored symbol rate - always an
+ * exact match in practice (every saved preset came from this same list),
+ * this is just a defensive fallback for a hand-edited tune_presets.json. */
+int tune_sr_index_for_value(long symbol_rate_ksps)
+{
+    int best = 0;
+    long best_diff = std::abs(kTuneSrValues[0] - symbol_rate_ksps);
+    for(int i = 1; i < kTuneSrRateCount; ++i) {
+        const long diff = std::abs(kTuneSrValues[i] - symbol_rate_ksps);
+        if(diff < best_diff) { best = i; best_diff = diff; }
+    }
+    return best;
+}
+
+/* "740.473" - same digit grouping as the frequency wheel, minus a
+ * leading zero (only ever the very first digit - the MiniTiouner's
+ * <=2450MHz ceiling means the MHz part is at most 4 digits, so there's
+ * only one possible leading zero to strip, never more). This is the
+ * button's only label - no name is stored or typed (see TunePreset), and
+ * the symbol rate isn't shown at all (kept in memory, applied on load,
+ * just not part of the label). */
+std::string tune_format_if_khz(long if_khz)
+{
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%04ld.%03ld", if_khz / 1000, if_khz % 1000);
+    const char * text = buffer[0] == '0' ? buffer + 1 : buffer;
+    return text;
+}
+
+/* Shared by the drawing code and the scroll hit-test below, so the two
+ * can't drift apart. Symbol rate only ever shows one short number plus
+ * its scale, so it gets less width than the seven-digit frequency wheel.
+ * The freq/SR row is a fixed height (matching what tune_freq_metrics'
+ * digit sizes were tuned for, per compact/wide) rather than a percentage
+ * of whatever's left, so the video panel above it is the one that grows
+ * or shrinks as the page's available height changes. */
+void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card, SDL_Rect & sr_card)
+{
+    constexpr int kPad = 16;
+    constexpr int kGap = 12;
+    constexpr int kRightColW = 190;
+    const int content_y = kPad;
+    const int content_h = height - content_y - kPad;
+    const int main_col_w = width - kPad - kGap - kRightColW - kPad;
+    /* Just enough for the digit wheel/value plus its title row (see
+     * tune_freq_metrics/tune_sr_font_size for the sizes this has to fit) -
+     * trimmed down from the original mockup's much taller cards so the
+     * video panel above gets the freed-up height instead. */
+    const int lower_h = settings_compact(width) ? 92 : 128;
+    const int lower_y = content_y + content_h - lower_h;
+    const int freq_w = (main_col_w - kGap) * 7 / 10;
+    const int sr_w = main_col_w - kGap - freq_w;
+    freq_card = {kPad, lower_y, freq_w, lower_h};
+    sr_card = {freq_card.x + freq_card.w + kGap, lower_y, sr_w, lower_h};
+}
+
+/* Shared by the drawing code and the tap-to-fullscreen hit-test below -
+ * fills whatever's left above the freq/SR row (see tune_lower_cards_rect
+ * for why that's a fixed height), same as the main page's own video
+ * panel does above its own status row. */
+SDL_Rect tune_video_panel_rect(int width, int height)
+{
+    constexpr int kPad = 16;
+    constexpr int kGap = 12;
+    constexpr int kRightColW = 190;
+    const int content_y = kPad;
+    const int main_col_w = width - kPad - kGap - kRightColW - kPad;
+    SDL_Rect freq_card, sr_card;
+    tune_lower_cards_rect(width, height, freq_card, sr_card);
+    const int video_panel_h = freq_card.y - kGap - content_y;
+    return {kPad, content_y, main_col_w, video_panel_h};
+}
+
+/* Digit size scales with the display this is built for - the 800-wide
+ * panel's freq_card is noticeably shorter than the 1024-wide one's (see
+ * tune_lower_cards_rect), so one fixed size would either clip on the
+ * small panel or leave the big one looking sparse. Font sizes here must
+ * be in the preloaded seven-segment size list set up in main(). */
+struct TuneFreqMetrics { int wheel_w; int wheel_h; int digit_font; int dot_font; };
+
+TuneFreqMetrics tune_freq_metrics(int width)
+{
+    /* DSEG7-Classic-Bold runs noticeably wider per character than the
+     * DejaVu Sans Mono digits it replaced (~0.83x its point size vs
+     * ~0.6x) - digit_font is picked so a glyph's actual width still fits
+     * inside wheel_w, not by point size alone, or digits collide/clip at
+     * the card edges (as they did before this was measured). wheel_h is
+     * just tall enough for the glyph itself (~1.15x its point size, for
+     * ascent/descent). */
+    if(settings_compact(width)) return {46, 58, 48, 36};
+    return {70, 90, 76, 56};
+}
+
+/* Centre x of digit wheel `index`, matching the draw loop below exactly
+ * (dot inserted after digit index 3, i.e. before the 5th digit). */
+int tune_freq_wheel_centre_x(const SDL_Rect & freq_card, int wheel_w, int index)
+{
+    const int total_w = 7 * wheel_w + 10 /* dot */ + 4 * 2 /* small gaps */;
+    int cursor_x = freq_card.x + (freq_card.w - total_w) / 2;
+    for(int i = 0; i < index; ++i) {
+        if(i == 4) cursor_x += 10;
+        cursor_x += wheel_w + 2;
+    }
+    if(index == 4) cursor_x += 10;
+    return cursor_x + wheel_w / 2;
+}
+
+SDL_Rect tune_freq_wheel_rect(int width, int height, int index)
+{
+    SDL_Rect freq_card, sr_card;
+    tune_lower_cards_rect(width, height, freq_card, sr_card);
+    const TuneFreqMetrics m = tune_freq_metrics(width);
+    const int wheel_y = freq_card.y + 22 + (freq_card.h - 22 - m.wheel_h) / 2;
+    const int cx = tune_freq_wheel_centre_x(freq_card, m.wheel_w, index);
+    return {cx - m.wheel_w / 2, wheel_y, m.wheel_w, m.wheel_h};
+}
+
+/* As large as the SR card's width allows without a 4-digit "2000"
+ * clipping - measured against DSEG7-Classic-Bold's actual glyph widths
+ * (see tune_freq_metrics), not point size, same reasoning as there. Font
+ * size must be in the preloaded seven-segment size list in main(). */
+int tune_sr_font_size(int width) { return settings_compact(width) ? 40 : 60; }
+
+/* Manual Tune page. The frequency digit wheels (drag) and symbol rate
+ * (tap/wheel) debounce into a real apply_tune - see kTuneApplyDebounce
+ * and tune_digits_to_if_khz in main(). Presets are plain buttons (same
+ * look as tune_back_button_rect/the main page's own row - see
+ * draw_button) labelled with their own frequency, tap-to-load,
+ * long-press-to-overwrite, persisted to tune_presets.json (see
+ * qo100::load_tune_presets/save_tune_presets and
+ * tune_preset_button_rect) - no name is ever typed or stored. Status is
+ * real telemetry, same fields as the main page's draw_status. Layout
+ * mirrors the published mockup: letterboxed picture on top, frequency
+ * (digit-wheel style) and symbol rate below it, a full-height
+ * status+presets column on the right. No top bar - the page title and
+ * QO-100/DIRECT tabs were dropped so the picture could use that space;
+ * tune_back_button_rect (bottom-right, same look as the main page's own
+ * button row) is the only way back now. */
+void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
+                    int width, int height, const TouchState & touch,
+                    const int (&tune_digits)[7], int tune_sr_index,
+                    SDL_Texture * video_texture, bool have_video_frame,
+                    int video_source_width, int video_source_height,
+                    VideoNotice video_notice, double video_notice_elapsed_seconds,
+                    const qo100::ReceiverStatus & receiver,
+                    const std::vector<qo100::TunePreset> & tune_presets,
+                    const std::string & toast_text, double toast_elapsed_seconds)
+{
+    set_colour(renderer, kBackground);
+    const SDL_Rect screen{0, 0, width, height};
+    SDL_RenderFillRect(renderer, &screen);
+
+    /* ---- layout ---- */
+    constexpr int kPad = 16;
+    constexpr int kGap = 12;
+    constexpr int kRightColW = 190;
+    const int content_y = kPad;
+    const int main_col_x = kPad;
+    const int main_col_w = width - kPad - kGap - kRightColW - kPad;
+    const int right_col_x = main_col_x + main_col_w + kGap;
+
+    /* ---- video: the decoded picture, letterboxed at true 16:9, centred ----
+     * Fills whatever's left above the freq/SR row (which is a fixed
+     * height - see tune_lower_cards_rect) rather than a fixed size of its
+     * own, so it grows to use the space the removed top bar freed up.
+     * Tapping it goes fullscreen, same as the main page's own video panel
+     * - see tune_video_panel_rect and the SDL_MOUSEBUTTONUP handling in
+     * main() for AppPage::Tune. */
+    SDL_Rect freq_card, sr_card;
+    tune_lower_cards_rect(width, height, freq_card, sr_card);
+    const SDL_Rect video_panel = tune_video_panel_rect(width, height);
+    fill_panel(renderer, video_panel);
+    const SDL_Rect video_inner{video_panel.x + 6, video_panel.y + 6,
+                               video_panel.w - 12, video_panel.h - 12};
+    set_colour(renderer, kPanel);
+    SDL_RenderFillRect(renderer, &video_inner);
+    /* Real decoded picture, same texture/notice plumbing as the main
+     * page's video_content (see the AppPage::Main draw branch in main())
+     * - no more colour-bar mockup. */
+    if(have_video_frame) {
+        const SDL_Rect video_card = aspect_fit(video_source_width, video_source_height, video_inner);
+        SDL_RenderCopy(renderer, video_texture, nullptr, &video_card);
+    }
+    draw_video_notice(text, video_inner, video_notice, video_notice_elapsed_seconds);
+
+    /* ---- frequency + symbol rate row ---- */
+    fill_panel(renderer, freq_card);
+    fill_panel(renderer, sr_card);
+    /* Same size/colour as a preset row's name (e.g. "Pluto Bench" below) -
+     * these are the two other card titles on this page, so they read at
+     * the same weight rather than the dimmer/smaller style used for the
+     * page's minor labels (e.g. "PRESETS"). The interaction hint that used
+     * to run as its own row along the bottom of the card is folded into
+     * the title instead, so the card can be that much shorter. */
+    text.draw("FREQUENCY (MHz, drag digits)", freq_card.x + 12, freq_card.y + 10, kText, 14);
+    /* The SR card is much narrower than the freq one (see
+     * tune_lower_cards_rect - it only ever holds a short number), and
+     * this is the longer of the two titles - too wide for the compact/
+     * 800-wide card's title row at the same size as the other one. */
+    text.draw("SYMBOL RATE (kS/s, tap)", sr_card.x + 12, sr_card.y + 10, kText,
+              settings_compact(width) ? 11 : 14);
+
+    /* frequency: one scrollable digit wheel per digit, like an iOS time
+     * picker spun per-digit instead of per-field (a frequency has no
+     * natural hour/minute grouping to snap wheels to). Drag a digit up/
+     * down to change it (touchscreens have no scroll wheel) - see the
+     * SDL_MOUSEBUTTONDOWN/MOTION handling in main() for AppPage::Tune.
+     * A mouse wheel over a digit also works, for desktop testing. The
+     * unit is in the card title (see above) rather than repeated next to
+     * the digits, so the digits themselves can run as large as the card
+     * allows - no ghost prev/next digits either, for the same reason. */
+    {
+        const TuneFreqMetrics m = tune_freq_metrics(width);
+        const int wheel_y = freq_card.y + 22 + (freq_card.h - 22 - m.wheel_h) / 2;
+        int dot_cx = 0;
+        for(int i = 0; i < 7; ++i) {
+            const int cx = tune_freq_wheel_centre_x(freq_card, m.wheel_w, i);
+            if(i == 4) dot_cx = cx - m.wheel_w / 2 - 6;
+            const int d = tune_digits[i];
+            /* Leading-zero blanking, like a real frequency counter -
+             * only ever the very first digit (see tune_format_if_khz),
+             * so no need to check further than that. The slot stays
+             * exactly where it is and still drags to change it (see
+             * tune_freq_wheel_rect) - just nothing drawn in it while
+             * it's a leading zero. */
+            if(i == 0 && d == 0) continue;
+            text.draw(std::string(1, static_cast<char>('0' + d)), cx, wheel_y + m.wheel_h / 2,
+                      kText, m.digit_font, true, false, true);
+        }
+        text.draw(".", dot_cx, wheel_y + m.wheel_h / 2, kText, m.dot_font, true, false, true);
+    }
+
+    /* symbol rate: cycle the standard rates directly - no separate step
+     * size, and the unit/interaction hint are in the card title (see
+     * above) rather than repeated next to the value, same reasoning as
+     * the frequency digits. */
+    text.draw(kTuneSrRates[tune_sr_index], sr_card.x + sr_card.w / 2,
+              sr_card.y + (sr_card.h + 22) / 2, kText, tune_sr_font_size(width),
+              true, false, true);
+
+    /* ---- right column: status + presets, full page height ----
+     * Same 14px size as the main page's stream-info grid (draw_status's
+     * kFontSize for its narrow/800-wide case) - this column is similarly
+     * narrow, so no reason for it to run smaller text than that page. */
+    constexpr int kStatusFontSize = 14;
+    const int status_row_h = 22;
+    const int status_h = 30 + 4 * status_row_h + 10;
+    const SDL_Rect status_card{right_col_x, content_y, kRightColW, status_h};
+    fill_panel(renderer, status_card);
+    /* Real telemetry, same fields/formatting as the main page's
+     * draw_status (see ModcodEntry/kDvbsModcod/kDvbs2Modcod above) - only
+     * presets below are still a placeholder. */
+    const bool locked = receiver.locked();
+    text.draw(locked ? "LOCKED" : "NO LOCK", status_card.x + 22, status_card.y + 10,
+              locked ? kGreen : kTextDim, kStatusFontSize);
+    set_colour(renderer, locked ? kGreen : kTextDim);
+    const SDL_Rect lock_dot{status_card.x + 10, status_card.y + 15, 7, 7};
+    SDL_RenderFillRect(renderer, &lock_dot);
+    const ModcodEntry * modcod = nullptr;
+    if(locked && receiver.modcod >= 0) {
+        if(receiver.demod_state == 4 &&
+           static_cast<size_t>(receiver.modcod) < sizeof(kDvbs2Modcod) / sizeof(kDvbs2Modcod[0]))
+            modcod = &kDvbs2Modcod[receiver.modcod];
+        else if(receiver.demod_state == 3 &&
+                static_cast<size_t>(receiver.modcod) < sizeof(kDvbsModcod) / sizeof(kDvbsModcod[0]))
+            modcod = &kDvbsModcod[receiver.modcod];
+    }
+    char mer_text[24] = "---";
+    char modfec_text[24] = "---";
+    char null_text[24] = "---";
+    char ldpc_text[24] = "---";
+    if(locked) {
+        std::snprintf(mer_text, sizeof(mer_text), "%.1f dB", receiver.mer_x10 / 10.0);
+        std::snprintf(ldpc_text, sizeof(ldpc_text), "%ld", receiver.ldpc_errors);
+        if(receiver.null_packet_percent >= 0)
+            std::snprintf(null_text, sizeof(null_text), "%d%%", receiver.null_packet_percent);
+    }
+    if(modcod != nullptr)
+        std::snprintf(modfec_text, sizeof(modfec_text), "%s %s", modcod->modulation, modcod->fec);
+    const int row_y = status_card.y + 34;
+    const char * labels[] = {"MER", "MODCOD", "TS NULL", "LDPC ERR"};
+    const char * values[] = {mer_text, modfec_text, null_text, ldpc_text};
+    for(int i = 0; i < 4; ++i) {
+        const int y = row_y + i * status_row_h;
+        text.draw(labels[i], status_card.x + 10, y, kTextDim, kStatusFontSize);
+        const auto [value_w, value_h] = text.measure(values[i], kStatusFontSize);
+        (void)value_h;
+        text.draw(values[i], status_card.x + status_card.w - 10 - value_w, y,
+                  kText, kStatusFontSize);
+    }
+
+    /* Leaves room below for the back button (tune_back_button_rect),
+     * which sits in the page's bottom-right corner rather than inside
+     * this card. */
+    const SDL_Rect back_button = tune_back_button_rect(width, height);
+    const SDL_Rect presets_card = tune_presets_card_rect(width, height);
+    fill_panel(renderer, presets_card);
+    /* Plain buttons, same look as the back button below/the main page's
+     * own row (see draw_button) - labelled with the preset's own
+     * frequency, nothing typed or stored beyond that and its symbol rate
+     * (kept in memory, applied on load, just not part of the label). No
+     * "PRESETS" card title - spread evenly over the whole card instead
+     * (see tune_preset_button_rect) rather than packed under a label.
+     * Active (filled) whichever one matches what's actually tuned right
+     * now, not tap-tracking state - so a plain digit-drag landing exactly
+     * on a saved value lights it up too. */
+    const long current_if_khz = tune_digits_to_if_khz(tune_digits);
+    const long current_sr_ksps = kTuneSrValues[tune_sr_index];
+    /* Never more than fit this screen (see tune_preset_capacity's
+     * comment) - extra saved presets beyond that just aren't shown here,
+     * not lost. */
+    const int preset_count = std::min(
+        static_cast<int>(tune_presets.size()), tune_preset_capacity(width, height));
+    for(int i = 0; i < preset_count; ++i) {
+        const qo100::TunePreset & preset = tune_presets[i];
+        const SDL_Rect button = tune_preset_button_rect(width, height, i, preset_count);
+        const bool is_current = preset.if_khz == current_if_khz &&
+                                preset.symbol_rate_ksps == current_sr_ksps;
+        draw_button(renderer, text, button, tune_format_if_khz(preset.if_khz), kCyan, 20,
+                   is_current, is_pressed(touch, button));
+    }
+
+    /* Back to the main dashboard - same look as that page's own CHAT/SET/
+     * SCAN/TUNE/EXIT row (see draw_button/draw_status), styled green to
+     * match the TUNE button that opens this page. */
+    draw_button(renderer, text, back_button, "QO-100", kGreen, 16,
+               false, is_pressed(touch, back_button));
+
+    /* "SAVED ..." toast after a long-press preset overwrite (see
+     * kTuneToastDuration and the SDL_MOUSEBUTTONUP handling in main() for
+     * where this gets armed) - confirms the silent save actually
+     * happened, without needing a tap to dismiss. Fades out over the
+     * last 40% of its time on screen rather than just vanishing. */
+    const double toast_duration_seconds =
+        std::chrono::duration<double>(kTuneToastDuration).count();
+    if(!toast_text.empty() && toast_elapsed_seconds < toast_duration_seconds) {
+        const double fraction = toast_elapsed_seconds / toast_duration_seconds;
+        const double fade_start = 0.6;
+        const double opacity = fraction <= fade_start
+            ? 1.0 : std::clamp(1.0 - (fraction - fade_start) / (1.0 - fade_start), 0.0, 1.0);
+        const auto alpha = static_cast<uint8_t>(std::lround(opacity * 255));
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        /* Triple the original size (font 16->48, so everything else
+         * scales 3x too) and centred on the whole screen rather than
+         * pinned near the top - big and unmissable rather than a subtle
+         * corner notice. */
+        constexpr int kToastFontSize = 48;
+        const auto [text_w, text_h] = text.measure(toast_text, kToastFontSize);
+        (void)text_h;
+        const SDL_Rect toast{(width - text_w - 120) / 2, (height - 108) / 2,
+                             text_w + 120, 108};
+        fill_rounded_rect(renderer, toast, 24, {0x14, 0x2a, 0x1c, alpha});
+        draw_rounded_rect(renderer, toast, 24, {kGreen.r, kGreen.g, kGreen.b, alpha});
+        text.draw(toast_text, toast.x + toast.w / 2, toast.y + toast.h / 2,
+                 {kGreen.r, kGreen.g, kGreen.b, alpha}, kToastFontSize, true);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
 }
 
 bool save_screenshot(SDL_Renderer * renderer, int width, int height, const std::string & path)
@@ -2834,7 +3369,10 @@ int main(int argc, char ** argv)
 
     TextCache text(renderer);
     const std::string font_path = executable_directory() + "/Montserrat-Medium.ttf";
-    for(int size : {14, 16, 20, 32}) {
+    /* 9/10/11/12/15/18 added for the Manual Tune page's tighter typographic
+     * hierarchy (status/preset rows, digit-wheel labels); 48 for its
+     * "SAVED ..." toast - the other pages only ever needed 14/16/20/32. */
+    for(int size : {9, 10, 11, 12, 14, 15, 16, 18, 20, 32, 48}) {
         if(!text.load_font(font_path, size)) {
             SDL_DestroyRenderer(renderer);
             SDL_DestroyWindow(window);
@@ -2847,11 +3385,31 @@ int main(int argc, char ** argv)
      * mean the display doesn't visibly shift as it changes (holding
      * -/+ repeats the step; a proportional font like Montserrat noticeably
      * jitters left/right as digit widths vary). Sizes match where it's
-     * actually drawn (16 compact, 20 wide) - not preloaded at every size
-     * like Montserrat, since nothing else uses it. */
+     * actually drawn (16 compact, 20 wide), plus 9/10/11/26 for the Manual
+     * Tune page's status/preset values - not preloaded at every size like
+     * Montserrat, since nothing else uses it. */
     const std::string mono_font_path = executable_directory() + "/DejaVuSansMono.ttf";
-    for(int size : {16, 20}) {
+    for(int size : {9, 10, 11, 16, 20, 26}) {
         if(!text.load_font(mono_font_path, size, true)) {
+            SDL_DestroyRenderer(renderer);
+            SDL_DestroyWindow(window);
+            TTF_Quit();
+            SDL_Quit();
+            return 1;
+        }
+    }
+    /* Seven-segment/LCD-style digits, for the Manual Tune page's frequency
+     * wheel and symbol-rate readout only (see tune_freq_metrics/
+     * tune_sr_font_size for where 36/40/48/56/60/76 - compact vs wide -
+     * come from: sizes picked from this font's measured glyph width, not
+     * point size, since DSEG7 runs much wider per character than the
+     * DejaVu Sans Mono digits it replaced). DSEG7-Classic-Bold, SIL OFL
+     * licensed (see assets/DSEG-LICENSE.txt) - reads like a real
+     * frequency counter/LCD tuner display rather than plain monospace
+     * digits. */
+    const std::string sevenseg_font_path = executable_directory() + "/DSEG7Classic-Bold.ttf";
+    for(int size : {36, 40, 48, 56, 60, 76}) {
+        if(!text.load_font(sevenseg_font_path, size, false, true)) {
             SDL_DestroyRenderer(renderer);
             SDL_DestroyWindow(window);
             TTF_Quit();
@@ -3014,6 +3572,71 @@ int main(int argc, char ** argv)
     int chat_drag_start_y = 0;
     bool volume_dragging = false;
     size_t chat_drag_start_first = 0;
+    /* Manual Tune page state - debounces into a real apply_tune, see
+     * kTuneApplyDebounce below. */
+    /* Defaults to the QO-100 beacon's own IF/SR (see beacon_frequency_khz/
+     * beacon_symbol_rate_ksps above: 741.474MHz, 1500kS/s) rather than an
+     * arbitrary bench value, so opening this page starts on a frequency
+     * that's actually locked and visible right now. */
+    int tune_digits[7] = {0, 7, 4, 1, 4, 7, 4};
+    int tune_sr_index = 9; // 1500 kS/s
+    bool tune_digit_dragging = false;
+    int tune_drag_index = -1;
+    int tune_drag_start_y = 0;
+    int tune_drag_start_value = 0;
+    /* Debounced auto-apply: every digit/rate change bumps
+     * tune_last_change_at and arms tune_pending_apply; the per-frame
+     * check below (near beacon_return_armed) fires apply_tune once
+     * kTuneApplyDebounce has passed with no further change, rather than
+     * retuning on every single drag step. */
+    bool tune_pending_apply = false;
+    auto tune_last_change_at = Clock::time_point{};
+    constexpr auto kTuneApplyDebounce = std::chrono::milliseconds(800);
+    /* Saved frequency/SR combos - tap-to-load, long-press-to-overwrite,
+     * persisted to tune_presets.json (see qo100::load_tune_presets and
+     * the SDL_MOUSEBUTTONDOWN/UP handling below for AppPage::Tune). */
+    std::vector<qo100::TunePreset> tune_presets = qo100::load_tune_presets(repository_root);
+    /* First run (no tune_presets.json yet) - fill however many buttons
+     * actually fit (see tune_preset_capacity) with genuinely distinct
+     * starting points (cycling this list if capacity ever exceeds it),
+     * not kMaxTunePresets copies of the same value - identical buttons
+     * all "retune" to whatever's already tuned, which looks exactly like
+     * tapping them does nothing. Overwriting one via long-press is how
+     * they get customised from here. */
+    if(tune_presets.empty()) {
+        constexpr qo100::TunePreset kDefaultPresets[] = {
+            {beacon_frequency_khz, beacon_symbol_rate_ksps}, // QO-100 beacon
+            {2405000, 1000},                                 // Pluto/bench test
+            {436500, 333},                                   // 70cm ATV
+            {144600, 125},                                    // 2m test
+        };
+        constexpr int kDefaultCount =
+            sizeof(kDefaultPresets) / sizeof(kDefaultPresets[0]);
+        const int capacity = tune_preset_capacity(display.width, display.height);
+        for(int i = 0; i < capacity; ++i)
+            tune_presets.push_back(kDefaultPresets[i % kDefaultCount]);
+        qo100::save_tune_presets(repository_root, tune_presets);
+        qo100::log("[PRESETS] seeded %d distinct default(s)\n", capacity);
+    }
+    /* Which preset button (0-based) is currently pressed, and when/where
+     * the press started - a tap released quickly loads it, held past
+     * kLongPressThreshold without moving far overwrites it instead.
+     * -1 = nothing pressed. The overwrite itself fires the instant the
+     * threshold is reached (see the per-frame check near
+     * beacon_return_armed below), not on release - tune_preset_long_
+     * press_fired then stops the MOUSEBUTTONUP handling from doing it
+     * again when the finger eventually lifts. */
+    int tune_preset_press_row = -1;
+    auto tune_preset_press_started_at = Clock::time_point{};
+    int tune_preset_press_start_x = 0;
+    int tune_preset_press_start_y = 0;
+    bool tune_preset_long_press_fired = false;
+    constexpr auto kLongPressThreshold = std::chrono::milliseconds(600);
+    /* "SAVED ..." toast shown after a long-press overwrite - see
+     * kTuneToastDuration and draw_tune_page's comment. Empty text = no
+     * toast to draw. */
+    std::string tune_toast_text;
+    auto tune_toast_started_at = Clock::time_point{};
     TouchState touch;
     /* Resting a finger on the LNB LO Offset -/+ buttons repeats the step
      * instead of requiring one tap per 10kHz - useful now that offset can
@@ -3274,15 +3897,75 @@ int main(int argc, char ** argv)
                         lo_next_repeat_at = Clock::now() + kLoRepeatInitialDelay;
                     }
                 }
+                else if(app_page == AppPage::Tune && !fullscreen_video) {
+                    /* Touchscreens have no scroll wheel, so a digit is
+                     * adjusted by vertical drag instead - drag up to count
+                     * up, down to count down, same sense as the chat
+                     * history drag below. Debounces into a real apply_tune,
+                     * see kTuneApplyDebounce. (The SR card is tap-to-
+                     * advance instead - see the MOUSEBUTTONUP handling.)
+                     * Skipped entirely while the picture is fullscreen -
+                     * see the SDL_MOUSEBUTTONUP handling for how a tap
+                     * there just leaves fullscreen instead. */
+                    bool matched = false;
+                    for(int i = 0; i < 7; ++i) {
+                        if(point_in_rect(touch.x, touch.y,
+                                         tune_freq_wheel_rect(display.width, display.height, i))) {
+                            tune_digit_dragging = true;
+                            tune_drag_index = i;
+                            tune_drag_start_y = touch.y;
+                            tune_drag_start_value = tune_digits[i];
+                            matched = true;
+                            break;
+                        }
+                    }
+                    /* Preset buttons: press-down just records where/when,
+                     * so release (MOUSEBUTTONUP) can tell a quick tap
+                     * (load) from a held long-press (overwrite) - see
+                     * kLongPressThreshold there. */
+                    const int preset_count = std::min(static_cast<int>(tune_presets.size()),
+                        tune_preset_capacity(display.width, display.height));
+                    for(int row = 0; !matched && row < preset_count; ++row) {
+                        if(point_in_rect(touch.x, touch.y,
+                                         tune_preset_button_rect(
+                                             display.width, display.height, row, preset_count))) {
+                            tune_preset_press_row = row;
+                            tune_preset_press_started_at = Clock::now();
+                            tune_preset_press_start_x = touch.x;
+                            tune_preset_press_start_y = touch.y;
+                            tune_preset_long_press_fired = false;
+                            break;
+                        }
+                    }
+                }
             }
             else if(event.type == SDL_MOUSEMOTION && touch.active) {
                 touch.x = event.motion.x;
                 touch.y = event.motion.y;
+                if(tune_digit_dragging) {
+                    /* 18px per step - fine enough for a single-digit wheel
+                     * without needing a huge drag on an 800/1024-wide
+                     * touchscreen. The first (thousands) digit is capped
+                     * at 2, not 9 - the MiniTiouner's tuner (longmynd
+                     * enforces <= 2450MHz, see main.c) can't go past
+                     * ~2450MHz, so a leading 3-9 could never be a real
+                     * frequency anyway. */
+                    const int digit_span = tune_digit_max(tune_drag_index) + 1;
+                    const int steps = (tune_drag_start_y - touch.y) / 36;
+                    const int new_value =
+                        ((tune_drag_start_value + steps) % digit_span + digit_span) % digit_span;
+                    if(new_value != tune_digits[tune_drag_index]) {
+                        tune_digits[tune_drag_index] = new_value;
+                        tune_pending_apply = true;
+                        tune_last_change_at = Clock::now();
+                    }
+                }
             }
             else if(event.type == SDL_MOUSEBUTTONUP &&
                     event.button.button == SDL_BUTTON_LEFT) {
                 touch.active = false;
                 lo_hold_direction = 0;
+                tune_digit_dragging = false;
             }
             if(event.type == SDL_QUIT) {
                 running = false;
@@ -3317,6 +4000,37 @@ int main(int argc, char ** argv)
                     chat_first_visible = std::min(
                         chat_first_visible + 3,
                         chat_client.state().lines.size() - 1);
+            }
+            if(event.type == SDL_MOUSEWHEEL && app_page == AppPage::Tune) {
+                /* Desktop-testing convenience alongside the touch drag/tap
+                 * above - see draw_tune_page's comment. Debounces into a
+                 * real apply_tune the same way. */
+                int mx = 0, my = 0;
+                SDL_GetMouseState(&mx, &my);
+                bool matched = false;
+                for(int i = 0; i < 7; ++i) {
+                    if(point_in_rect(mx, my,
+                                     tune_freq_wheel_rect(display.width, display.height, i))) {
+                        const int digit_span = tune_digit_max(i) + 1;
+                        tune_digits[i] = (tune_digits[i] + (event.wheel.y > 0 ? 1 : digit_span - 1)) % digit_span;
+                        tune_pending_apply = true;
+                        tune_last_change_at = Clock::now();
+                        qo100::log("[TUNE_UI] digit %d -> %d\n", i, tune_digits[i]);
+                        matched = true;
+                        break;
+                    }
+                }
+                if(!matched) {
+                    SDL_Rect freq_card, sr_card;
+                    tune_lower_cards_rect(display.width, display.height, freq_card, sr_card);
+                    if(point_in_rect(mx, my, sr_card)) {
+                        tune_sr_index = (tune_sr_index +
+                            (event.wheel.y > 0 ? 1 : kTuneSrRateCount - 1)) % kTuneSrRateCount;
+                        tune_pending_apply = true;
+                        tune_last_change_at = Clock::now();
+                        qo100::log("[TUNE_UI] symbol rate index -> %d\n", tune_sr_index);
+                    }
+                }
             }
             if(event.type == SDL_MOUSEBUTTONDOWN &&
                event.button.button == SDL_BUTTON_LEFT &&
@@ -3493,6 +4207,94 @@ int main(int argc, char ** argv)
                     }
                     continue;
                 }
+                if(app_page == AppPage::Tune) {
+                    /* Same tap-anywhere-to-leave as the main page's own
+                     * fullscreen video (see draw_fullscreen_video) - checked
+                     * first since none of the rest of this page's taps are
+                     * meaningful while the picture is covering it. */
+                    if(fullscreen_video) {
+                        fullscreen_video = false;
+                        qo100::log(
+                            "[VIDEO_UI] fullscreen -> tune tap=(%d,%d); decoder unchanged\n",
+                            x, y);
+                        continue;
+                    }
+                    /* Presets: tap-to-load, long-press-to-overwrite (see
+                     * kLongPressThreshold and the press-down tracking in
+                     * the SDL_MOUSEBUTTONDOWN handling above). Frequency
+                     * digit wheels are vertical-drag (handled entirely on
+                     * press/motion above), the symbol rate is tap-to-
+                     * advance (wraps back to 25 after 2000) - both
+                     * debounce into a real apply_tune, see
+                     * kTuneApplyDebounce below. */
+                    if(point_in_rect(x, y, tune_back_button_rect(display.width, display.height))) {
+                        app_page = AppPage::Main;
+                        tune_pending_apply = false;
+                        /* Mirrors opening Tune always landing on preset 1
+                         * (see the TUNE button handling) - leaving always
+                         * tunes back to the beacon, a fixed, predictable
+                         * pair of transitions rather than leaving Main
+                         * showing whatever was last dialled in here. */
+                        const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+                                                  beacon_frequency_khz / 1000.0;
+                        apply_tune(PendingTune{
+                            beacon_mhz, beacon_frequency_khz, beacon_symbol_rate_ksps}, false);
+                        qo100::log("[TUNE_UI] back to main; tuned to beacon\n");
+                        tune_preset_press_row = -1;
+                        continue;
+                    }
+                    if(point_in_rect(x, y, tune_video_panel_rect(display.width, display.height))) {
+                        fullscreen_video = true;
+                        qo100::log(
+                            "[VIDEO_UI] tune -> fullscreen tap=(%d,%d); decoder unchanged\n",
+                            x, y);
+                        tune_preset_press_row = -1;
+                        continue;
+                    }
+                    SDL_Rect freq_card, sr_card;
+                    tune_lower_cards_rect(display.width, display.height, freq_card, sr_card);
+                    if(point_in_rect(x, y, sr_card)) {
+                        tune_sr_index = (tune_sr_index + 1) % kTuneSrRateCount;
+                        tune_pending_apply = true;
+                        tune_last_change_at = Clock::now();
+                        qo100::log("[TUNE_UI] symbol rate index -> %d\n", tune_sr_index);
+                    }
+                    /* Only fires if the release lands back on the same
+                     * button that was pressed, within a small wiggle
+                     * margin - an accidental drag to a different button/
+                     * off the card entirely is silently ignored, same as
+                     * it would be for any other button on this page. */
+                    if(tune_preset_press_row >= 0 &&
+                       point_in_rect(x, y, tune_preset_button_rect(
+                           display.width, display.height, tune_preset_press_row,
+                           std::min(static_cast<int>(tune_presets.size()),
+                                   tune_preset_capacity(display.width, display.height)))) &&
+                       std::abs(x - tune_preset_press_start_x) < 12 &&
+                       std::abs(y - tune_preset_press_start_y) < 12) {
+                        const int row = tune_preset_press_row;
+                        const bool held_long = Clock::now() - tune_preset_press_started_at >=
+                                               kLongPressThreshold;
+                        /* held_long releases already had the overwrite (and
+                         * toast) fire mid-press - see the per-frame check
+                         * near beacon_return_armed. Nothing left to do here
+                         * for those; only a genuine short tap still needs
+                         * handling on release. */
+                        if(!held_long) {
+                            tune_if_khz_to_digits(tune_presets[row].if_khz, tune_digits);
+                            tune_sr_index =
+                                tune_sr_index_for_value(tune_presets[row].symbol_rate_ksps);
+                            tune_pending_apply = false;
+                            const double frequency_mhz = receiver_settings.lnb_lo_mhz +
+                                tune_presets[row].if_khz / 1000.0;
+                            apply_tune(PendingTune{
+                                frequency_mhz, tune_presets[row].if_khz,
+                                tune_presets[row].symbol_rate_ksps}, false);
+                            qo100::log("[TUNE_UI] preset %d loaded\n", row);
+                        }
+                    }
+                    tune_preset_press_row = -1;
+                    continue;
+                }
                 if(app_page == AppPage::Chat) {
                     if(completed_chat_drag) continue;
                     const bool keyboard_open = chat_input != ChatInput::None;
@@ -3597,7 +4399,38 @@ int main(int argc, char ** argv)
                     else qo100::log("[SCAN] stopped\n");
                     continue;
                 }
-                const SDL_Rect exit_button = status_button_rect(layout, 3);
+                const SDL_Rect tune_button = status_button_rect(layout, 3);
+                if(point_in_rect(x, y, tune_button)) {
+                    app_page = AppPage::Tune;
+                    /* Manual Tune takes over the tuner - stop anything
+                     * from the main page that would otherwise fight it
+                     * (scan retuning away, or the beacon-return watchdog
+                     * yanking us back mid-adjustment). */
+                    if(scan_active) {
+                        scan_active = false;
+                        qo100::log("[SCAN] stopped (Manual Tune opened)\n");
+                    }
+                    beacon_return_armed = false;
+                    /* Opening Tune always tunes to preset 1, closing it
+                     * (QO-100 button) always tunes back to the beacon -
+                     * a fixed, predictable pair of transitions rather
+                     * than silently keeping whatever was last dialled
+                     * in, which is what tune_digits/tune_sr_index still
+                     * remember for next time this page is opened. */
+                    if(!tune_presets.empty()) {
+                        tune_if_khz_to_digits(tune_presets[0].if_khz, tune_digits);
+                        tune_sr_index = tune_sr_index_for_value(tune_presets[0].symbol_rate_ksps);
+                        tune_pending_apply = false;
+                        const double frequency_mhz = receiver_settings.lnb_lo_mhz +
+                            tune_presets[0].if_khz / 1000.0;
+                        apply_tune(PendingTune{
+                            frequency_mhz, tune_presets[0].if_khz,
+                            tune_presets[0].symbol_rate_ksps}, false);
+                    }
+                    qo100::log("[TUNE_UI] opened\n");
+                    continue;
+                }
+                const SDL_Rect exit_button = status_button_rect(layout, 4);
                 if(x >= exit_button.x && x < exit_button.x + exit_button.w &&
                    y >= exit_button.y && y < exit_button.y + exit_button.h) {
                     if(receiver_settings.exit_full_stop) {
@@ -3834,7 +4667,15 @@ int main(int argc, char ** argv)
                     scan_note_lock_result(scan_current_freq_mhz, held >= kScanFastLossWindow);
                     scan_advance();
                 }
-                else if(!scan_active) {
+                /* Not while on Manual Tune - entering it already disarms
+                 * any watchdog armed on the way in (see the TUNE button
+                 * handling), but that's a one-time check on entry, not a
+                 * standing guard; this covers losing lock on a signal you
+                 * dialled in and are still sitting on, e.g. someone else's
+                 * local broadcast simply stopping - that shouldn't yank
+                 * you back to the beacon behind your back while you're
+                 * deliberately parked on that frequency. */
+                else if(!scan_active && app_page != AppPage::Tune) {
                     const double beacon_mhz = receiver_settings.lnb_lo_mhz +
                                               beacon_frequency_khz / 1000.0;
                     if(std::abs(selected_frequency_mhz - beacon_mhz) > 0.02) {
@@ -3885,6 +4726,42 @@ int main(int argc, char ** argv)
             qo100::log("[TUNE] returning to beacon\n");
             apply_tune(PendingTune{
                 beacon_mhz, beacon_frequency_khz, beacon_symbol_rate_ksps}, false);
+        }
+
+        /* Manual Tune: debounced auto-apply - fires once no digit/rate
+         * change has happened for kTuneApplyDebounce, rather than on
+         * every single drag step (which would hammer longmynd with
+         * retunes while a finger is still moving). See tune_pending_apply
+         * for where this gets armed. */
+        if(app_page == AppPage::Tune && tune_pending_apply &&
+           Clock::now() - tune_last_change_at >= kTuneApplyDebounce) {
+            tune_pending_apply = false;
+            const long if_khz = tune_digits_to_if_khz(tune_digits);
+            const long symbol_rate_ksps = kTuneSrValues[tune_sr_index];
+            const double frequency_mhz = receiver_settings.lnb_lo_mhz + if_khz / 1000.0;
+            apply_tune(PendingTune{frequency_mhz, if_khz, symbol_rate_ksps}, false);
+        }
+
+        /* Preset long-press-to-overwrite fires the instant the threshold
+         * is reached, while still held - not on release - so the "SAVED"
+         * toast (and the actual save) show up right when the press feels
+         * long enough, rather than needing to lift your finger first.
+         * tune_preset_long_press_fired then stops the MOUSEBUTTONUP
+         * handling from repeating it once the finger does lift. */
+        if(app_page == AppPage::Tune && tune_preset_press_row >= 0 &&
+           !tune_preset_long_press_fired &&
+           Clock::now() - tune_preset_press_started_at >= kLongPressThreshold &&
+           std::abs(touch.x - tune_preset_press_start_x) < 12 &&
+           std::abs(touch.y - tune_preset_press_start_y) < 12) {
+            tune_preset_long_press_fired = true;
+            const int row = tune_preset_press_row;
+            tune_presets[row].if_khz = tune_digits_to_if_khz(tune_digits);
+            tune_presets[row].symbol_rate_ksps = kTuneSrValues[tune_sr_index];
+            qo100::save_tune_presets(repository_root, tune_presets);
+            tune_toast_text = "SAVED " + tune_format_if_khz(tune_presets[row].if_khz);
+            tune_toast_started_at = Clock::now();
+            qo100::log("[TUNE_UI] preset %d overwritten: %s\n", row,
+                      tune_format_if_khz(tune_presets[row].if_khz).c_str());
         }
 
         /* Safety cap: move on even if still locked, so one long-running
@@ -3995,17 +4872,30 @@ int main(int argc, char ** argv)
                            chat_first_visible, chat_last_visible,
                            chat_follow_latest, touch);
         }
+        else if(app_page == AppPage::Tune && fullscreen_video) {
+            draw_fullscreen_video(renderer, text, display.width, display.height,
+                                 video_texture, have_video_frame,
+                                 video_source_width, video_source_height, video_notice,
+                                 std::chrono::duration<double>(
+                                     Clock::now() - video_notice_started_at).count());
+        }
+        else if(app_page == AppPage::Tune) {
+            draw_tune_page(renderer, text, display.width, display.height, touch,
+                          tune_digits, tune_sr_index,
+                          video_texture, have_video_frame,
+                          video_source_width, video_source_height, video_notice,
+                          std::chrono::duration<double>(
+                              Clock::now() - video_notice_started_at).count(),
+                          receiver_status, tune_presets, tune_toast_text,
+                          std::chrono::duration<double>(
+                              Clock::now() - tune_toast_started_at).count());
+        }
         else if(fullscreen_video) {
-            if(have_video_frame) {
-                const SDL_Rect screen_bounds{0, 0, display.width, display.height};
-                const SDL_Rect destination = aspect_fit(
-                    video_source_width, video_source_height, screen_bounds);
-                SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
-            }
-            const SDL_Rect screen_bounds{0, 0, display.width, display.height};
-            draw_video_notice(text, screen_bounds, video_notice,
-                std::chrono::duration<double>(
-                    Clock::now() - video_notice_started_at).count());
+            draw_fullscreen_video(renderer, text, display.width, display.height,
+                                 video_texture, have_video_frame,
+                                 video_source_width, video_source_height, video_notice,
+                                 std::chrono::duration<double>(
+                                     Clock::now() - video_notice_started_at).count());
         }
         else {
             draw_spectrum(renderer, text, layout, *spectrum_texture,

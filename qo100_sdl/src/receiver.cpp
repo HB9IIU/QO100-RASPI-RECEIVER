@@ -232,6 +232,60 @@ bool save_receiver_settings(const std::string & repository_root,
     return saved;
 }
 
+std::vector<TunePreset> load_tune_presets(const std::string & repository_root)
+{
+    std::vector<TunePreset> presets;
+    const std::string path = repository_root + "/qo100_sdl/tune_presets.json";
+    json_object * root = json_object_from_file(path.c_str());
+    if(root == nullptr) return presets;
+    json_object * list = nullptr;
+    if(json_object_object_get_ex(root, "presets", &list) &&
+       json_object_get_type(list) == json_type_array) {
+        const size_t count = json_object_array_length(list);
+        for(size_t i = 0; i < count; ++i) {
+            json_object * entry = json_object_array_get_idx(list, i);
+            json_object * value = nullptr;
+            TunePreset preset;
+            if(json_object_object_get_ex(entry, "if_khz", &value))
+                preset.if_khz = json_object_get_int64(value);
+            if(json_object_object_get_ex(entry, "symbol_rate_ksps", &value))
+                preset.symbol_rate_ksps = json_object_get_int64(value);
+            if(preset.if_khz > 0) presets.push_back(std::move(preset));
+        }
+    }
+    json_object_put(root);
+    qo100::log("[PRESETS] loaded %zu from %s\n", presets.size(), path.c_str());
+    return presets;
+}
+
+bool save_tune_presets(const std::string & repository_root,
+                       const std::vector<TunePreset> & presets)
+{
+    const std::string path = repository_root + "/qo100_sdl/tune_presets.json";
+    json_object * root = json_object_new_object();
+    if(root == nullptr) return false;
+    json_object * list = json_object_new_array();
+    for(const TunePreset & preset : presets) {
+        json_object * entry = json_object_new_object();
+        json_object_object_add(entry, "if_khz", json_object_new_int64(preset.if_khz));
+        json_object_object_add(entry, "symbol_rate_ksps",
+                               json_object_new_int64(preset.symbol_rate_ksps));
+        json_object_array_add(list, entry);
+    }
+    json_object_object_add(root, "presets", list);
+    /* Same atomic write-then-rename as save_receiver_settings, for the
+     * same reason: a direct write left truncated by a mid-write kill
+     * would otherwise silently lose every saved preset. */
+    const std::string temp_path = path + ".tmp";
+    const bool written = json_object_to_file_ext(
+        temp_path.c_str(), root, JSON_C_TO_STRING_PRETTY) == 0;
+    json_object_put(root);
+    const bool saved = written && std::rename(temp_path.c_str(), path.c_str()) == 0;
+    if(written && !saved) std::remove(temp_path.c_str());
+    qo100::log("[PRESETS] %s %s\n", saved ? "saved" : "could not save", path.c_str());
+    return saved;
+}
+
 void ReceiverStatus::reset()
 {
     *this = ReceiverStatus{};
