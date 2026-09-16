@@ -3514,7 +3514,7 @@ int main(int argc, char ** argv)
     auto last_spectrum_click = Clock::time_point{};
     bool beacon_return_armed = false;
     auto beacon_return_deadline = Clock::time_point{};
-    constexpr auto kBeaconReturnDelay = std::chrono::milliseconds(2500);
+    constexpr auto kBeaconReturnDelay = std::chrono::milliseconds(5000);
     long current_tune_if_khz = beacon_frequency_khz;
     long current_tune_symbol_rate_ksps = beacon_symbol_rate_ksps;
     struct PendingTune {
