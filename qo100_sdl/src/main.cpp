@@ -2877,15 +2877,18 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
             const int cx = tune_freq_wheel_centre_x(freq_card, m.wheel_w, i);
             if(i == 4) dot_cx = cx - m.wheel_w / 2 - 6;
             const int d = tune_digits[i];
-            /* Leading-zero blanking, like a real frequency counter -
-             * only ever the very first digit (see tune_format_if_khz),
-             * so no need to check further than that. The slot stays
-             * exactly where it is and still drags to change it (see
-             * tune_freq_wheel_rect) - just nothing drawn in it while
-             * it's a leading zero. */
-            if(i == 0 && d == 0) continue;
+            /* Leading zero dimmed, like a real frequency counter's
+             * unlit leading digit - only ever the very first digit (see
+             * tune_format_if_khz), so no need to check further than
+             * that. Drawn near-solid grey rather than left blank: a
+             * first-time user dragging the visible MHz digits alone hits
+             * 999 and has no visual clue there's a draggable slot to the
+             * left of it that goes to 1000+ (see tune_freq_wheel_rect -
+             * the slot is always there and always drags, dim or not). */
+            constexpr Colour kLeadingZeroDim{0x70, 0x78, 0x88, 220};
+            const Colour digit_colour = (i == 0 && d == 0) ? kLeadingZeroDim : kText;
             text.draw(std::string(1, static_cast<char>('0' + d)), cx, wheel_y + m.wheel_h / 2,
-                      kText, m.digit_font, true, false, true);
+                      digit_colour, m.digit_font, true, false, true);
         }
         text.draw(".", dot_cx, wheel_y + m.wheel_h / 2, kText, m.dot_font, true, false, true);
     }
@@ -4243,7 +4246,14 @@ int main(int argc, char ** argv)
                         tune_preset_press_row = -1;
                         continue;
                     }
-                    if(point_in_rect(x, y, tune_video_panel_rect(display.width, display.height))) {
+                    /* Trimmed to the top 2/3 of the panel, not the full
+                     * rect - the bottom third sits right above the freq
+                     * digit wheels, and a swipe on the digits sometimes
+                     * releases a few pixels high, into the panel's bottom
+                     * edge, which used to trigger fullscreen by mistake. */
+                    SDL_Rect video_tap_rect = tune_video_panel_rect(display.width, display.height);
+                    video_tap_rect.h = video_tap_rect.h * 2 / 3;
+                    if(point_in_rect(x, y, video_tap_rect)) {
                         fullscreen_video = true;
                         qo100::log(
                             "[VIDEO_UI] tune -> fullscreen tap=(%d,%d); decoder unchanged\n",
