@@ -18,7 +18,31 @@ touch — no keyboard or mouse needed once it's set up.
 </tr>
 </table>
 
-## 🆕 Local spectrum with an RTL-SDR
+# 🆕 WHAT'S NEW!!!
+
+## Manual Tune
+
+A new **TUNE** page lets you dial in any frequency the MiniTiouner can
+reach (144–2450 MHz) instead of only what happens to show up on the
+spectrum — handy for checking a specific transponder, a local test
+signal, or anything else off the beaten path.
+
+<img src="assets/tune_page.png" alt="Manual Tune page, locked on a test card" width="70%">
+
+- Tap **TUNE** on the main screen to open it — it starts you on Preset 1
+  for a known-good, live signal.
+- **Drag a digit up or down** to change it, like spinning the dial on a
+  real frequency counter — no keyboard involved.
+- **Tap the Symbol Rate** to cycle through the standard rates.
+- **Presets** (the row of frequency buttons): tap one to load it
+  instantly, or **press and hold** one to save whatever you're currently
+  tuned to into that slot — a "SAVED ..." banner confirms it.
+- **Tap the picture** to go fullscreen, tap it again to come back.
+- Tap **QO-100** to leave the Tune page — this always retunes straight
+  back to the beacon, so you can't wander off and lose track of where you
+  left the dial.
+
+## Local spectrum with an RTL-SDR
 
 The spectrum display can now be generated locally with an RTL-SDR instead
 of using the remote BATC spectrum feed. At startup, the app detects compatible
@@ -53,28 +77,6 @@ RTL-SDR support:
 cd ~/DATVreceiver
 scripts/initialSetup.sh
 ```
-
-## 🆕 What's NEW!!! — Manual Tune
-
-A new **TUNE** page lets you dial in any frequency the MiniTiouner can
-reach (144–2450 MHz) instead of only what happens to show up on the
-spectrum — handy for checking a specific transponder, a local test
-signal, or anything else off the beaten path.
-
-<img src="assets/tune_page.png" alt="Manual Tune page, locked on a test card" width="70%">
-
-- Tap **TUNE** on the main screen to open it — it starts you on Preset 1
-  for a known-good, live signal.
-- **Drag a digit up or down** to change it, like spinning the dial on a
-  real frequency counter — no keyboard involved.
-- **Tap the Symbol Rate** to cycle through the standard rates.
-- **Presets** (the row of frequency buttons): tap one to load it
-  instantly, or **press and hold** one to save whatever you're currently
-  tuned to into that slot — a "SAVED ..." banner confirms it.
-- **Tap the picture** to go fullscreen, tap it again to come back.
-- Tap **QO-100** to leave the Tune page — this always retunes straight
-  back to the beacon, so you can't wander off and lose track of where you
-  left the dial.
 
 ## What you need
 
