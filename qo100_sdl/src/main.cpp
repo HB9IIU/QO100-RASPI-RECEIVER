@@ -910,6 +910,22 @@ std::vector<DetectedSignal> detect_signals(const std::vector<uint16_t> & bins)
         detected.push_back({refined_start, refined_end, middle_bin, strength,
                             width_mhz, symbol_rate_ms, frequency_mhz});
     }
+
+    /* Same beacon definition draw_spectrum() uses for the "dB BCN" labels. */
+    float beacon_strength = 0.0F;
+    for(const auto & signal : detected) {
+        if(signal.frequency_mhz < 10492.0 && signal.symbol_rate_ms >= 1.0F) {
+            beacon_strength = signal.strength;
+            break;
+        }
+    }
+    if(beacon_strength > noise_level) {
+        constexpr float kBeaconFraction = 0.5F;
+        const float minimum = noise_level + kBeaconFraction * (beacon_strength - noise_level);
+        detected.erase(std::remove_if(detected.begin(), detected.end(),
+            [minimum](const DetectedSignal & signal) { return signal.strength < minimum; }),
+            detected.end());
+    }
     return detected;
 }
 
