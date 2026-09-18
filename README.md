@@ -42,7 +42,7 @@ signal, or anything else off the beaten path.
   back to the beacon, so you can't wander off and lose track of where you
   left the dial.
 
-## Local spectrum with an RTL-SDR
+## Local spectrum with an RTL-SDR (No internet needed — ideal for field operations)
 
 The spectrum display can now be generated locally with an RTL-SDR instead
 of using the remote BATC spectrum feed. At startup, the app detects compatible
