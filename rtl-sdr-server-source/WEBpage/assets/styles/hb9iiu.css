@@ -1,0 +1,23 @@
+.footer {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    background-color: red;
+    color: white;
+    text-align: center;
+}
+/* abeezee-regular - latin */
+@font-face {
+    font-family: 'ABeeZee';
+    font-style: normal;
+    font-weight: 400;
+    src: url('../fonts/abeezee-v22-latin-regular.eot'); /* IE9 Compat Modes */
+    src: local(''),
+    url('../fonts/abeezee-v22-latin-regular.eot?#iefix') format('embedded-opentype'), /* IE6-IE8 */
+    url('../fonts/abeezee-v22-latin-regular.woff2') format('woff2'), /* Super Modern Browsers */
+    url('../fonts/abeezee-v22-latin-regular.woff') format('woff'), /* Modern Browsers */
+    url('../fonts/abeezee-v22-latin-regular.ttf') format('truetype'), /* Safari, Android, iOS */
+    url('../fonts/abeezee-v22-latin-regular.svg#ABeeZee') format('svg'); /* Legacy iOS */
+}
+

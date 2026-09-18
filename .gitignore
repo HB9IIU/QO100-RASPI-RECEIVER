@@ -17,6 +17,12 @@ build-release/
 *.o
 *.d
 
+# Local RTL-SDR server development artifacts
+rtl-sdr-server-source/.venv-build/
+rtl-sdr-server-source/dist/
+rtl-sdr-server-source/tools/build/
+rtl-sdr-server-source/reports/
+
 # Vendored third-party deps (large, fetch separately if needed)
 qo100_lvgl/lvgl/
 longmynd_ws/web/libwebsockets/

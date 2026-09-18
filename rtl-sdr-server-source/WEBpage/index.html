@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1" name="viewport"/>
+    <title>Offline QO-100</title>
+    <link href="assets/images/favicon.ico" rel="icon" type="image/x-icon">
+    <link href="assets/bootstrap/css/bootstrap.min.css" rel="stylesheet"/>
+    <script src="assets/jquery/jquery_3.6.1.js"></script>
+    <script src="assets/websocket/u16Websocket.js"></script>
+    <script src="assets/bootstrap/js/bootstrap.min.js"></script>
+    <script src="assets/javascripts/modified_BATC_script.js"></script>
+    <script src="assets/javascripts/local_fft_script.js"></script>
+    <script src="assets/javascripts/hb9iiu.js"></script>
+    <link href="assets/styles/hb9iiu.css" rel="stylesheet"/>
+</head>
+<body class="bg-white d-flex flex-column h-100" style="font-family: 'ABeeZee', sans-serif;">
+<div class="container">
+    <div id="top-description">
+        <div id="content" role="main">
+            <div class="mt-3 row">
+                <div class="col-xl-12" id="fft-col">
+                    <canvas height="0" id="c" style="background: linear-gradient( to top ,#048133 0%, #8c4525 0%);"
+                            width="0"></canvas>
+                </div>
+            </div>
+            <div class="mt-3 row">
+                <div class="col-xl-12" id="fft-col-2">
+                    <canvas height="0" id="c2" style="background: linear-gradient(to top, #1a1a2e 0%, #16213e 100%);"
+                            width="0"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="accordion accordion-flush" id="accordionFlushExample">
+        <div class="accordion-item">
+            <h2 class="accordion-header" id="flush-headingOne">
+                <button aria-controls="flush-collapseOne" aria-expanded="false"
+                        class="accordion-button collapsed fst-italic" data-bs-target="#flush-collapseOne"
+                        data-bs-toggle="collapse" type="button">Configuration
+                </button>
+            </h2>
+            <div aria-labelledby="flush-headingOne" class="accordion-collapse collapse"
+                 data-bs-parent="#accordionFlushExample" id="flush-collapseOne">
+                <div class="accordion-body">
+                    <div class="container">
+                        <div class="row">
+                            <div class="col-12 col-lg-4 col-md-6 col-sm-6 col-xl-4 col-xxl-4">
+                                <h5>FFT Speed</h5>
+                                <div class="form-check">
+                                    <input checked="" class="form-check-input" id="fft_fast" name="flexRadioDefault"
+                                           type="radio"/>
+                                    <label class="form-check-label" for="fft_fast">Fast</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" id="fft" name="flexRadioDefault" type="radio"/>
+                                    <label class="form-check-label" for="fft">Slow</label>
+                                </div>
+                                <button class="btn btn-light btn-outline-dark btn-sm" id="fullscreen-link-button"
+                                        type="button">Open Fullscreen
+                                </button>
+                            </div>
+                            <div class="col-12 col-lg-4 col-md-6 col-sm-6 col-xl-4 col-xxl-4">
+                                <h5 class="text-center">Spectrum Colour</h5>
+                                <div class="row">
+                                    <div class="col-md-12" style="text-align: center;">
+                                        <input class="color0" name="color0" style="width: 90px; height: 40px;"
+                                               type="color" value="#e1ad01"/>
+                                    </div>
+                                    <div class="col-md-12">
+                                    </div>
+                                </div>
+                                <div class="col-md-12">
+                                    <h6>Transparency</h6>
+                                    <input class="form-range" id="customRange1" max="100" min="0" type="range" value="100"/>
+                                </div>
+                            </div>
+                            <div class="col-11 col-lg-4 col-md-12 col-sm-12 col-xl-4 col-xxl-4">
+                                <h5 class="text-center">Background Colour</h5>
+                                <div class="mb-3 row">
+                                    <div class="col-6 col-md-6 col-sm-6" style="text-align: center;">
+                                        <input class="color1" name="color1" style="width: 90px; height: 40px;"
+                                               type="color" value="#000000"/>
+                                    </div>
+                                    <div class="col-6 col-md-6 col-sm-6" style="text-align: center;">
+                                        <input class="color2" name="color2" style="width: 90px; height: 40px;"
+                                               type="color" value="#03d7fc"/>
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-4 col-lg-4 col-md-4 col-sm-4 col-xl-4 col-xxl-4"
+                                         style="text-align: center;">
+                                        <button class="btn btn-light btn-outline-dark btn-sm" id="random"
+                                                style="width: 100px;" type="button">Random
+                                        </button>
+                                    </div>
+                                    <div class="col-4 col-lg-4 col-md-4 col-sm-4 col-xl-4 col-xxl-4"
+                                         style="text-align: center;">
+                                        <button class="btn btn-light btn-outline-dark btn-sm" id="auto"
+                                                style="width: 100px;" type="button">Auto
+                                        </button>
+                                    </div>
+                                    <div class="col-4 col-lg-4 col-md-4 col-sm-4 col-xl-4 col-xxl-4"
+                                         style="text-align: center;">
+                                        <button class="btn btn-light btn-outline-dark btn-sm" id="stop"
+                                                style="width: 100px;" type="button">Stop
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-2 row">
+                                <p>This is an offline version of the BATC | AMSAT-UK Oscar 100 Wideband Spectrum Monitor
+                                    (<a href="https://github.com/BritishAmateurTelevisionClub/eshail-ghy-web"
+                                        target="_blank">more info here</a> and <a
+                                            href="https://www.zr6tg.co.za/2022/06/29/offline-oscar-100-wideband-spectrum-monitor-with-sdr/"
+                                            target="_blank">here</a>).
+                                    Online version can
+                                    be found <a href="https://eshail.batc.org.uk/wb/" target="_blank">here</a>
+                                <p style="font-size: 13px; text-align: center;">HB9IIU says:<i> &quot;If you enjoy this,
+                                    then&nbsp;<a href="https://www.buymeacoffee.com/zr6tg" target="_blank">buy Tom a
+                                        Beer</a><a href="https://www.buymeacoffee.com/zr6tg"></a>&quot;</i></p>
+                                <p class="mb-1">This interface is based of the original BATC Web Receiver
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="footer">
+        <p>Footer</p>
+    </div>
+    <footer class="footer mt-auto py-3 bg-light">
+        <div class="container text-start">
+            <span class="text-muted">HB9IIU November 2022</span>
+        </div>
+    </footer>
+</div>
+</body>
+</html>

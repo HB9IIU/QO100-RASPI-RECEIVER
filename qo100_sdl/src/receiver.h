@@ -88,6 +88,30 @@ private:
     int pid_ = -1;
 };
 
+/* Manages the rtl-sdr-server subprocess (qo100_sdl/tools/rtl-sdr-server), the
+ * local RTL-SDR alternative to the BATC spectrum feed. Mirrors
+ * LongmyndProcess's lifecycle: fork/exec, PID file for stale-instance
+ * cleanup, SIGTERM then SIGKILL to stop. */
+class RtlSdrProcess {
+public:
+    explicit RtlSdrProcess(std::string repository_root);
+    ~RtlSdrProcess();
+
+    RtlSdrProcess(const RtlSdrProcess &) = delete;
+    RtlSdrProcess & operator=(const RtlSdrProcess &) = delete;
+
+    bool start();
+    void stop();
+    bool running();
+
+private:
+    std::string repository_root_;
+    std::string binary_;
+    std::string log_path_;
+    std::string pid_path_;
+    int pid_ = -1;
+};
+
 class LongmyndClient {
 public:
     LongmyndClient();

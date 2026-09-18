@@ -3,12 +3,11 @@
 #
 # Installs build dependencies, fetches the vendored library (pinned to the
 # version this repo actually expects), creates the longmynd status FIFO,
-# installs the MiniTiouner udev rule, builds both longmynd_ws and qo100_sdl,
-# sets up autostart (scripts/setup_autostart.sh), and reboots at the end -
-# udev's live rule-reload doesn't always actually take effect for a device
-# that was already plugged in when the rule was installed (observed
-# directly: MiniTiouner permissions stayed wrong until a reboot), so this
-# no longer just trusts `udevadm trigger` and calls it done.
+# installs the MiniTiouner and RTL-SDR udev rules, prevents Linux's DVB
+# driver from claiming RTL-SDR sticks, builds both longmynd_ws and qo100_sdl,
+# sets up autostart (scripts/setup_autostart.sh), and reboots at the end.
+# A reboot is required both for new USB permissions and for the module
+# blacklist to release a stick already claimed by the kernel.
 #
 # Safe to re-run - every step is skipped (or is a no-op) if already done.
 # Run from anywhere; paths are resolved relative to this script.
@@ -42,13 +41,13 @@ This script WILL:
   - Download one small open-source library (libwebsockets) from
     GitHub
   - Build the receiver app and the tuner driver from source
-  - Install a udev rule so the MiniTiouner USB tuner works without
-    root access
+  - Install USB access rules for the MiniTiouner and RTL-SDR
+  - Prevent Linux's television driver from claiming the RTL-SDR
   - Adjust one system network setting (UDP receive buffer size) for
     smoother video
   - Set the app to start automatically when the Pi boots
   - Reboot the Pi at the end, so all of the above actually takes
-    effect (needed for the udev rule specifically)
+    effect (needed for USB rules and the RTL-SDR driver blacklist)
 
 ${GREEN}This script will NOT:${NC}
   - Send any of your files, data, or settings anywhere
@@ -115,8 +114,40 @@ sudo sysctl --system > /dev/null
 
 step "🔌 Installing the MiniTiouner udev rule (USB access without root)..."
 sudo cp longmynd_ws/minitiouner.rules /etc/udev/rules.d/minitiouner.rules
+
+step "📡 Configuring RTL-SDR access..."
+# Keep this rule project-owned instead of depending on the distribution's
+# rtl-sdr package being installed. These are the two Realtek identities the
+# app currently recognises at startup. The reboot below refreshes the user's
+# plugdev group membership as well as applying the rule to connected sticks.
+sudo tee /etc/udev/rules.d/60-qo100-rtlsdr.rules > /dev/null <<'EOF'
+# QO-100 DATV Receiver: permit non-root access to RTL2832U RTL-SDR sticks.
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+EOF
+sudo usermod -a -G plugdev "$USER"
+
+# These kernel modules treat an RTL2832U as a television receiver and claim
+# its USB interface before librtlsdr can open it. A blacklist is preferable
+# to unloading them here: unloading could disrupt another active device and
+# would not survive the next boot or unplug/replug cycle.
+sudo tee /etc/modprobe.d/blacklist-qo100-rtlsdr.conf > /dev/null <<'EOF'
+# QO-100 DATV Receiver: reserve RTL2832U devices for librtlsdr.
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832
+blacklist rtl2832_sdr
+EOF
+
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=0403 --attr-match=idProduct=6010
+sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=0bda || true
+
+step "📻 Checking the bundled RTL-SDR spectrum server..."
+if [ ! -f qo100_sdl/tools/rtl-sdr-server ]; then
+    echo "ERROR: qo100_sdl/tools/rtl-sdr-server is missing after git pull." >&2
+    exit 1
+fi
+chmod 755 qo100_sdl/tools/rtl-sdr-server
 
 step "🛠️  Building qo100_sdl (the receiver app)..."
 cmake -S qo100_sdl -B qo100_sdl/build -DCMAKE_BUILD_TYPE=Release
@@ -131,7 +162,7 @@ QO100_SKIP_SERVICE_START=1 "$REPO_DIR/scripts/setup_autostart.sh"
 printf "\n${GREEN}✅ Setup complete!${NC}\n\n"
 echo "🖼️  Screenshot album (optional): $REPO_DIR/scripts/setup_photo_album.sh"
 echo
-echo "🔌 Plug in the MiniTiouner (USB 0403:6010) now if it isn't already."
+echo "🔌 Plug in the MiniTiouner and RTL-SDR now if they aren't already."
 echo
 printf "${YELLOW}🔁 Rebooting now to make sure everything actually takes effect...${NC}\n"
 sleep 3

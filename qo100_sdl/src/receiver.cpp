@@ -393,6 +393,123 @@ bool LongmyndProcess::running() const
     return pid_ > 0 && kill(pid_, 0) == 0;
 }
 
+RtlSdrProcess::RtlSdrProcess(std::string repository_root)
+    : repository_root_(std::move(repository_root)),
+      binary_(repository_root_ + "/qo100_sdl/tools/rtl-sdr-server"),
+      log_path_(repository_root_ + "/qo100_sdl/rtl-sdr-server.log"),
+      pid_path_(repository_root_ + "/qo100_sdl/rtl-sdr-server.pid")
+{}
+
+RtlSdrProcess::~RtlSdrProcess()
+{
+    stop();
+}
+
+bool RtlSdrProcess::start()
+{
+    if(running()) return true;
+    if(access(binary_.c_str(), X_OK) != 0) {
+        qo100::log("[RTLSDR] binary is not executable: %s\n", binary_.c_str());
+        return false;
+    }
+
+    FILE * stale_file = std::fopen(pid_path_.c_str(), "r");
+    if(stale_file != nullptr) {
+        int stale_pid = -1;
+        const bool read_pid = std::fscanf(stale_file, "%d", &stale_pid) == 1;
+        std::fclose(stale_file);
+        if(read_pid && stale_pid > 0 && pid_matches_binary(stale_pid, binary_)) {
+            qo100::log("[RTLSDR] stopping stale owned process %d\n", stale_pid);
+            kill(stale_pid, SIGTERM);
+        }
+        std::remove(pid_path_.c_str());
+    }
+
+    const pid_t child = fork();
+    if(child < 0) {
+        qo100::log("[RTLSDR] fork failed: %s\n", std::strerror(errno));
+        return false;
+    }
+    if(child == 0) {
+        const int descriptor = open(log_path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if(descriptor >= 0) {
+            dup2(descriptor, STDOUT_FILENO);
+            dup2(descriptor, STDERR_FILENO);
+            close(descriptor);
+        }
+        execl(binary_.c_str(), binary_.c_str(), static_cast<char *>(nullptr));
+        _exit(127);
+    }
+
+    pid_ = static_cast<int>(child);
+    FILE * pid_file = std::fopen(pid_path_.c_str(), "w");
+    if(pid_file != nullptr) {
+        std::fprintf(pid_file, "%d\n", pid_);
+        std::fclose(pid_file);
+    }
+    qo100::log("[RTLSDR] started pid=%d\n", pid_);
+    return true;
+}
+
+void RtlSdrProcess::stop()
+{
+    if(pid_ <= 0) return;
+    const int child = pid_;
+    pid_ = -1;
+    kill(child, SIGTERM);
+    for(int attempt = 0; attempt < 30; ++attempt) {
+        int status = 0;
+        const pid_t result = waitpid(child, &status, WNOHANG);
+        if(result == child || result < 0) {
+            std::remove(pid_path_.c_str());
+            qo100::log("[RTLSDR] stopped pid=%d\n", child);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    qo100::log("[RTLSDR] pid=%d did not stop in time; terminating\n", child);
+    kill(child, SIGKILL);
+    std::remove(pid_path_.c_str());
+    /* Reap in a detached thread rather than blocking the caller - a
+     * subprocess mid-USB-teardown with the dongle can sit unreapable for a
+     * while even after SIGKILL, and this is called from the main/UI thread
+     * on every switch back to the remote spectrum source. */
+    std::thread([child] {
+        waitpid(child, nullptr, 0);
+        qo100::log("[RTLSDR] pid=%d reaped\n", child);
+    }).detach();
+}
+
+bool RtlSdrProcess::running()
+{
+    if(pid_ <= 0) return false;
+
+    int status = 0;
+    const pid_t result = waitpid(pid_, &status, WNOHANG);
+    if(result == pid_) {
+        const int child = pid_;
+        pid_ = -1;
+        std::remove(pid_path_.c_str());
+        if(WIFEXITED(status))
+            qo100::log("[RTLSDR] pid=%d exited with status %d\n",
+                       child, WEXITSTATUS(status));
+        else if(WIFSIGNALED(status))
+            qo100::log("[RTLSDR] pid=%d exited on signal %d\n",
+                       child, WTERMSIG(status));
+        else
+            qo100::log("[RTLSDR] pid=%d exited\n", child);
+        return false;
+    }
+    if(result < 0 && errno == ECHILD) {
+        qo100::log("[RTLSDR] pid=%d is no longer our child\n", pid_);
+        pid_ = -1;
+        std::remove(pid_path_.c_str());
+        return false;
+    }
+
+    return kill(pid_, 0) == 0 || errno == EPERM;
+}
+
 struct LongmyndClient::Impl {
     std::atomic<bool> running{false};
     std::thread thread;

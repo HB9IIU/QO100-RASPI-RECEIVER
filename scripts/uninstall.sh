@@ -2,8 +2,9 @@
 # Reverses everything scripts/initialSetup.sh, scripts/setup_autostart.sh,
 # and scripts/setup_photo_album.sh set up: stops and removes both systemd
 # --user services, the XDG autostart entry, the desktop shortcut, the
-# MiniTiouner udev rule, and the UDP-buffer sysctl tweak - then deletes the
-# repo folder itself as the last step. This is the real, final step - there's
+# MiniTiouner/RTL-SDR rules, RTL-SDR module blacklist, and the UDP-buffer
+# sysctl tweak - then deletes the repo folder itself as the last step. This
+# is the real, final step - there's
 # no confirmation prompt and nothing is recoverable afterward (any
 # uncommitted local changes, saved settings, and the whole screenshot album
 # go with it). If you want to keep any of that, back it up before running
@@ -65,6 +66,24 @@ if [ -f /etc/udev/rules.d/minitiouner.rules ]; then
     echo "   removed and reloaded udev rules"
 else
     echo "   not present, skipping"
+fi
+
+step "📡 Removing RTL-SDR system configuration (needs sudo)..."
+RTLSDR_CONFIG_REMOVED=0
+for RTLSDR_CONFIG in \
+    /etc/udev/rules.d/60-qo100-rtlsdr.rules \
+    /etc/modprobe.d/blacklist-qo100-rtlsdr.conf; do
+    if [ -f "$RTLSDR_CONFIG" ]; then
+        sudo rm -f "$RTLSDR_CONFIG"
+        echo "   removed $RTLSDR_CONFIG"
+        RTLSDR_CONFIG_REMOVED=1
+    else
+        echo "   $RTLSDR_CONFIG not present, skipping"
+    fi
+done
+if [ "$RTLSDR_CONFIG_REMOVED" -eq 1 ]; then
+    sudo udevadm control --reload-rules
+    echo "   reboot to make the kernel-driver change take effect"
 fi
 
 step "🌐 Removing UDP receive buffer sysctl tweak (needs sudo)..."

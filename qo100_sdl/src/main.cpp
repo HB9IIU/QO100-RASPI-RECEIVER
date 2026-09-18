@@ -180,6 +180,65 @@ std::string detect_tuner_product_string()
     return result;
 }
 
+/* RTL2832U-based dongles (the common QO-100 wideband RTL-SDR sticks) enumerate
+ * as VID:PID 0bda:2838 once their EEPROM is programmed, or 0bda:2832 for a
+ * blank/unconfigured unit - check both. */
+bool detect_rtlsdr_present()
+{
+    DIR * directory = opendir("/sys/bus/usb/devices");
+    if(directory == nullptr) return false;
+
+    bool found = false;
+    while(const dirent * entry = readdir(directory)) {
+        const std::string path =
+            std::string("/sys/bus/usb/devices/") + entry->d_name;
+        char vendor[8]{};
+        FILE * vendor_file = std::fopen((path + "/idVendor").c_str(), "r");
+        if(vendor_file == nullptr) continue;
+        const bool have_vendor =
+            std::fgets(vendor, sizeof(vendor), vendor_file) != nullptr;
+        std::fclose(vendor_file);
+        if(!have_vendor || std::strncmp(vendor, "0bda", 4) != 0) continue;
+
+        char product_id[8]{};
+        FILE * product_id_file =
+            std::fopen((path + "/idProduct").c_str(), "r");
+        if(product_id_file == nullptr) continue;
+        const bool have_product_id =
+            std::fgets(product_id, sizeof(product_id), product_id_file) != nullptr;
+        std::fclose(product_id_file);
+        if(have_product_id && (std::strncmp(product_id, "2838", 4) == 0 ||
+                               std::strncmp(product_id, "2832", 4) == 0)) {
+            found = true;
+            break;
+        }
+    }
+    closedir(directory);
+    return found;
+}
+
+bool rtlsdr_system_setup_complete()
+{
+    return access("/etc/udev/rules.d/60-qo100-rtlsdr.rules", F_OK) == 0 &&
+           access("/etc/modprobe.d/blacklist-qo100-rtlsdr.conf", F_OK) == 0;
+}
+
+bool launch_rtlsdr_setup_terminal(const std::string & repository_root)
+{
+    const std::string installer = repository_root + "/scripts/initialSetup.sh";
+    if(access("/usr/bin/lxterminal", X_OK) != 0 || access(installer.c_str(), X_OK) != 0)
+        return false;
+    const pid_t child = fork();
+    if(child < 0) return false;
+    if(child == 0) {
+        execl("/usr/bin/lxterminal", "lxterminal", "-e", installer.c_str(),
+              static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    std::thread([child] { waitpid(child, nullptr, 0); }).detach();
+    return true;
+}
+
 struct DisplayConfig {
     int width = kReferenceWidth;
     int height = kReferenceHeight;
@@ -868,8 +927,38 @@ const char * spectrum_status_text(SpectrumStatus status)
     return "";
 }
 
+struct SpectrumFeedConfig {
+    const char * log_tag;
+    std::string address;
+    int port;
+    std::string path;
+    std::string protocol_name;
+    bool use_ssl;
+    std::string origin;
+    /* Wait this long after start() before the first connect() attempt.
+     * Zero for BATC (already listening). Non-zero for the local RTL-SDR
+     * feed, whose subprocess we just spawned and which needs a couple of
+     * seconds to open the dongle and start listening - without this, the
+     * first attempt visibly fails on screen before a real retry has any
+     * chance to land. */
+    std::chrono::milliseconds initial_delay{0};
+};
+
+SpectrumFeedConfig batc_spectrum_config()
+{
+    return {"SPECTRUM", "eshail.batc.org.uk", 443, "/wb/fft",
+            "fft_m0dtslivetune", true, "https://eshail.batc.org.uk", {}};
+}
+
+SpectrumFeedConfig local_spectrum_config()
+{
+    return {"SPECTRUM-LOCAL", "127.0.0.1", 7681, "/", "fft_m0dtslivetune", false, "",
+            std::chrono::seconds(3)};
+}
+
 class SpectrumFeed {
 public:
+    explicit SpectrumFeed(SpectrumFeedConfig config) : config_(std::move(config)) {}
     ~SpectrumFeed() { stop(); }
 
     void start()
@@ -881,7 +970,33 @@ public:
     void stop()
     {
         if(!running_.exchange(false)) return;
+        idle_cv_.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(context_mutex_);
+            if(context_ != nullptr) lws_cancel_service(context_);
+        }
         if(thread_.joinable()) thread_.join();
+    }
+
+    /* Retargets the running feed to a different endpoint without tearing
+     * down its thread or lws_context: closes whatever connection is open
+     * (if any) and reconnects to the new target, honouring its
+     * initial_delay before the first attempt. Avoids the cost and the
+     * leaked-context-per-toggle behaviour of a full stop()+start() cycle
+     * with a second SpectrumFeed instance. */
+    void switch_target(SpectrumFeedConfig new_config)
+    {
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            config_ = std::move(new_config);
+        }
+        has_target_.store(true);
+        switch_requested_.store(true);
+        idle_cv_.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(context_mutex_);
+            if(context_ != nullptr) lws_cancel_service(context_);
+        }
     }
 
     bool consume(std::vector<uint16_t> & bins, SpectrumStatus & status)
@@ -915,11 +1030,16 @@ private:
 
     int on_event(lws * websocket, lws_callback_reasons reason, void * data, size_t length)
     {
+        const char * log_tag;
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            log_tag = config_.log_tag;
+        }
         switch(reason) {
             case LWS_CALLBACK_CLIENT_ESTABLISHED:
                 websocket_ = websocket;
                 set_status(SpectrumStatus::Waiting);
-                qo100::log( "[SPECTRUM] connected to BATC\n");
+                qo100::log("[%s] connected\n", log_tag);
                 break;
             case LWS_CALLBACK_CLIENT_RECEIVE: {
                 if(lws_is_first_fragment(websocket)) {
@@ -944,13 +1064,13 @@ private:
             case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
                 websocket_ = nullptr;
                 set_status(SpectrumStatus::ConnectionError);
-                qo100::log( "[SPECTRUM] connection error: %.*s\n",
+                qo100::log("[%s] connection error: %.*s\n", log_tag,
                     static_cast<int>(length), data != nullptr ? static_cast<const char *>(data) : "");
                 break;
             case LWS_CALLBACK_CLIENT_CLOSED:
                 websocket_ = nullptr;
                 set_status(SpectrumStatus::Disconnected);
-                qo100::log( "[SPECTRUM] disconnected\n");
+                qo100::log("[%s] disconnected\n", log_tag);
                 break;
             default:
                 break;
@@ -966,25 +1086,41 @@ private:
 
     void connect(lws_context * context, const char * protocol_name)
     {
+        SpectrumFeedConfig snapshot;
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            snapshot = config_;
+        }
         lws_client_connect_info info{};
         info.context = context;
-        info.address = "eshail.batc.org.uk";
-        info.port = 443;
-        info.path = "/wb/fft";
+        info.address = snapshot.address.c_str();
+        info.port = snapshot.port;
+        info.path = snapshot.path.c_str();
         info.host = info.address;
-        info.origin = "https://eshail.batc.org.uk";
-        info.ssl_connection = LCCSCF_USE_SSL;
+        info.origin = snapshot.origin.empty() ? nullptr : snapshot.origin.c_str();
+        info.ssl_connection = snapshot.use_ssl ? LCCSCF_USE_SSL : 0;
         info.local_protocol_name = protocol_name;
         info.protocol = protocol_name;
-        info.alpn = "http/1.1";
+        if(snapshot.use_ssl) info.alpn = "http/1.1";
         websocket_ = lws_client_connect_via_info(&info);
+        qo100::log("[%s] connect attempt #%d -> %p\n", snapshot.log_tag,
+                   ++connect_attempts_, static_cast<void *>(websocket_));
     }
 
     void run()
     {
         lws_set_log_level(LLL_ERR | LLL_WARN, nullptr);
-        static const lws_protocols protocols[] = {
-            {"fft_m0dtslivetune", &SpectrumFeed::callback, 0, 64 * 1024, 0, nullptr, 0},
+        /* protocol_name is fixed for the object's lifetime (both BATC and
+         * the local RTL-SDR feed use the same subprotocol) - only the
+         * connection target (address/port/path/ssl) is switchable via
+         * switch_target(), read fresh in connect() on every attempt. */
+        std::string protocol_name;
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            protocol_name = config_.protocol_name;
+        }
+        const lws_protocols protocols[] = {
+            {protocol_name.c_str(), &SpectrumFeed::callback, 0, 64 * 1024, 0, nullptr, 0},
             LWS_PROTOCOL_LIST_TERM
         };
         lws_context_creation_info info{};
@@ -1008,17 +1144,74 @@ private:
             set_status(SpectrumStatus::ConnectionError);
             return;
         }
+        {
+            std::lock_guard<std::mutex> lock(context_mutex_);
+            context_ = context;
+        }
 
-        connect(context, protocols[0].name);
-        auto last_attempt = Clock::now();
+        auto initial_delay = [this] {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            return config_.initial_delay;
+        };
+        /* Nothing is attempted until switch_target() supplies a target. Use
+         * our own timed condition-variable waits while idle: lws_service()
+         * can sleep for its internal poll timeout when the context has no
+         * sockets, regardless of its timeout argument. Calling it while we
+         * wait for a startup/retry deadline delayed local RTL-SDR connects
+         * by roughly 20 seconds on the target Raspberry Pi. */
+        auto delay_start = Clock::now();
+        auto delay = std::chrono::milliseconds(0);
+        bool attempted = true;
+        auto last_attempt = delay_start;
         while(running_.load(std::memory_order_relaxed)) {
-            lws_service(context, 50);
-            const auto now = Clock::now();
-            if(websocket_ == nullptr && now - last_attempt > std::chrono::seconds(3)) {
-                last_attempt = now;
+            if(switch_requested_.exchange(false)) {
+                if(websocket_ != nullptr) {
+                    lws_set_timeout(websocket_, PENDING_TIMEOUT_USER_OK, LWS_TO_KILL_ASYNC);
+                    websocket_ = nullptr;
+                }
+                attempted = false;
+                delay_start = Clock::now();
+                delay = initial_delay();
                 set_status(SpectrumStatus::Connecting);
-                connect(context, protocols[0].name);
+                qo100::log("[SPECTRUM] source switch received; startup delay=%lldms\n",
+                           static_cast<long long>(delay.count()));
             }
+
+            if(!running_.load(std::memory_order_relaxed)) break;
+            if(!has_target_.load(std::memory_order_relaxed)) {
+                std::unique_lock<std::mutex> lock(idle_mutex_);
+                idle_cv_.wait(lock, [this] {
+                    return !running_.load(std::memory_order_relaxed) ||
+                           switch_requested_.load(std::memory_order_relaxed);
+                });
+                continue;
+            }
+
+            if(websocket_ != nullptr) {
+                lws_service(context, 50);
+                continue;
+            }
+
+            const auto now = Clock::now();
+            const Clock::time_point next_attempt = !attempted
+                ? delay_start + delay
+                : last_attempt + std::chrono::seconds(3);
+            if(now < next_attempt) {
+                std::unique_lock<std::mutex> lock(idle_mutex_);
+                idle_cv_.wait_until(lock, next_attempt, [this] {
+                    return !running_.load(std::memory_order_relaxed) ||
+                           switch_requested_.load(std::memory_order_relaxed);
+                });
+                continue;
+            }
+
+            if(!attempted) {
+                attempted = true;
+                qo100::log("[SPECTRUM] startup delay complete\n");
+            }
+            last_attempt = now;
+            set_status(SpectrumStatus::Connecting);
+            connect(context, protocols[0].name);
         }
         /* Deliberately NOT calling lws_context_destroy() here. Two
          * lws_contexts that both set LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT
@@ -1034,13 +1227,25 @@ private:
          * lws_context until the process exits a moment later either way -
          * which is exactly what "the app is exiting, don't bother cleaning
          * up further" already means in a few other places in this
-         * codebase (see AudioOutput::close()). */
+         * codebase (see AudioOutput::close()). Now that a feed is retargeted
+         * in place instead of being stopped/restarted, this only happens
+         * once per feed for the app's whole lifetime rather than once per
+         * toggle. */
         websocket_ = nullptr;
     }
 
+    SpectrumFeedConfig config_;
+    mutable std::mutex config_mutex_;
+    std::atomic<bool> switch_requested_{false};
+    std::atomic<bool> has_target_{false};
+    int connect_attempts_ = 0;
     std::atomic<bool> running_{false};
     std::thread thread_;
+    std::mutex idle_mutex_;
+    std::condition_variable idle_cv_;
     lws * websocket_ = nullptr;
+    mutable std::mutex context_mutex_;
+    lws_context * context_ = nullptr;
     std::vector<uint8_t> message_buffer_;
     bool message_is_binary_ = false;
     mutable std::mutex handoff_mutex_;
@@ -1049,26 +1254,6 @@ private:
     std::atomic<uint64_t> received_frames_{0};
     std::atomic<uint64_t> replaced_frames_{0};
 };
-
-std::vector<uint16_t> make_offline_spectrum(size_t count)
-{
-    std::vector<uint16_t> bins(count);
-    const auto plateau = [](double x, double left, double right, double edge) {
-        const double rise = 1.0 / (1.0 + std::exp(-(x - left) / edge));
-        const double fall = 1.0 / (1.0 + std::exp((x - right) / edge));
-        return rise * fall;
-    };
-    for(size_t index = 0; index < count; ++index) {
-        const double fraction = static_cast<double>(index) / std::max<size_t>(1, count - 1);
-        const double frequency = kSpectrumStartMhz + kSpectrumSpanMhz * fraction;
-        const double beacon = 25000.0 * plateau(frequency, 10490.72, 10492.25, 0.04);
-        const double signal = 20000.0 * plateau(frequency, 10497.10, 10497.45, 0.018);
-        const double noise = 10800.0 + 300.0 * std::sin(frequency * 44.0) +
-                             180.0 * std::sin(frequency * 117.0);
-        bins[index] = static_cast<uint16_t>(std::clamp(noise + beacon + signal, 0.0, 65535.0));
-    }
-    return bins;
-}
 
 class SpectrumTexture {
 public:
@@ -1169,16 +1354,31 @@ struct SpectrumMarker {
     Clock::time_point expires_at{};
 };
 
+SDL_Rect spectrum_source_button_rect(const Layout & layout)
+{
+    return {layout.spectrum_plot.x + 4, layout.spectrum_plot.y + 4, 32, 22};
+}
+
 void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & layout,
                    const SpectrumTexture & texture, SpectrumStatus status,
                    const SpectrumMarker & marker,
                    const qo100::ReceiverStatus & receiver,
-                   double tuned_frequency_mhz)
+                   double tuned_frequency_mhz, bool spectrum_source_local)
 {
     fill_panel(renderer, layout.spectrum_panel);
     set_colour(renderer, {0, 0, 0});
     SDL_RenderFillRect(renderer, &layout.spectrum_plot);
     texture.draw(layout.spectrum_plot);
+
+    const SDL_Rect source_button = spectrum_source_button_rect(layout);
+    const Colour source_colour = spectrum_source_local ? kCyan : kTextDim;
+    set_colour(renderer, {0, 0, 0, 170});
+    SDL_RenderFillRect(renderer, &source_button);
+    set_colour(renderer, source_colour);
+    SDL_RenderDrawRect(renderer, &source_button);
+    text.draw(spectrum_source_local ? "L" : "R",
+              source_button.x + source_button.w / 2,
+              source_button.y + source_button.h / 2, source_colour, 16, true);
 
     float beacon_strength = 0.0F;
     for(const auto & signal : texture.signals()) {
@@ -1321,7 +1521,7 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
 
     if(status != SpectrumStatus::Live) {
         const Colour status_colour = status == SpectrumStatus::ConnectionError ? kRed : kYellow;
-        text.draw(spectrum_status_text(status), layout.spectrum_plot.x + 8,
+        text.draw(spectrum_status_text(status), source_button.x + source_button.w + 8,
                   layout.spectrum_plot.y + 8, status_colour);
     }
     if(!layout.compact) {
@@ -1527,6 +1727,133 @@ void draw_update_popup(SDL_Renderer * renderer, TextCache & text,
             update_popup_button_rect(screen_width, screen_height, kind, true);
         draw_button(renderer, text, close_button, "CLOSE", kRed, 16,
                     false, is_pressed(touch, close_button));
+    }
+}
+
+enum class RtlSdrAskPopupKind { None, Ask, SetupRequired };
+
+SDL_Rect rtlsdr_setup_popup_rect(int screen_width, int screen_height)
+{
+    const int width = std::min(650, screen_width - 80);
+    constexpr int height = 300;
+    return {(screen_width - width) / 2, (screen_height - height) / 2,
+            width, height};
+}
+
+SDL_Rect rtlsdr_setup_popup_button_rect(int screen_width, int screen_height)
+{
+    const SDL_Rect popup = rtlsdr_setup_popup_rect(screen_width, screen_height);
+    return {popup.x + (popup.w - 250) / 2, popup.y + popup.h - 62, 250, 44};
+}
+
+SDL_Rect rtlsdr_ask_popup_rect(int screen_width, int screen_height)
+{
+    const int width = std::min(600, screen_width - 80);
+    constexpr int height = 200;
+    return {(screen_width - width) / 2, (screen_height - height) / 2,
+            width, height};
+}
+
+SDL_Rect rtlsdr_ask_popup_button_rect(int screen_width, int screen_height, bool yes)
+{
+    const SDL_Rect popup = rtlsdr_ask_popup_rect(screen_width, screen_height);
+    constexpr int button_width = 150;
+    constexpr int gap = 20;
+    const int total = button_width * 2 + gap;
+    const int left = popup.x + (popup.w - total) / 2;
+    return {yes ? left : left + button_width + gap, popup.y + popup.h - 62,
+            button_width, 44};
+}
+
+void draw_rtlsdr_ask_popup(SDL_Renderer * renderer, TextCache & text,
+                           int screen_width, int screen_height,
+                           RtlSdrAskPopupKind kind, const TouchState & touch)
+{
+    if(kind == RtlSdrAskPopupKind::None) return;
+
+    const SDL_Rect screen{0, 0, screen_width, screen_height};
+    set_colour(renderer, {0, 0, 0, 180});
+    SDL_RenderFillRect(renderer, &screen);
+
+    if(kind == RtlSdrAskPopupKind::SetupRequired) {
+        const SDL_Rect popup = rtlsdr_setup_popup_rect(screen_width, screen_height);
+        constexpr int kPopupRadius = 16;
+        fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
+        draw_rounded_rect(renderer, popup, kPopupRadius, kYellow);
+        const int centre_x = popup.x + popup.w / 2;
+        text.draw("ONE-TIME SETUP REQUIRED", centre_x, popup.y + 34,
+                  kYellow, 32, true);
+        text.draw("The RTL-SDR needs a one-time system setup.",
+                  centre_x, popup.y + 85, kText, 18, true);
+        text.draw("Tap the button below. A setup window will open.",
+                  centre_x, popup.y + 125, kText, 17, true);
+        text.draw("Follow its instructions; the Pi will restart when finished.",
+                  centre_x, popup.y + 160, kTextDim, 16, true);
+        const SDL_Rect button =
+            rtlsdr_setup_popup_button_rect(screen_width, screen_height);
+        draw_button(renderer, text, button, "START RTL-SDR SETUP", kYellow, 16,
+                    false, is_pressed(touch, button));
+        return;
+    }
+
+    const SDL_Rect popup = rtlsdr_ask_popup_rect(screen_width, screen_height);
+    constexpr int kPopupRadius = 16;
+    fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
+    draw_rounded_rect(renderer, popup, kPopupRadius, kCyan);
+
+    const int centre_x = popup.x + popup.w / 2;
+    text.draw("LOCAL RTL-SDR DETECTED", centre_x, popup.y + 40, kCyan, 32, true);
+    text.draw("Use it for the spectrum display instead of the remote feed?",
+              centre_x, popup.y + 92, kText, 18, true);
+    text.draw("(You can always unplug it and restart the app to use remote.)",
+              centre_x, popup.y + 118, kTextDim, 15, true);
+
+    const SDL_Rect yes_button = rtlsdr_ask_popup_button_rect(screen_width, screen_height, true);
+    const SDL_Rect no_button = rtlsdr_ask_popup_button_rect(screen_width, screen_height, false);
+    draw_button(renderer, text, yes_button, "YES", kGreen, 16,
+                false, is_pressed(touch, yes_button));
+    draw_button(renderer, text, no_button, "NO", kText, 16,
+                false, is_pressed(touch, no_button));
+}
+
+enum class SpectrumSourcePopupKind { None, Success, Failed };
+
+SDL_Rect spectrum_source_popup_rect(int screen_width, int screen_height)
+{
+    const int width = std::min(600, screen_width - 80);
+    constexpr int height = 170;
+    return {(screen_width - width) / 2, (screen_height - height) / 2,
+            width, height};
+}
+
+void draw_spectrum_source_popup(SDL_Renderer * renderer, TextCache & text,
+                                int screen_width, int screen_height,
+                                SpectrumSourcePopupKind kind)
+{
+    if(kind == SpectrumSourcePopupKind::None) return;
+
+    const SDL_Rect screen{0, 0, screen_width, screen_height};
+    set_colour(renderer, {0, 0, 0, 180});
+    SDL_RenderFillRect(renderer, &screen);
+
+    const SDL_Rect popup = spectrum_source_popup_rect(screen_width, screen_height);
+    constexpr int kPopupRadius = 16;
+    fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
+    draw_rounded_rect(renderer, popup, kPopupRadius,
+                      kind == SpectrumSourcePopupKind::Success ? kGreen : kRed);
+
+    const int centre_x = popup.x + popup.w / 2;
+    if(kind == SpectrumSourcePopupKind::Success) {
+        text.draw("LOCAL SPECTRUM SOURCE", centre_x, popup.y + 45, kGreen, 32, true);
+        text.draw("Spectrum is now generated from the local RTL-SDR receiver.",
+                  centre_x, popup.y + 100, kText, 18, true);
+    }
+    else {
+        text.draw("LOCAL SPECTRUM UNAVAILABLE", centre_x, popup.y + 40, kRed, 32, true);
+        text.draw("Could not get a spectrum from the local RTL-SDR receiver.",
+                  centre_x, popup.y + 90, kText, 18, true);
+        text.draw("Check it is plugged in. Reverted to the remote feed.",
+                  centre_x, popup.y + 118, kText, 18, true);
     }
 }
 
@@ -3035,7 +3362,6 @@ bool save_screenshot(SDL_Renderer * renderer, int width, int height, const std::
 
 struct Options {
     bool demo = false;
-    bool offline_spectrum = false;
     bool no_tuner = false;
     int seconds = 0;
     std::string screenshot;
@@ -3046,8 +3372,6 @@ Options parse_options(int argc, char ** argv)
     Options options;
     for(int i = 1; i < argc; ++i) {
         if(std::strcmp(argv[i], "--demo") == 0) options.demo = true;
-        else if(std::strcmp(argv[i], "--offline-spectrum") == 0)
-            options.offline_spectrum = true;
         else if(std::strcmp(argv[i], "--no-tuner") == 0)
             options.no_tuner = true;
         else if(std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc)
@@ -3429,18 +3753,47 @@ int main(int argc, char ** argv)
         return 1;
     }
 
-    SpectrumFeed spectrum_feed;
+    /* The choice between the remote BATC feed and a local RTL-SDR dongle is
+     * made once at boot (detected on USB, confirmed by the user via
+     * rtlsdr_ask_popup below) rather than as an ongoing runtime toggle -
+     * switching a live feed back and forth mid-session turned out to be a
+     * deep rabbit hole (leaked lws_contexts, subprocess relaunch latency,
+     * timing races against this app's own periodic stalls) for a choice
+     * that in practice is really about which hardware is plugged in, not
+     * something that needs to change while the app is running. */
+    SpectrumFeed spectrum_feed(batc_spectrum_config());
+    qo100::RtlSdrProcess rtl_sdr_process(repository_root);
+    bool spectrum_source_local = false;
+    bool spectrum_source_switching = false;
+    auto spectrum_source_switch_started_at = Clock::time_point{};
+    SpectrumSourcePopupKind spectrum_source_popup = SpectrumSourcePopupKind::None;
+    auto spectrum_source_popup_started_at = Clock::time_point{};
     SpectrumStatus spectrum_status = SpectrumStatus::Connecting;
     std::vector<uint16_t> spectrum_bins;
     bool spectrum_ready = false;
-    if(options.offline_spectrum) {
-        spectrum_bins = make_offline_spectrum(2048);
-        spectrum_texture->update(spectrum_bins);
-        spectrum_status = SpectrumStatus::Live;
-        spectrum_ready = true;
+    const bool rtlsdr_present = detect_rtlsdr_present();
+    RtlSdrAskPopupKind rtlsdr_ask_popup = RtlSdrAskPopupKind::None;
+    /* start() spins up the feed's thread/lws_context but it stays idle -
+     * no connection is attempted - until switch_target() gives it somewhere
+     * to connect to (see SpectrumFeed::run()). This has to be called here
+     * unconditionally, before the dongle question is even asked, because
+     * switch_target() needs an already-running thread to hand off to; the
+     * feed genuinely does nothing over the network until a target is set,
+     * whether that's immediately below (no dongle) or from the popup's Yes
+     * handler once the user answers. */
+    spectrum_feed.start();
+    if(rtlsdr_present) {
+        qo100::log("[RTLSDR] local RTL-SDR detected on USB (VID:PID 0bda:2838/2832)\n");
+        if(rtlsdr_system_setup_complete()) {
+            rtlsdr_ask_popup = RtlSdrAskPopupKind::Ask;
+        }
+        else {
+            rtlsdr_ask_popup = RtlSdrAskPopupKind::SetupRequired;
+            qo100::log("[RTLSDR] one-time system setup required; using remote until installed\n");
+        }
     }
     else {
-        spectrum_feed.start();
+        spectrum_feed.switch_target(batc_spectrum_config());
     }
     qo100::ChatClient chat_client;
     chat_client.start();
@@ -4078,6 +4431,49 @@ int main(int argc, char ** argv)
                     }
                     continue;
                 }
+                if(rtlsdr_ask_popup == RtlSdrAskPopupKind::SetupRequired) {
+                    const SDL_Rect button =
+                        rtlsdr_setup_popup_button_rect(display.width, display.height);
+                    if(point_in_rect(x, y, button)) {
+                        if(launch_rtlsdr_setup_terminal(repository_root)) {
+                            rtlsdr_ask_popup = RtlSdrAskPopupKind::None;
+                            spectrum_feed.switch_target(batc_spectrum_config());
+                            SDL_MinimizeWindow(window);
+                            qo100::log("[RTLSDR] opened one-time setup terminal\n");
+                        }
+                        else {
+                            qo100::log("[RTLSDR] could not open setup terminal\n");
+                        }
+                    }
+                    continue;
+                }
+                if(rtlsdr_ask_popup == RtlSdrAskPopupKind::Ask) {
+                    const SDL_Rect yes_button =
+                        rtlsdr_ask_popup_button_rect(display.width, display.height, true);
+                    const SDL_Rect no_button =
+                        rtlsdr_ask_popup_button_rect(display.width, display.height, false);
+                    if(point_in_rect(x, y, yes_button)) {
+                        rtlsdr_ask_popup = RtlSdrAskPopupKind::None;
+                        if(rtl_sdr_process.start()) {
+                            spectrum_feed.switch_target(local_spectrum_config());
+                            spectrum_source_local = true;
+                            spectrum_source_switching = true;
+                            spectrum_source_switch_started_at = Clock::now();
+                            qo100::log("[SPECTRUM] using local RTL-SDR source\n");
+                        }
+                        else {
+                            spectrum_feed.switch_target(batc_spectrum_config());
+                            spectrum_source_popup = SpectrumSourcePopupKind::Failed;
+                            spectrum_source_popup_started_at = Clock::now();
+                        }
+                    }
+                    else if(point_in_rect(x, y, no_button)) {
+                        rtlsdr_ask_popup = RtlSdrAskPopupKind::None;
+                        spectrum_feed.switch_target(batc_spectrum_config());
+                        qo100::log("[SPECTRUM] using remote BATC source\n");
+                    }
+                    continue;
+                }
                 if(update_popup == UpdatePopupKind::Available) {
                     const SDL_Rect yes_button = update_popup_button_rect(
                         display.width, display.height, update_popup, true);
@@ -4625,13 +5021,53 @@ int main(int argc, char ** argv)
             tuner_popup = TunerPopupKind::None;
             qo100::log("[TUNER_USB] detected popup closed after 3 seconds\n");
         }
+        if(spectrum_source_popup != SpectrumSourcePopupKind::None &&
+           Clock::now() - spectrum_source_popup_started_at >= std::chrono::seconds(3)) {
+            spectrum_source_popup = SpectrumSourcePopupKind::None;
+        }
 
         chat_client.consume();
 
-        if(!options.offline_spectrum &&
-           spectrum_feed.consume(spectrum_bins, spectrum_status)) {
+        if(spectrum_feed.consume(spectrum_bins, spectrum_status)) {
             spectrum_texture->update(spectrum_bins);
             spectrum_ready = true;
+        }
+
+        if(spectrum_source_switching) {
+            if(spectrum_status == SpectrumStatus::Live) {
+                spectrum_source_switching = false;
+                spectrum_source_popup = SpectrumSourcePopupKind::Success;
+                spectrum_source_popup_started_at = Clock::now();
+                qo100::log("[SPECTRUM] local RTL-SDR source is live\n");
+            }
+            /* Ignore ConnectionError here - rtl-sdr-server takes a couple of
+             * seconds to open the dongle and start listening, so the very
+             * first connection attempt racing that is normal, not fatal. The
+             * feed's own run() loop already retries every 3s on its own;
+             * only give up once that's had a real chance to succeed.
+             *
+             * The real failure signal is the subprocess itself exiting (no
+             * dongle plugged in causes rtl-sdr-server to exit quickly) -
+             * check that first and fail fast on it. The wall-clock ceiling
+             * below is only a last-resort safety net, not the primary
+             * signal: this app's main loop can genuinely stall for 30s+ at
+             * a time (e.g. a weak/lossy uplink slowing the remote BATC
+             * feed's reconnects), which eats into any fixed deadline set
+             * up-front before the stall happens - remote (R) has no
+             * deadline at all and just keeps retrying forever, which is why
+             * it "always works" where a short L deadline previously didn't. */
+            else if(!rtl_sdr_process.running() ||
+                    Clock::now() - spectrum_source_switch_started_at >
+                        std::chrono::seconds(60)) {
+                spectrum_feed.switch_target(batc_spectrum_config());
+                spectrum_source_local = false;
+                spectrum_source_switching = false;
+                spectrum_status = SpectrumStatus::Connecting;
+                spectrum_source_popup = SpectrumSourcePopupKind::Failed;
+                spectrum_source_popup_started_at = Clock::now();
+                qo100::log(
+                    "[SPECTRUM] local RTL-SDR source failed to come up; reverted to remote\n");
+            }
         }
 
         if(receiver_enabled && receiver_client.consume_status(receiver_status)) {
@@ -4723,7 +5159,10 @@ int main(int argc, char ** argv)
             }
         }
         else if(!update_prompt_shown && update_checker.available() &&
-                tuner_popup == TunerPopupKind::None) {
+                tuner_popup == TunerPopupKind::None &&
+                rtlsdr_ask_popup == RtlSdrAskPopupKind::None &&
+                spectrum_source_popup == SpectrumSourcePopupKind::None &&
+                !spectrum_source_switching) {
             update_prompt_shown = true;
             update_popup = UpdatePopupKind::Available;
             qo100::log("[UPDATE] prompting user\n");
@@ -4910,7 +5349,7 @@ int main(int argc, char ** argv)
         else {
             draw_spectrum(renderer, text, layout, *spectrum_texture,
                           spectrum_status, spectrum_marker, receiver_status,
-                          selected_frequency_mhz);
+                          selected_frequency_mhz, spectrum_source_local);
             fill_panel(renderer, layout.video_panel);
             set_colour(renderer, kPanel);
             SDL_RenderFillRect(renderer, &layout.video_content);
@@ -4932,10 +5371,17 @@ int main(int argc, char ** argv)
                         current_tune_symbol_rate_ksps,
                         video_codec, audio_codec, scan_active, touch);
         }
-        draw_tuner_popup(renderer, text, display.width, display.height,
-                         tuner_popup, tuner_product, touch);
+        /* Draw modal popups from lowest to highest input priority. This keeps
+         * the visible topmost popup and the popup that receives a click in
+         * agreement. */
+        draw_spectrum_source_popup(renderer, text, display.width, display.height,
+                                   spectrum_source_popup);
         draw_update_popup(renderer, text, display.width, display.height,
                           update_popup, touch);
+        draw_rtlsdr_ask_popup(renderer, text, display.width, display.height,
+                              rtlsdr_ask_popup, touch);
+        draw_tuner_popup(renderer, text, display.width, display.height,
+                         tuner_popup, tuner_product, touch);
         SDL_RenderPresent(renderer);
 
         const auto now = Clock::now();
@@ -5006,6 +5452,7 @@ int main(int argc, char ** argv)
     SDL_StopTextInput();
     chat_client.stop();
     spectrum_feed.stop();
+    rtl_sdr_process.stop();
     video_decoder.stop();
     const bool audio_closed_cleanly = audio_output.close();
     receiver_client.stop();
@@ -5016,7 +5463,7 @@ int main(int argc, char ** argv)
         SDL_RenderClear(renderer);
         draw_spectrum(renderer, text, layout, *spectrum_texture,
                       spectrum_status, spectrum_marker, receiver_status,
-                      selected_frequency_mhz);
+                      selected_frequency_mhz, spectrum_source_local);
         fill_panel(renderer, layout.video_panel);
         set_colour(renderer, kPanel);
         SDL_RenderFillRect(renderer, &layout.video_content);

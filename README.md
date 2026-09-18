@@ -18,6 +18,42 @@ touch — no keyboard or mouse needed once it's set up.
 </tr>
 </table>
 
+## 🆕 Local spectrum with an RTL-SDR
+
+The spectrum display can now be generated locally with an RTL-SDR instead
+of using the remote BATC spectrum feed. At startup, the app detects compatible
+Realtek RTL2832U sticks (`0bda:2838` or `0bda:2832`) and asks whether to use
+the local receiver. This includes the usual USB identity used by RTL-SDR Blog
+V3 and V4 sticks; unusually programmed or differently branded devices may
+use another identity and are not detected yet.
+
+Choose **YES** to start the bundled spectrum server. It scans the complete
+QO-100 wideband transponder in overlapping sections and supplies the spectrum
+directly to the touchscreen app. Choose **NO** to keep using BATC. If the
+local server cannot start, the app reports the failure and returns to the
+remote feed automatically. The RTL-SDR provides the spectrum only — the
+MiniTiouner still receives and decodes DATV signals.
+
+An RTL-SDR cannot power the satellite LNB. The local-spectrum connection
+therefore needs an **external bias tee/power injector**, normally supplying
+**18 V for the horizontally polarised QO-100 wideband transponder**. Use a
+proper satellite bias tee that passes RF to the RTL-SDR while blocking its
+DC supply from reaching the stick. If the LNB is already powered elsewhere
+in the receive system, do not add a second power source.
+
+The setup script installs the required USB permissions and reserves RTL2832U
+devices for SDR use by blacklisting Linux's conflicting DVB-TV driver. This
+means those sticks will no longer work as conventional Linux DVB-T tuners on
+that Pi. A reboot at the end of setup applies the change.
+
+**Existing installations:** rerun the full installer once to enable local
+RTL-SDR support:
+
+```bash
+cd ~/DATVreceiver
+scripts/initialSetup.sh
+```
+
 ## 🆕 What's NEW!!! — Manual Tune
 
 A new **TUNE** page lets you dial in any frequency the MiniTiouner can
@@ -46,6 +82,11 @@ signal, or anything else off the beaten path.
   (Bookworm or newer) with a desktop.
 - A MiniTiouner tuner. Tested with the **Pro TS2** and the **S** — other
   variants (Express, original) likely work too but haven't been tried.
+- Optionally, an RTL2832U RTL-SDR stick for a locally generated spectrum.
+  Without one, the app continues to use the BATC spectrum feed. The RTL-SDR
+  cannot power an LNB, so local reception also requires a suitable external
+  bias tee/power injector (normally 18 V for the QO-100 wideband transponder)
+  unless the LNB is already powered elsewhere.
 - A touchscreen — either the official 800x480 Raspberry Pi touchscreen or
   a 1024x600 DSI panel (switchable any time from **SET** in the app).
 - Something to play audio through. The Pi 5 has no 3.5mm audio jack (the
@@ -55,9 +96,8 @@ signal, or anything else off the beaten path.
   OS's Bluetooth settings and it just works. A USB audio adapter or an
   HDMI-connected display with speakers works too, if you'd rather avoid
   Bluetooth.
-- Internet access on the Pi — needed for setup, and also ongoing during
-  normal use (the spectrum display and chat both come from live internet
-  feeds, separate from the tuner itself).
+- Internet access on the Pi — needed for setup and chat. It is also needed
+  for the spectrum unless you select a local RTL-SDR at startup.
 
 ## Setup, step by step
 
@@ -82,14 +122,15 @@ scripts/initialSetup.sh
 The setup script does everything: installs all the software this app needs,
 downloads one small third-party library it depends on, builds the app, sets
 it up to start automatically at boot, and **reboots the Pi at the end** —
-that last part matters, the MiniTiouner's USB permissions don't reliably
-take effect without it. It will ask for your password along the way, and
-asks for one Enter keypress up front to confirm before it starts. Safe to
+that last part matters because USB permissions and the RTL-SDR driver
+blacklist take effect reliably after reboot. It will ask for your password
+along the way, and asks for one Enter keypress up front to confirm before it
+starts. Safe to
 re-run (from `cd ~/DATVreceiver && scripts/initialSetup.sh`) if something
 goes wrong partway through.
 
-Plug the MiniTiouner into a USB port before or during this step, if it
-isn't already.
+Plug the MiniTiouner and optional RTL-SDR into USB ports before or during
+this step, if they are not already connected.
 
 ### 2. Check it worked
 
@@ -106,6 +147,13 @@ MiniTiouner detected on USB" on screen: check the tuner is properly plugged
 in. If it doesn't lock onto a signal: make sure the antenna/LNB is actually
 pointed at QO-100, and check the **SET** page for the LNB settings (LO
 offset, bias voltage) match your hardware.
+
+If an RTL-SDR is connected, the app asks whether to use it after startup.
+If it reports that the local spectrum is unavailable, check
+`qo100_sdl/rtl-sdr-server.log`. `LIBUSB_ERROR_BUSY` means the Linux DVB driver
+or another SDR program owns the stick; rerun `scripts/initialSetup.sh` and
+reboot. `LIBUSB_ERROR_ACCESS` means its USB permissions are missing; rerunning
+the installer and rebooting fixes that as well.
 
 ## Updating
 
@@ -129,6 +177,8 @@ before rebuilding), safe to re-run any time.
 ## Using the app
 
 - **Tap anywhere on the spectrum display** to tune to that signal.
+- The small **L** or **R** marker on the spectrum identifies the selected
+  source: local RTL-SDR or remote BATC.
 - **CHAT** — opens the QO-100 wideband chat.
 - **SET** — LNB settings (local oscillator offset, bias voltage), screen
   resolution, what **EXIT** does (see below), and whether the app auto
@@ -168,9 +218,10 @@ scripts/uninstall.sh
 ```
 
 Undoes everything the setup steps above did — stops and removes both
-background services, the desktop shortcut, the MiniTiouner udev rule, and
-the UDP-buffer system tweak — then **deletes the `DATVreceiver` folder
-itself**, screenshots and saved settings included. No confirmation prompt;
+background services, the desktop shortcut, MiniTiouner/RTL-SDR USB rules,
+the RTL-SDR driver blacklist, and the UDP-buffer system tweak — then
+**deletes the `DATVreceiver` folder itself**, screenshots and saved settings
+included. No confirmation prompt;
 back up anything you want to keep first. Installed software packages (apt)
 are left alone — see the script's own comments for why.
 
@@ -180,6 +231,8 @@ are left alone — see the script's own comments for why.
 |---|---|
 | `longmynd_ws/` | The tuner driver (a modified version of an existing open-source project), talks to the MiniTiouner over USB. |
 | `qo100_sdl/` | The actual app — the touchscreen UI you see and use. |
+| `qo100_sdl/tools/rtl-sdr-server` | Bundled local RTL-SDR spectrum server. |
+| `rtl-sdr-server-source/` | Source, tests, documentation, and build tooling for the bundled spectrum server. |
 | `screenshots/` | Where the photo album keeps screenshots. |
 | `scripts/` | The setup scripts described above. |
 
