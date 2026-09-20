@@ -8,10 +8,12 @@
 namespace qo100 {
 
 struct ReceiverSettings {
-    /* The LNB local-oscillator frequency as CONFIGURED by the user (nominal,
-     * normally 9750.0). This is what the settings screen edits, and what the
-     * local RTL-SDR spectrum is built around. It is never overwritten by the
-     * automatic calibration - see lnb_lo_calibrated_mhz below. */
+    /* The NOMINAL LNB local-oscillator frequency, 9750.0 MHz. It is no longer
+     * editable on the settings screen (the real LO is measured by the automatic
+     * calibration instead); it stays in settings.json only so that an unusual
+     * LNB can still be set by editing the file by hand. The local RTL-SDR
+     * spectrum is built around it, and it is what tuning uses until a
+     * calibration exists. */
     double lnb_lo_mhz = 9750.0;
     /* The LNB's REAL oscillator frequency, as measured by the automatic LNB
      * calibration (lnb_calibration.h): the beacon is at exactly 10491.500 MHz

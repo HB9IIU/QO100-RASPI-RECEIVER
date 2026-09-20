@@ -113,7 +113,7 @@ public:
      * packets inside the window means the attempt is not trustworthy. */
     static constexpr size_t kMinSamplesPerAttempt = 3;
     static constexpr std::chrono::milliseconds kPause{1000};
-    /* A result further than this from the configured LO is rejected as
+    /* A result further than this from the nominal LO is rejected as
      * implausible (wrong LO setting, or something else than the beacon
      * locked). Real LNBs are tens of kHz off, not hundreds. */
     static constexpr double kMaxPlausibleDeviationMhz = 0.6;
@@ -137,8 +137,8 @@ public:
     };
 
     /* Begin a run. acquisition_if_khz / symbol_rate_ksps are only used to
-     * obtain lock (see the file comment); nominal_lo_mhz is the currently
-     * configured LO, used solely for the plausibility check. */
+     * obtain lock (see the file comment); nominal_lo_mhz is the nominal
+     * LO (9750 MHz), used solely for the plausibility check. */
     void start(Clock::time_point now, long acquisition_if_khz,
                long symbol_rate_ksps, double nominal_lo_mhz)
     {
@@ -181,7 +181,7 @@ public:
     const std::string & failure_reason() const { return failure_reason_; }
     /* The measured real LO. Meaningful only when outcome() == Success. */
     double result_lo_mhz() const { return result_lo_mhz_; }
-    /* Deviation of the result from the configured nominal LO, in kHz. */
+    /* Deviation of the result from the nominal LO, in kHz. */
     double deviation_khz() const { return (result_lo_mhz_ - nominal_lo_mhz_) * 1000.0; }
     /* 1-based number of the attempt in progress (kAttempts once finished). */
     int attempt_number() const

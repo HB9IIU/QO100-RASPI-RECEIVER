@@ -1884,12 +1884,13 @@ SDL_Rect settings_autostart_card_rect(int width)
     return {exit_card.x, exit_card.y + exit_card.h + gap, exit_card.w, height};
 }
 
-SDL_Rect settings_lo_button_rect(int width, bool increment)
+/* The read-only LNB LO box (it takes the place of the old -/+ editor). */
+SDL_Rect settings_lo_value_rect(int width)
 {
     const SDL_Rect card = settings_receiver_card_rect(width);
     if(settings_compact(width))
-        return {card.x + (increment ? card.w - 60 : 16), card.y + 70, 44, 38};
-    return {card.x + (increment ? 228 : 24), card.y + 78, 48, 48};
+        return {card.x + 16, card.y + 70, card.w - 32, 38};
+    return {card.x + 24, card.y + 78, card.w - 48, 48};
 }
 
 SDL_Rect settings_voltage_rect(int width, int index)
@@ -1984,7 +1985,7 @@ void draw_choice_button(SDL_Renderer * renderer, TextCache & text,
 }
 
 void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
-                        int width, int height, int lo_centimhz,
+                        int width, int height, double lo_display_mhz,
                         int voltage_choice, int display_choice,
                         int exit_behaviour_choice,
                         const std::string & tuner_product,
@@ -2009,27 +2010,27 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                 lnb_cal_done ? kGreen : kYellow, compact ? 12 : 14, false,
                 is_pressed(touch, cal_button));
     const int lo_label_y = compact ? receiver_card.y + 46 : receiver_card.y + 50;
-    text.draw("LNB LO Offset (MHz)", receiver_card.x + (compact ? 16 : 24), lo_label_y,
+    /* The LO is no longer edited by hand: it is what the automatic LNB
+     * calibration measured, or the nominal 9750 MHz until that has been done.
+     * Shown, not editable - the LNB CAL button in the card header is the way
+     * to (re)measure it. */
+    text.draw("LNB LO (MHz)", receiver_card.x + (compact ? 16 : 24), lo_label_y,
               kText, label_size);
-    const SDL_Rect minus_button = settings_lo_button_rect(width, false);
-    const SDL_Rect plus_button = settings_lo_button_rect(width, true);
-    draw_button(renderer, text, minus_button, "-", kText, compact ? 16 : 20,
-                false, is_pressed(touch, minus_button));
-    const SDL_Rect lo_value{minus_button.x + minus_button.w + (compact ? 8 : 8),
-                            minus_button.y,
-                            plus_button.x - (minus_button.x + minus_button.w) - 16,
-                            minus_button.h};
+    const SDL_Rect lo_value = settings_lo_value_rect(width);
     set_colour(renderer, kBackground);
     SDL_RenderFillRect(renderer, &lo_value);
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &lo_value);
-    char lo_text[16];
-    std::snprintf(lo_text, sizeof(lo_text), "%.2f", lo_centimhz / 100.0);
-    text.draw(lo_text, lo_value.x + lo_value.w / 2,
-              lo_value.y + lo_value.h / 2, kText, compact ? 16 : 20, true, true);
-    draw_button(renderer, text, plus_button, "+", kText, compact ? 16 : 20,
-                false, is_pressed(touch, plus_button));
-
+    char lo_text[24];
+    std::snprintf(lo_text, sizeof(lo_text), "%.4f", lo_display_mhz);
+    text.draw(lo_text, lo_value.x + 14, lo_value.y + lo_value.h / 2 - (compact ? 9 : 11),
+              kText, compact ? 16 : 20, false, true);
+    {
+        const std::string caption = lnb_cal_done ? "calibrated" : "nominal - not calibrated";
+        const int caption_width = text.measure(caption, 14).first;
+        text.draw(caption, lo_value.x + lo_value.w - 12 - caption_width,
+                  lo_value.y + lo_value.h / 2 - 8, lnb_cal_done ? kGreen : kYellow, 14, false);
+    }
     const int voltage_label_y = compact ? receiver_card.y + 122 : receiver_card.y + 132;
     text.draw("LNB Bias Voltage", receiver_card.x + (compact ? 16 : 24), voltage_label_y,
               kText, label_size);
@@ -2428,11 +2429,11 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         /* --- finished, measured --- */
         line("LNB LO MEASURED", kGreen, title_size, 10);
         char result[128];
-        std::snprintf(result, sizeof(result), "%.4f MHz  (%+.1f kHz from configured %.2f MHz)",
+        std::snprintf(result, sizeof(result), "%.4f MHz  (%+.1f kHz from nominal %.2f MHz)",
                       cal.result_lo_mhz(), cal.deviation_khz(), settings.lnb_lo_mhz);
         line(result, kText, mono_big_size, 12, true);
         paragraph(spectrum_local
-                      ? "Stored. The local RTL-SDR spectrum still uses the configured LO until "
+                      ? "Stored. The local RTL-SDR spectrum still uses the nominal LO until "
                         "it is calibrated as well."
                       : "Applied: taps on the spectrum now tune to the true carrier frequency.",
                   kText, body_size);
@@ -2455,13 +2456,13 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
             std::snprintf(stored, sizeof(stored), "Measured LNB LO:  %.4f MHz",
                           settings.lnb_lo_calibrated_mhz);
             line(stored, kText, mono_big_size, 8, true);
-            std::snprintf(stored, sizeof(stored), "Deviation from configured %.2f MHz:  %+.1f kHz",
+            std::snprintf(stored, sizeof(stored), "Deviation from nominal %.2f MHz:  %+.1f kHz",
                           settings.lnb_lo_mhz,
                           (settings.lnb_lo_calibrated_mhz - settings.lnb_lo_mhz) * 1000.0);
             line(stored, kText, mono_size, 8, true);
             line("Measured on " + settings.lnb_lo_calibrated_at, kTextDim, body_size, 12);
             if(spectrum_local)
-                paragraph("The local RTL-SDR spectrum still uses the configured LO until it is "
+                paragraph("The local RTL-SDR spectrum still uses the nominal LO until it is "
                           "calibrated as well.", kTextDim, body_size);
         }
         else {
@@ -4246,13 +4247,6 @@ int main(int argc, char ** argv)
     AppPage app_page = AppPage::Main;
     bool fullscreen_video = false;
     bool have_video_frame = false;
-    /* In hundredths of a MHz (10kHz steps) rather than a double, so
-     * repeated +/- taps can't drift from floating-point rounding - LNB LO
-     * offsets often need correcting by under a MHz (a real report: an LNB
-     * 150kHz off nominal, unreachable when this only stepped by whole
-     * MHz). */
-    int settings_lo_centimhz =
-        static_cast<int>(std::lround(receiver_settings.lnb_lo_mhz * 100.0));
     int settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
     /* Reflects the resolution actually resolved/clamped for this run
@@ -4340,30 +4334,16 @@ int main(int argc, char ** argv)
     std::string tune_toast_text;
     auto tune_toast_started_at = Clock::time_point{};
     TouchState touch;
-    /* Resting a finger on the LNB LO Offset -/+ buttons repeats the step
-     * instead of requiring one tap per 10kHz - useful now that offset can
-     * be fine-tuned (see settings_lo_centimhz), where correcting a LO by
-     * e.g. 150kHz would otherwise take 15 separate taps. 0 = not held,
-     * -1/+1 = which button. */
-    int lo_hold_direction = 0;
-    auto lo_next_repeat_at = Clock::time_point{};
-    constexpr auto kLoRepeatInitialDelay = std::chrono::milliseconds(450);
-    constexpr auto kLoRepeatInterval = std::chrono::milliseconds(110);
-    const auto step_lo_centimhz = [&](int direction) {
-        settings_lo_centimhz = direction < 0
-            ? std::max(100000, settings_lo_centimhz - 1)
-            : std::min(2000000, settings_lo_centimhz + 1);
-    };
     /* THE LO USED TO CONVERT BETWEEN RF AND IF (IF = RF - LO) for every tune,
-     * marker and scan step. Not simply the configured LO:
+     * marker and scan step. Not simply the nominal LO:
      *  - remote BATC spectrum: its frequency axis is true RF, so the LNB's
      *    real (calibrated) LO is the right one - if a calibration exists;
      *  - local RTL-SDR spectrum: that display is built around the NOMINAL
-     *    configured LO, so the LNB error cancels between display and tuner
+     *    nominal LO, so the LNB error cancels between display and tuner
      *    and the nominal LO is still the consistent choice. It keeps that
      *    until the RTL correction is calibrated as well (a later step);
      *    using the calibrated LO there now would make every tap ~30 kHz off.
-     * Uncalibrated: always the configured LO, exactly as before. */
+     * Uncalibrated: always the nominal LO (9750 MHz), exactly as before. */
     const auto effective_lo_mhz = [&]() -> double {
         if(qo100::lnb_calibrated(receiver_settings) && !spectrum_source_local)
             return receiver_settings.lnb_lo_calibrated_mhz;
@@ -4659,21 +4639,7 @@ int main(int argc, char ** argv)
                 touch.active = true;
                 touch.x = event.button.x;
                 touch.y = event.button.y;
-                if(app_page == AppPage::Settings) {
-                    if(point_in_rect(touch.x, touch.y,
-                                     settings_lo_button_rect(display.width, false))) {
-                        lo_hold_direction = -1;
-                        step_lo_centimhz(-1);
-                        lo_next_repeat_at = Clock::now() + kLoRepeatInitialDelay;
-                    }
-                    else if(point_in_rect(touch.x, touch.y,
-                                          settings_lo_button_rect(display.width, true))) {
-                        lo_hold_direction = 1;
-                        step_lo_centimhz(1);
-                        lo_next_repeat_at = Clock::now() + kLoRepeatInitialDelay;
-                    }
-                }
-                else if(app_page == AppPage::Tune && !fullscreen_video) {
+                if(app_page == AppPage::Tune && !fullscreen_video) {
                     /* Touchscreens have no scroll wheel, so a digit is
                      * adjusted by vertical drag instead - drag up to count
                      * up, down to count down, same sense as the chat
@@ -4740,7 +4706,6 @@ int main(int argc, char ** argv)
             else if(event.type == SDL_MOUSEBUTTONUP &&
                     event.button.button == SDL_BUTTON_LEFT) {
                 touch.active = false;
-                lo_hold_direction = 0;
                 tune_digit_dragging = false;
             }
             if(event.type == SDL_QUIT) {
@@ -4966,19 +4931,6 @@ int main(int argc, char ** argv)
                         qo100::log("[LNB_CAL] page opened from settings\n");
                     }
                     else if(point_in_rect(x, y, settings_save_rect(display.width))) {
-                        const double previous_lo_mhz = receiver_settings.lnb_lo_mhz;
-                        receiver_settings.lnb_lo_mhz = settings_lo_centimhz / 100.0;
-                        /* A calibration measured the real LO of THIS LNB. If
-                         * the user has just typed a different LO it no longer
-                         * describes what they are using (a new LNB, say), so
-                         * discard it - the startup prompt then asks again. */
-                        if(std::fabs(receiver_settings.lnb_lo_mhz - previous_lo_mhz) > 1e-4 &&
-                           qo100::lnb_calibrated(receiver_settings)) {
-                            receiver_settings.lnb_lo_calibrated_mhz = 0.0;
-                            receiver_settings.lnb_lo_calibrated_at.clear();
-                            lnb_cal_prompt_shown = false;
-                            qo100::log("[LNB_CAL] LNB LO setting edited; calibration discarded\n");
-                        }
                         receiver_settings.lnb_voltage_enabled =
                             settings_voltage_choice != 0;
                         receiver_settings.lnb_voltage_horizontal =
@@ -5249,8 +5201,6 @@ int main(int argc, char ** argv)
                 }
                 const SDL_Rect settings_button = status_button_rect(layout, 1);
                 if(point_in_rect(x, y, settings_button)) {
-                    settings_lo_centimhz = static_cast<int>(
-                        std::lround(receiver_settings.lnb_lo_mhz * 100.0));
                     settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
                         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
                     settings_display_choice = display.width == 800 ? 1 : 0;
@@ -5622,11 +5572,6 @@ int main(int argc, char ** argv)
         if(lnb_cal_was_running && !lnb_cal.running()) lnb_cal_finished();
         lnb_cal_was_running = lnb_cal.running();
 
-        if(lo_hold_direction != 0 && Clock::now() >= lo_next_repeat_at) {
-            step_lo_centimhz(lo_hold_direction);
-            lo_next_repeat_at = Clock::now() + kLoRepeatInterval;
-        }
-
         if(update_popup == UpdatePopupKind::Installing && !update_installer.poll()) {
             if(update_installer.succeeded()) {
                 /* Just exit cleanly, same as EXIT's own "Restart" mode -
@@ -5810,7 +5755,10 @@ int main(int argc, char ** argv)
         SDL_RenderSetViewport(renderer, &content_viewport);
         if(app_page == AppPage::Settings) {
             draw_settings_page(renderer, text, display.width, display.height,
-                               settings_lo_centimhz, settings_voltage_choice,
+                               qo100::lnb_calibrated(receiver_settings)
+                                   ? receiver_settings.lnb_lo_calibrated_mhz
+                                   : receiver_settings.lnb_lo_mhz,
+                               settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
                                tuner_product, receiver_client.monitor_connected(),
                                can_use_1024x600, qo100::lnb_calibrated(receiver_settings),
