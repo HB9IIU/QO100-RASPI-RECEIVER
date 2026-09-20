@@ -1765,7 +1765,7 @@ SDL_Rect rtlsdr_setup_popup_button_rect(int screen_width, int screen_height)
 SDL_Rect rtlsdr_ask_popup_rect(int screen_width, int screen_height)
 {
     const int width = std::min(600, screen_width - 80);
-    constexpr int height = 200;
+    constexpr int height = 240;
     return {(screen_width - width) / 2, (screen_height - height) / 2,
             width, height};
 }
@@ -1821,8 +1821,10 @@ void draw_rtlsdr_ask_popup(SDL_Renderer * renderer, TextCache & text,
     text.draw("LOCAL RTL-SDR DETECTED", centre_x, popup.y + 40, kCyan, 32, true);
     text.draw("Use it for the spectrum display instead of the remote feed?",
               centre_x, popup.y + 92, kText, 18, true);
+    text.draw("YES = field use WITHOUT internet. Remote VLC will not work.",
+              centre_x, popup.y + 124, kYellow, 16, true);
     text.draw("(You can always unplug it and restart the app to use remote.)",
-              centre_x, popup.y + 118, kTextDim, 15, true);
+              centre_x, popup.y + 152, kTextDim, 15, true);
 
     const SDL_Rect yes_button = rtlsdr_ask_popup_button_rect(screen_width, screen_height, true);
     const SDL_Rect no_button = rtlsdr_ask_popup_button_rect(screen_width, screen_height, false);
@@ -3863,13 +3865,22 @@ int main(int argc, char ** argv)
     auto longmynd = std::make_unique<qo100::LongmyndProcess>(repository_root);
     qo100::LongmyndClient receiver_client;
     bool receiver_enabled = false;
-    if(use_tuner) {
+    auto start_longmynd = [&]() {
         receiver_enabled = longmynd->start(beacon_frequency_khz, beacon_symbol_rate_ksps);
         if(receiver_enabled) {
             receiver_client.start();
             receiver_client.send_voltage(receiver_settings.lnb_voltage_enabled,
                                          receiver_settings.lnb_voltage_horizontal);
         }
+    };
+    /* Longmynd is told where to send the transport stream only once, on its
+     * command line. With a stick plugged in the RTL-SDR popup decides that
+     * (YES = field use, loopback; NO = multicast as usual), so hold longmynd
+     * back until it has been answered. Without a stick nothing waits. */
+    bool longmynd_start_pending = false;
+    if(use_tuner) {
+        if(rtlsdr_ask_popup == RtlSdrAskPopupKind::None) start_longmynd();
+        else longmynd_start_pending = true;
     }
     qo100::ReceiverStatus receiver_status;
     bool receiver_was_locked = false;
@@ -4471,6 +4482,12 @@ int main(int argc, char ** argv)
                     if(point_in_rect(x, y, yes_button)) {
                         rtlsdr_ask_popup = RtlSdrAskPopupKind::None;
                         if(rtl_sdr_process.start()) {
+                            /* YES means field use with no network: send the
+                             * transport stream over loopback instead of
+                             * multicast (which dies when the cable is
+                             * pulled). Longmynd hasn't started yet. An
+                             * explicit QO100_TS_ADDR still wins. */
+                            setenv("QO100_TS_ADDR", "127.0.0.1", 0);
                             spectrum_feed.switch_target(local_spectrum_config());
                             spectrum_source_local = true;
                             spectrum_source_switching = true;
@@ -5086,6 +5103,13 @@ int main(int argc, char ** argv)
             }
         }
 
+        if(longmynd_start_pending && rtlsdr_ask_popup == RtlSdrAskPopupKind::None) {
+            longmynd_start_pending = false;
+            start_longmynd();
+            /* The decoder already opened the default address while waiting;
+             * make it pick up a changed QO100_TS_ADDR. */
+            video_decoder.request_reset();
+        }
         if(receiver_enabled && receiver_client.consume_status(receiver_status)) {
             if(awaiting_post_tune_unlock) {
                 if(receiver_status.locked()) {
