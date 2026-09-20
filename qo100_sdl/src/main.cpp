@@ -2231,7 +2231,7 @@ SDL_Rect lnb_cal_prompt_button_rect(int screen_width, int screen_height, bool ca
 
 void draw_lnb_cal_prompt(SDL_Renderer * renderer, TextCache & text,
                          int screen_width, int screen_height,
-                         LnbCalPromptKind kind, long uptime_minutes,
+                         LnbCalPromptKind kind, long uptime_minutes, bool two_steps,
                          const TouchState & touch)
 {
     if(kind == LnbCalPromptKind::None) return;
@@ -2246,10 +2246,12 @@ void draw_lnb_cal_prompt(SDL_Renderer * renderer, TextCache & text,
     draw_rounded_rect(renderer, popup, kPopupRadius, kYellow);
 
     const int centre_x = popup.x + popup.w / 2;
-    text.draw("LNB NOT CALIBRATED", centre_x, popup.y + 36, kYellow, 32, true);
-    text.draw("Measure your LNB's real frequency using the beacon?",
+    text.draw("CALIBRATION NEEDED", centre_x, popup.y + 36, kYellow, 32, true);
+    text.draw(two_steps ? "Measure the LNB and the RTL-SDR frequency using the beacon?"
+                        : "Measure your LNB's real frequency using the beacon?",
               centre_x, popup.y + 80, kText, 18, true);
-    text.draw("Takes about 1.5 minutes. Video stops while it runs.",
+    text.draw(two_steps ? "Two steps, about 2 minutes. Video and spectrum pause."
+                        : "Takes about 1.5 minutes. Video stops while it runs.",
               centre_x, popup.y + 106, kTextDim, 15, true);
 
     /* The warm-up remark, wrapped to fit inside the popup. */
@@ -2277,9 +2279,20 @@ void draw_lnb_cal_prompt(SDL_Renderer * renderer, TextCache & text,
  * through the same list so they can never disagree. */
 enum class LnbCalAction { Start, Cancel, Back, Done, Retry, Close };
 
-std::vector<LnbCalAction> lnb_cal_actions(const qo100::LnbCalibration & cal)
+/* What the calibration page needs to know about the second step, the RTL-SDR
+ * measurement (only run when the local RTL-SDR spectrum is the source). */
+struct RtlPageInfo {
+    enum class Phase { None, Measuring, Stored, Failed, Cancelled };
+    Phase phase = Phase::None;
+    const qo100::RtlOffsetReport * report = nullptr;   /* live/last measurement */
+    std::string note;                                  /* why it failed, when it did */
+};
+
+std::vector<LnbCalAction> lnb_cal_actions(const qo100::LnbCalibration & cal,
+                                          bool rtl_measuring)
 {
     using Outcome = qo100::LnbCalibration::Outcome;
+    if(rtl_measuring) return {LnbCalAction::Cancel};
     if(cal.running()) return {LnbCalAction::Cancel};
     if(cal.outcome() == Outcome::Success) return {LnbCalAction::Done};
     if(cal.outcome() == Outcome::Failed)
@@ -2320,6 +2333,7 @@ bool lnb_cal_action_needs_receiver(LnbCalAction action)
 void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int height,
                        const qo100::LnbCalibration & cal,
                        const qo100::ReceiverSettings & settings,
+                       const RtlPageInfo & rtl,
                        bool receiver_ready, bool spectrum_local, long uptime_minutes,
                        const TouchState & touch)
 {
@@ -2398,9 +2412,41 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         }
     };
 
-    if(cal.running()) {
-        /* --- a run is in progress --- */
-        line("MEASUREMENT " + std::to_string(cal.attempt_number()) + " OF " +
+    if(rtl.phase == RtlPageInfo::Phase::Measuring && rtl.report != nullptr) {
+        /* --- step 2: the RTL-SDR stick measures the beacon --- */
+        const qo100::RtlOffsetReport & report = *rtl.report;
+        line("STEP 2 OF 2 - RTL-SDR", kCyan, title_size, 10);
+        const SDL_Rect bar{left, y, card.w - 48, 14};
+        set_colour(renderer, kBackground);
+        SDL_RenderFillRect(renderer, &bar);
+        SDL_Rect filled = bar;
+        filled.w = report.total() > 0 ? bar.w * report.done() / report.total() : 0;
+        set_colour(renderer, kCyan);
+        SDL_RenderFillRect(renderer, &filled);
+        set_colour(renderer, kBorder);
+        SDL_RenderDrawRect(renderer, &bar);
+        y += 26;
+        line(report.done() == 0 ? "Starting the RTL-SDR..."
+                                : "Measuring the beacon with the RTL-SDR stick...",
+             kText, emph_size, 12);
+        char progress[96];
+        std::snprintf(progress, sizeof(progress), "Capture %2d of %2d    accepted %2d    rejected %2d",
+                      report.done(), report.total(), report.accepted(), report.rejected());
+        line(progress, kText, mono_size, 10, true);
+        if(report.accepted() > 0) {
+            char estimate[96];
+            std::snprintf(estimate, sizeof(estimate), "Estimate so far:  correction %+.1f kHz",
+                          report.running_median_khz());
+            line(estimate, kGreen, mono_size, 10, true);
+        }
+        paragraph("The RTL-SDR spectrum is switched off while this runs, and comes back "
+                  "when it is done.", kTextDim, body_size);
+        warmup_footer();
+    }
+    else if(cal.running()) {
+        /* --- step 1 (or the only step): the MiniTiouner measures the beacon --- */
+        line((spectrum_local ? "STEP 1 OF 2 - LNB    " : "") + std::string("MEASUREMENT ") +
+                 std::to_string(cal.attempt_number()) + " OF " +
                  std::to_string(qo100::LnbCalibration::kAttempts),
              kCyan, title_size, 10);
         const SDL_Rect bar{left, y, card.w - 48, 14};
@@ -2432,11 +2478,25 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         std::snprintf(result, sizeof(result), "%.4f MHz  (%+.1f kHz from nominal %.2f MHz)",
                       cal.result_lo_mhz(), cal.deviation_khz(), settings.lnb_lo_mhz);
         line(result, kText, mono_big_size, 12, true);
-        paragraph(spectrum_local
-                      ? "Stored. The local RTL-SDR spectrum still uses the nominal LO until "
-                        "it is calibrated as well."
-                      : "Applied: taps on the spectrum now tune to the true carrier frequency.",
-                  kText, body_size);
+        if(!spectrum_local) {
+            paragraph("Applied: taps on the spectrum now tune to the true carrier frequency.",
+                      kText, body_size);
+        }
+        else if(rtl.phase == RtlPageInfo::Phase::Stored && rtl.report != nullptr) {
+            char rtl_line[128];
+            std::snprintf(rtl_line, sizeof(rtl_line), "RTL-SDR correction:  %+.1f kHz  (%d captures)",
+                          rtl.report->median_khz(), rtl.report->accepted());
+            line(rtl_line, kText, mono_size, 8, true);
+            paragraph("Applied to both: taps on the RTL-SDR spectrum now tune to the true "
+                      "carrier frequency too.", kText, body_size);
+        }
+        else {
+            paragraph(std::string("The LNB result is stored, but the RTL-SDR could not be "
+                                  "measured (") +
+                      (rtl.phase == RtlPageInfo::Phase::Cancelled ? "cancelled" : rtl.note) +
+                      "). The RTL-SDR spectrum keeps using the nominal LO until it is.",
+                      kYellow, body_size);
+        }
         readings();
         warmup_footer();
     }
@@ -2461,9 +2521,15 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
                           (settings.lnb_lo_calibrated_mhz - settings.lnb_lo_mhz) * 1000.0);
             line(stored, kText, mono_size, 8, true);
             line("Measured on " + settings.lnb_lo_calibrated_at, kTextDim, body_size, 12);
-            if(spectrum_local)
-                paragraph("The local RTL-SDR spectrum still uses the nominal LO until it is "
-                          "calibrated as well.", kTextDim, body_size);
+            if(spectrum_local && qo100::rtl_calibrated(settings)) {
+                std::snprintf(stored, sizeof(stored), "RTL-SDR correction:  %+.1f kHz  (measured %s)",
+                              settings.rtl_correction_khz, settings.rtl_correction_at.c_str());
+                line(stored, kText, mono_size, 12, true);
+            }
+            else if(spectrum_local) {
+                paragraph("The RTL-SDR has not been measured yet, so its spectrum still uses "
+                          "the nominal LO. Redo the calibration to measure it.", kYellow, body_size);
+            }
         }
         else {
             line("NOT CALIBRATED YET", kYellow, title_size, 10);
@@ -2482,7 +2548,8 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         warmup_footer();
     }
 
-    const std::vector<LnbCalAction> actions = lnb_cal_actions(cal);
+    const std::vector<LnbCalAction> actions =
+        lnb_cal_actions(cal, rtl.phase == RtlPageInfo::Phase::Measuring);
     for(size_t index = 0; index < actions.size(); ++index) {
         const SDL_Rect button = lnb_cal_button_rect(width, height, index, actions.size());
         const bool disabled = lnb_cal_action_needs_receiver(actions[index]) && !receiver_ready;
@@ -4341,11 +4408,15 @@ int main(int argc, char ** argv)
      *  - local RTL-SDR spectrum: that display is built around the NOMINAL
      *    LO, so the LNB error cancels between display and tuner
      *    and the nominal LO is still the consistent choice. It keeps that
-     *    until the RTL correction is calibrated as well (a later step);
-     *    using the calibrated LO there now would make every tap ~30 kHz off.
+     *    until the RTL correction is calibrated as well, and then switches to
+     *    the calibrated LO at the same moment the server starts using the
+     *    correction (the pairing rule, see rtl_pair_active in receiver.h);
+     *    using the calibrated LO on an uncorrected display would make every
+     *    tap ~30 kHz off.
      * Uncalibrated: always the nominal LO (9750 MHz), exactly as before. */
     const auto effective_lo_mhz = [&]() -> double {
-        if(qo100::lnb_calibrated(receiver_settings) && !spectrum_source_local)
+        if(qo100::lnb_calibrated(receiver_settings) &&
+           (!spectrum_source_local || qo100::rtl_pair_active(receiver_settings)))
             return receiver_settings.lnb_lo_calibrated_mhz;
         return receiver_settings.lnb_lo_mhz;
     };
@@ -4529,6 +4600,11 @@ int main(int argc, char ** argv)
      * these lambdas connect it to the receiver, the settings file and the
      * pages. */
     qo100::LnbCalibration lnb_cal;
+    /* Step 2, the RTL-SDR measurement: a child process (rtl-sdr-server
+     * --measure-offset) that needs the stick to itself. */
+    qo100::RtlOffsetRunner rtl_runner(repository_root);
+    RtlPageInfo rtl_page;
+    constexpr int kRtlCaptures = 30;
     LnbCalPromptKind lnb_cal_prompt = LnbCalPromptKind::None;
     bool lnb_cal_prompt_shown = false;      /* ask at startup at most once per run */
     bool lnb_cal_was_running = false;       /* to notice the moment a run ends */
@@ -4553,12 +4629,59 @@ int main(int argc, char ** argv)
         tune_pending_apply = false;
         pending_tune.reset();
         awaiting_post_tune_unlock = false;
-        /* The plausibility check compares against the CONFIGURED LO. */
+        rtl_page = RtlPageInfo{};
+        /* The plausibility check compares against the nominal LO. */
         lnb_cal.start(Clock::now(), beacon_frequency_khz, beacon_symbol_rate_ksps,
                       receiver_settings.lnb_lo_mhz);
         lnb_cal_dispatch();
         app_page = AppPage::LnbCal;
         qo100::log("[LNB_CAL] started (%d measurements)\n", qo100::LnbCalibration::kAttempts);
+    };
+    /* Step 2: measure the beacon with the RTL-SDR stick. The stick can only be
+     * opened by one program, so the spectrum server is stopped for the
+     * duration (its spectrum goes away; the feed reconnects by itself when the
+     * server comes back). */
+    const auto rtl_measure_start = [&] {
+        rtl_page = RtlPageInfo{};
+        rtl_sdr_process.stop();
+        if(rtl_runner.start(kRtlCaptures)) {
+            rtl_page.phase = RtlPageInfo::Phase::Measuring;
+            rtl_page.report = &rtl_runner.report();
+            qo100::log("[RTL_CAL] measuring with the RTL-SDR (%d captures)\n", kRtlCaptures);
+        }
+        else {
+            rtl_page.phase = RtlPageInfo::Phase::Failed;
+            rtl_page.note = "the measurement could not be started";
+            rtl_sdr_process.start(qo100::rtl_correction_in_use(receiver_settings));
+            qo100::log("[RTL_CAL] could not start the measurement\n");
+        }
+    };
+    /* Runs once when the RTL measurement process has ended. */
+    const auto rtl_measure_finished = [&] {
+        using Outcome = qo100::RtlOffsetReport::Outcome;
+        const qo100::RtlOffsetReport & report = rtl_runner.report();
+        rtl_page.report = &report;
+        if(report.outcome() == Outcome::Ok) {
+            receiver_settings.rtl_correction_khz = report.median_khz();
+            receiver_settings.rtl_correction_at = local_timestamp_now();
+            qo100::save_receiver_settings(repository_root, receiver_settings);
+            rtl_page.phase = RtlPageInfo::Phase::Stored;
+            qo100::log("[RTL_CAL] done: correction %+.2fkHz (%d captures, stdev %.2fkHz)\n",
+                       report.median_khz(), report.accepted(), report.stdev_khz());
+        }
+        else if(report.outcome() == Outcome::Cancelled) {
+            rtl_page.phase = RtlPageInfo::Phase::Cancelled;
+            qo100::log("[RTL_CAL] cancelled; nothing changed\n");
+        }
+        else {
+            rtl_page.phase = RtlPageInfo::Phase::Failed;
+            rtl_page.note = report.reason();
+            qo100::log("[RTL_CAL] failed: %s\n", report.reason().c_str());
+        }
+        /* Bring the spectrum back. With both calibrations stored it now runs
+         * with the correction, and taps use the calibrated LO from the same
+         * moment (pairing rule). Otherwise it comes back exactly as before. */
+        rtl_sdr_process.start(qo100::rtl_correction_in_use(receiver_settings));
     };
     /* Runs once when a calibration ends, however it ended. */
     const auto lnb_cal_finished = [&] {
@@ -4582,6 +4705,9 @@ int main(int argc, char ** argv)
         apply_tune(PendingTune{
             effective_lo_mhz() + beacon_frequency_khz / 1000.0,
             beacon_frequency_khz, beacon_symbol_rate_ksps}, false);
+        /* Second step, only when the local RTL-SDR is what draws the spectrum. */
+        if(lnb_cal.outcome() == Outcome::Success && spectrum_source_local)
+            rtl_measure_start();
     };
     const auto close_chat_keyboard = [&] {
         chat_input = ChatInput::None;
@@ -4823,7 +4949,7 @@ int main(int argc, char ** argv)
                         rtlsdr_ask_popup_button_rect(display.width, display.height, false);
                     if(point_in_rect(x, y, yes_button)) {
                         rtlsdr_ask_popup = RtlSdrAskPopupKind::None;
-                        if(rtl_sdr_process.start()) {
+                        if(rtl_sdr_process.start(qo100::rtl_correction_in_use(receiver_settings))) {
                             /* YES means field use with no network: send the
                              * transport stream over loopback instead of
                              * multicast (which dies when the cable is
@@ -4894,7 +5020,8 @@ int main(int argc, char ** argv)
                     /* The buttons on offer depend on the run's state (see
                      * lnb_cal_actions); drawing uses the same list, so what is
                      * tapped is always what is shown. */
-                    const std::vector<LnbCalAction> actions = lnb_cal_actions(lnb_cal);
+                    const std::vector<LnbCalAction> actions = lnb_cal_actions(
+                        lnb_cal, rtl_page.phase == RtlPageInfo::Phase::Measuring);
                     for(size_t index = 0; index < actions.size(); ++index) {
                         if(!point_in_rect(x, y, lnb_cal_button_rect(
                                display.width, display.height, index, actions.size())))
@@ -4904,10 +5031,15 @@ int main(int argc, char ** argv)
                             break;      /* greyed out on screen */
                         if(action == LnbCalAction::Start || action == LnbCalAction::Retry)
                             lnb_cal_start();
-                        else if(action == LnbCalAction::Cancel)
-                            lnb_cal.cancel();   /* the per-frame check retunes the beacon */
+                        else if(action == LnbCalAction::Cancel) {
+                            if(rtl_page.phase == RtlPageInfo::Phase::Measuring)
+                                rtl_runner.cancel();    /* the per-frame poll wraps it up */
+                            else
+                                lnb_cal.cancel();       /* the per-frame check retunes the beacon */
+                        }
                         else {          /* Back, Done, Close */
                             lnb_cal.reset();
+                            rtl_page = RtlPageInfo{};
                             app_page = lnb_cal_return_page;
                         }
                         break;
@@ -4926,6 +5058,7 @@ int main(int argc, char ** argv)
                         /* Open the calibration page in its idle state; BACK
                          * returns here, with any unsaved settings edits intact. */
                         lnb_cal.reset();
+                        rtl_page = RtlPageInfo{};
                         lnb_cal_return_page = AppPage::Settings;
                         app_page = AppPage::LnbCal;
                         qo100::log("[LNB_CAL] page opened from settings\n");
@@ -5566,6 +5699,13 @@ int main(int argc, char ** argv)
             if(lnb_cal.running()) lnb_cal.on_status(Clock::now(), receiver_status);
         }
 
+        /* Step 2: read the RTL-SDR measurement's output; when its process has
+         * ended, store the result and bring the spectrum back. */
+        if(rtl_page.phase == RtlPageInfo::Phase::Measuring) {
+            rtl_runner.poll();
+            if(!rtl_runner.running()) rtl_measure_finished();
+        }
+
         /* Calibration timers, its tune commands, and its end-of-run handling. */
         if(lnb_cal.running()) lnb_cal.tick(Clock::now());
         lnb_cal_dispatch();
@@ -5602,7 +5742,9 @@ int main(int argc, char ** argv)
          * calibrated yet. Waits until the app has settled and no other popup
          * is on screen, so it never stacks on the tuner/RTL-SDR/update popups. */
         if(!lnb_cal_prompt_shown && use_tuner && lnb_cal_receiver_ready() &&
-           !qo100::lnb_calibrated(receiver_settings) && app_page == AppPage::Main &&
+           (!qo100::lnb_calibrated(receiver_settings) ||
+            (spectrum_source_local && !qo100::rtl_calibrated(receiver_settings))) &&
+           app_page == AppPage::Main &&
            !lnb_cal.running() && Clock::now() - run_started >= std::chrono::seconds(8) &&
            tuner_popup == TunerPopupKind::None &&
            rtlsdr_ask_popup == RtlSdrAskPopupKind::None &&
@@ -5611,7 +5753,9 @@ int main(int argc, char ** argv)
            !spectrum_source_switching) {
             lnb_cal_prompt_shown = true;
             lnb_cal_prompt = LnbCalPromptKind::Ask;
-            qo100::log("[LNB_CAL] no calibration stored; asking the user\n");
+            qo100::log("[LNB_CAL] calibration missing (LNB %s, RTL-SDR %s); asking the user\n",
+                       qo100::lnb_calibrated(receiver_settings) ? "done" : "missing",
+                       qo100::rtl_calibrated(receiver_settings) ? "done" : "missing");
         }
 
         if(beacon_return_armed && Clock::now() >= beacon_return_deadline) {
@@ -5766,7 +5910,7 @@ int main(int argc, char ** argv)
         }
         else if(app_page == AppPage::LnbCal) {
             draw_lnb_cal_page(renderer, text, display.width, display.height, lnb_cal,
-                              receiver_settings, lnb_cal_receiver_ready(),
+                              receiver_settings, rtl_page, lnb_cal_receiver_ready(),
                               spectrum_source_local, system_uptime_minutes(), touch);
         }
         else if(app_page == AppPage::Chat) {
@@ -5832,7 +5976,8 @@ int main(int argc, char ** argv)
         draw_spectrum_source_popup(renderer, text, display.width, display.height,
                                    spectrum_source_popup);
         draw_lnb_cal_prompt(renderer, text, display.width, display.height,
-                            lnb_cal_prompt, system_uptime_minutes(), touch);
+                            lnb_cal_prompt, system_uptime_minutes(),
+                            spectrum_source_local, touch);
         draw_update_popup(renderer, text, display.width, display.height,
                           update_popup, touch);
         draw_rtlsdr_ask_popup(renderer, text, display.width, display.height,

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtl_offset_report.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -29,6 +31,15 @@ struct ReceiverSettings {
      * never calibrated. Its presence is what "calibration was done" means at
      * startup. */
     std::string lnb_lo_calibrated_at;
+    /* The correction (kHz) that puts the LOCAL RTL-SDR spectrum back on the true
+     * frequency axis, as measured by the RTL-SDR calibration
+     * (rtl-sdr-server --measure-offset): positive means the beacon appears
+     * lower than it should, and the same number is what the server's
+     * --correction-khz takes. It contains the LNB's own error plus the stick's
+     * crystal error. Empty timestamp = never measured. Only ever used TOGETHER
+     * with lnb_lo_calibrated_mhz - see rtl_correction_in_use() below. */
+    double rtl_correction_khz = 0.0;
+    std::string rtl_correction_at;
     bool lnb_voltage_enabled = false;
     bool lnb_voltage_horizontal = false;
     int audio_volume_percent = 50;
@@ -47,6 +58,33 @@ struct ReceiverSettings {
 inline bool lnb_calibrated(const ReceiverSettings & settings)
 {
     return settings.lnb_lo_calibrated_mhz > 0.0 && !settings.lnb_lo_calibrated_at.empty();
+}
+
+/* True when a completed RTL-SDR calibration is stored. */
+inline bool rtl_calibrated(const ReceiverSettings & settings)
+{
+    return !settings.rtl_correction_at.empty();
+}
+
+/* THE PAIRING RULE for the local RTL-SDR spectrum.
+ *
+ * The RTL display is built around the nominal 9750 MHz LO, so the LNB's error
+ * is missing from it, and the tuner (IF = RF - LO) must not subtract it either.
+ * Once the display is corrected onto true RF, the tuner needs the LNB's REAL LO
+ * instead. So the two go together or not at all:
+ *   both calibrations stored -> the server runs with the correction (display =
+ *                               true RF) and taps use the calibrated LO;
+ *   anything missing         -> no correction (display in nominal terms) and
+ *                               taps use the nominal LO, which is consistent.
+ * Using one without the other would make every tap on the RTL spectrum ~30 kHz
+ * off. These two helpers are the only places that decide it. */
+inline bool rtl_pair_active(const ReceiverSettings & settings)
+{
+    return lnb_calibrated(settings) && rtl_calibrated(settings);
+}
+inline double rtl_correction_in_use(const ReceiverSettings & settings)
+{
+    return rtl_pair_active(settings) ? settings.rtl_correction_khz : 0.0;
 }
 
 ReceiverSettings load_receiver_settings(const std::string & repository_root);
@@ -126,7 +164,8 @@ public:
     RtlSdrProcess(const RtlSdrProcess &) = delete;
     RtlSdrProcess & operator=(const RtlSdrProcess &) = delete;
 
-    bool start();
+    /* correction_khz: passed to the server as --correction-khz (0 = none). */
+    bool start(double correction_khz = 0.0);
     void stop();
     bool running();
 
@@ -136,6 +175,37 @@ private:
     std::string log_path_;
     std::string pid_path_;
     int pid_ = -1;
+};
+
+/* Runs `rtl-sdr-server --measure-offset` as a child process and feeds its
+ * output into an RtlOffsetReport. The normal server must NOT be running: the
+ * measurement needs the stick to itself (the caller stops it first and
+ * restarts it afterwards). poll() is called every frame; it never blocks. */
+class RtlOffsetRunner {
+public:
+    explicit RtlOffsetRunner(std::string repository_root);
+    ~RtlOffsetRunner();
+
+    RtlOffsetRunner(const RtlOffsetRunner &) = delete;
+    RtlOffsetRunner & operator=(const RtlOffsetRunner &) = delete;
+
+    bool start(int captures);
+    /* Read whatever output has arrived and notice the process ending. */
+    void poll();
+    /* Ask it to stop (SIGTERM); poll() then sees it finish as cancelled. */
+    void cancel();
+    bool running() const { return pid_ > 0; }
+    const RtlOffsetReport & report() const { return report_; }
+
+private:
+    void finish(const char * why_if_no_result);
+
+    std::string binary_;
+    std::string log_path_;
+    int pid_ = -1;
+    int read_fd_ = -1;
+    std::string pending_;
+    RtlOffsetReport report_;
 };
 
 class LongmyndClient {

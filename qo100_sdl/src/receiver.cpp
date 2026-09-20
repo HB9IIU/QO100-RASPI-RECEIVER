@@ -185,6 +185,12 @@ ReceiverSettings load_receiver_settings(const std::string & repository_root)
         const char * stamp = json_object_get_string(value);
         if(stamp != nullptr) settings.lnb_lo_calibrated_at = stamp;
     }
+    if(json_object_object_get_ex(root, "rtl_correction_khz", &value))
+        settings.rtl_correction_khz = json_object_get_double(value);
+    if(json_object_object_get_ex(root, "rtl_correction_at", &value)) {
+        const char * stamp = json_object_get_string(value);
+        if(stamp != nullptr) settings.rtl_correction_at = stamp;
+    }
     if(json_object_object_get_ex(root, "lnb_voltage_enabled", &value))
         settings.lnb_voltage_enabled = json_object_get_boolean(value);
     if(json_object_object_get_ex(root, "lnb_voltage_horizontal", &value))
@@ -224,6 +230,12 @@ bool save_receiver_settings(const std::string & repository_root,
                                json_object_new_double(settings.lnb_lo_calibrated_mhz));
         json_object_object_add(root, "lnb_lo_calibrated_at",
                                json_object_new_string(settings.lnb_lo_calibrated_at.c_str()));
+    }
+    if(rtl_calibrated(settings)) {
+        json_object_object_add(root, "rtl_correction_khz",
+                               json_object_new_double(settings.rtl_correction_khz));
+        json_object_object_add(root, "rtl_correction_at",
+                               json_object_new_string(settings.rtl_correction_at.c_str()));
     }
     json_object_object_add(root, "lnb_voltage_enabled",
                            json_object_new_boolean(settings.lnb_voltage_enabled));
@@ -426,7 +438,7 @@ RtlSdrProcess::~RtlSdrProcess()
     stop();
 }
 
-bool RtlSdrProcess::start()
+bool RtlSdrProcess::start(double correction_khz)
 {
     if(running()) return true;
     if(access(binary_.c_str(), X_OK) != 0) {
@@ -458,7 +470,17 @@ bool RtlSdrProcess::start()
             dup2(descriptor, STDERR_FILENO);
             close(descriptor);
         }
-        execl(binary_.c_str(), binary_.c_str(), static_cast<char *>(nullptr));
+        if(correction_khz != 0.0) {
+            /* Puts the display back on the true frequency axis - see the
+             * pairing rule in receiver.h (rtl_correction_in_use). */
+            char correction[32];
+            std::snprintf(correction, sizeof(correction), "%.3f", correction_khz);
+            execl(binary_.c_str(), binary_.c_str(), "--correction-khz", correction,
+                  static_cast<char *>(nullptr));
+        }
+        else {
+            execl(binary_.c_str(), binary_.c_str(), static_cast<char *>(nullptr));
+        }
         _exit(127);
     }
 
@@ -468,7 +490,7 @@ bool RtlSdrProcess::start()
         std::fprintf(pid_file, "%d\n", pid_);
         std::fclose(pid_file);
     }
-    qo100::log("[RTLSDR] started pid=%d\n", pid_);
+    qo100::log("[RTLSDR] started pid=%d correction=%+.3fkHz\n", pid_, correction_khz);
     return true;
 }
 
@@ -529,6 +551,113 @@ bool RtlSdrProcess::running()
     }
 
     return kill(pid_, 0) == 0 || errno == EPERM;
+}
+
+RtlOffsetRunner::RtlOffsetRunner(std::string repository_root)
+    : binary_(repository_root + "/qo100_sdl/tools/rtl-sdr-server"),
+      log_path_(repository_root + "/qo100_sdl/rtl-sdr-measure.log")
+{}
+
+RtlOffsetRunner::~RtlOffsetRunner()
+{
+    if(pid_ > 0) {
+        kill(pid_, SIGKILL);
+        waitpid(pid_, nullptr, 0);
+    }
+    if(read_fd_ >= 0) close(read_fd_);
+}
+
+bool RtlOffsetRunner::start(int captures)
+{
+    if(pid_ > 0) return false;
+    if(access(binary_.c_str(), X_OK) != 0) {
+        qo100::log("[RTL_CAL] binary is not executable: %s\n", binary_.c_str());
+        return false;
+    }
+    int pipe_fds[2];
+    if(pipe(pipe_fds) != 0) return false;
+    report_.reset();
+    pending_.clear();
+    const pid_t child = fork();
+    if(child < 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return false;
+    }
+    if(child == 0) {
+        /* stdout carries the protocol; stderr (library chatter, tracebacks)
+         * goes to a log file so a failure can be diagnosed afterwards. */
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        const int log = open(log_path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if(log >= 0) {
+            dup2(log, STDERR_FILENO);
+            close(log);
+        }
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        char count[16];
+        std::snprintf(count, sizeof(count), "%d", captures);
+        execl(binary_.c_str(), binary_.c_str(), "--measure-offset", "--captures", count,
+              static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    close(pipe_fds[1]);
+    read_fd_ = pipe_fds[0];
+    fcntl(read_fd_, F_SETFL, fcntl(read_fd_, F_GETFL, 0) | O_NONBLOCK);
+    pid_ = static_cast<int>(child);
+    qo100::log("[RTL_CAL] measurement started pid=%d captures=%d\n", pid_, captures);
+    return true;
+}
+
+void RtlOffsetRunner::poll()
+{
+    if(pid_ <= 0) return;
+    char buffer[1024];
+    for(;;) {
+        const ssize_t got = read(read_fd_, buffer, sizeof(buffer));
+        if(got > 0) {
+            pending_.append(buffer, static_cast<size_t>(got));
+            size_t newline;
+            while((newline = pending_.find('\n')) != std::string::npos) {
+                report_.feed_line(pending_.substr(0, newline));
+                pending_.erase(0, newline + 1);
+            }
+            continue;
+        }
+        break;      /* nothing more right now (EAGAIN) or the pipe closed (0) */
+    }
+    int status = 0;
+    const pid_t result = waitpid(pid_, &status, WNOHANG);
+    if(result == pid_ || (result < 0 && errno == ECHILD)) {
+        /* One last read: the final RESULT line can arrive together with the exit. */
+        for(;;) {
+            const ssize_t got = read(read_fd_, buffer, sizeof(buffer));
+            if(got <= 0) break;
+            pending_.append(buffer, static_cast<size_t>(got));
+        }
+        size_t newline;
+        while((newline = pending_.find('\n')) != std::string::npos) {
+            report_.feed_line(pending_.substr(0, newline));
+            pending_.erase(0, newline + 1);
+        }
+        finish("the measurement process ended unexpectedly");
+    }
+}
+
+void RtlOffsetRunner::cancel()
+{
+    if(pid_ > 0) kill(pid_, SIGTERM);
+}
+
+void RtlOffsetRunner::finish(const char * why_if_no_result)
+{
+    qo100::log("[RTL_CAL] measurement process pid=%d ended\n", pid_);
+    pid_ = -1;
+    if(read_fd_ >= 0) {
+        close(read_fd_);
+        read_fd_ = -1;
+    }
+    report_.fail_unexpectedly(why_if_no_result);
 }
 
 struct LongmyndClient::Impl {
