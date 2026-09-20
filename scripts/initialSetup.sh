@@ -67,6 +67,23 @@ fi
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
+step "🕐 Checking the Pi's clock..."
+# A Pi has no battery-backed clock, so after a long power-off (or a broken
+# time sync) it can start days in the past. apt and git-over-https then
+# reject everything as "not valid yet" and the rest of this script fails
+# with a cryptic error - so sort the clock out before anything else.
+sudo timedatectl set-ntp true || true
+for _ in $(seq 1 30); do
+    [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ] && break
+    sleep 2
+done
+if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+    skip "clock is synchronised: $(date)"
+else
+    printf "${YELLOW}   ⚠ Could not synchronise the clock (is the Pi online?). It says: %s${NC}\n" "$(date)"
+    echo "     If that date is wrong, package downloads will fail."
+fi
+
 step "⬇️  Pulling the latest version..."
 # A no-op on a fresh clone (already at the latest commit); the actual point
 # of this step is re-running this script later to pick up an update - see
@@ -74,7 +91,12 @@ step "⬇️  Pulling the latest version..."
 git pull --ff-only
 
 step "📦 Installing build dependencies..."
-sudo apt update
+sudo apt update || {
+    echo >&2
+    echo "ERROR: apt update failed. Check the Pi is online and that its clock is correct" >&2
+    echo "(it says: $(date)). Fix that, then run this script again." >&2
+    exit 1
+}
 sudo apt install -y \
     build-essential cmake pkg-config git \
     libusb-1.0-0-dev libasound2-dev libjson-c-dev libcap-dev \

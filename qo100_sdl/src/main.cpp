@@ -217,28 +217,6 @@ bool detect_rtlsdr_present()
     return found;
 }
 
-bool rtlsdr_system_setup_complete()
-{
-    return access("/etc/udev/rules.d/60-qo100-rtlsdr.rules", F_OK) == 0 &&
-           access("/etc/modprobe.d/blacklist-qo100-rtlsdr.conf", F_OK) == 0;
-}
-
-bool launch_rtlsdr_setup_terminal(const std::string & repository_root)
-{
-    const std::string installer = repository_root + "/scripts/initialSetup.sh";
-    if(access("/usr/bin/lxterminal", X_OK) != 0 || access(installer.c_str(), X_OK) != 0)
-        return false;
-    const pid_t child = fork();
-    if(child < 0) return false;
-    if(child == 0) {
-        execl("/usr/bin/lxterminal", "lxterminal", "-e", installer.c_str(),
-              static_cast<char *>(nullptr));
-        _exit(127);
-    }
-    std::thread([child] { waitpid(child, nullptr, 0); }).detach();
-    return true;
-}
-
 struct DisplayConfig {
     int width = kReferenceWidth;
     int height = kReferenceHeight;
@@ -1746,21 +1724,7 @@ void draw_update_popup(SDL_Renderer * renderer, TextCache & text,
     }
 }
 
-enum class RtlSdrAskPopupKind { None, Ask, SetupRequired };
-
-SDL_Rect rtlsdr_setup_popup_rect(int screen_width, int screen_height)
-{
-    const int width = std::min(650, screen_width - 80);
-    constexpr int height = 300;
-    return {(screen_width - width) / 2, (screen_height - height) / 2,
-            width, height};
-}
-
-SDL_Rect rtlsdr_setup_popup_button_rect(int screen_width, int screen_height)
-{
-    const SDL_Rect popup = rtlsdr_setup_popup_rect(screen_width, screen_height);
-    return {popup.x + (popup.w - 250) / 2, popup.y + popup.h - 62, 250, 44};
-}
+enum class RtlSdrAskPopupKind { None, Ask };
 
 SDL_Rect rtlsdr_ask_popup_rect(int screen_width, int screen_height)
 {
@@ -1790,27 +1754,6 @@ void draw_rtlsdr_ask_popup(SDL_Renderer * renderer, TextCache & text,
     const SDL_Rect screen{0, 0, screen_width, screen_height};
     set_colour(renderer, {0, 0, 0, 180});
     SDL_RenderFillRect(renderer, &screen);
-
-    if(kind == RtlSdrAskPopupKind::SetupRequired) {
-        const SDL_Rect popup = rtlsdr_setup_popup_rect(screen_width, screen_height);
-        constexpr int kPopupRadius = 16;
-        fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
-        draw_rounded_rect(renderer, popup, kPopupRadius, kYellow);
-        const int centre_x = popup.x + popup.w / 2;
-        text.draw("ONE-TIME SETUP REQUIRED", centre_x, popup.y + 34,
-                  kYellow, 32, true);
-        text.draw("The RTL-SDR needs a one-time system setup.",
-                  centre_x, popup.y + 85, kText, 18, true);
-        text.draw("Tap the button below. A setup window will open.",
-                  centre_x, popup.y + 125, kText, 17, true);
-        text.draw("Follow its instructions; the Pi will restart when finished.",
-                  centre_x, popup.y + 160, kTextDim, 16, true);
-        const SDL_Rect button =
-            rtlsdr_setup_popup_button_rect(screen_width, screen_height);
-        draw_button(renderer, text, button, "START RTL-SDR SETUP", kYellow, 16,
-                    false, is_pressed(touch, button));
-        return;
-    }
 
     const SDL_Rect popup = rtlsdr_ask_popup_rect(screen_width, screen_height);
     constexpr int kPopupRadius = 16;
@@ -3802,13 +3745,7 @@ int main(int argc, char ** argv)
     spectrum_feed.start();
     if(rtlsdr_present) {
         qo100::log("[RTLSDR] local RTL-SDR detected on USB (VID:PID 0bda:2838/2832)\n");
-        if(rtlsdr_system_setup_complete()) {
-            rtlsdr_ask_popup = RtlSdrAskPopupKind::Ask;
-        }
-        else {
-            rtlsdr_ask_popup = RtlSdrAskPopupKind::SetupRequired;
-            qo100::log("[RTLSDR] one-time system setup required; using remote until installed\n");
-        }
+        rtlsdr_ask_popup = RtlSdrAskPopupKind::Ask;
     }
     else {
         spectrum_feed.switch_target(batc_spectrum_config());
@@ -4454,22 +4391,6 @@ int main(int argc, char ** argv)
                            y >= close_button.y && y < close_button.y + close_button.h) {
                             tuner_popup = TunerPopupKind::None;
                             qo100::log("[TUNER_USB] no-tuner popup closed\n");
-                        }
-                    }
-                    continue;
-                }
-                if(rtlsdr_ask_popup == RtlSdrAskPopupKind::SetupRequired) {
-                    const SDL_Rect button =
-                        rtlsdr_setup_popup_button_rect(display.width, display.height);
-                    if(point_in_rect(x, y, button)) {
-                        if(launch_rtlsdr_setup_terminal(repository_root)) {
-                            rtlsdr_ask_popup = RtlSdrAskPopupKind::None;
-                            spectrum_feed.switch_target(batc_spectrum_config());
-                            SDL_MinimizeWindow(window);
-                            qo100::log("[RTLSDR] opened one-time setup terminal\n");
-                        }
-                        else {
-                            qo100::log("[RTLSDR] could not open setup terminal\n");
                         }
                     }
                     continue;
