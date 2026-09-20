@@ -4,9 +4,13 @@ Edit capture settings below. Open WEBpage/index.html for the display.
 """
 import logging
 import argparse
+import math
 import signal
 import socket
+import statistics
+import sys
 import threading
+from pathlib import Path
 from time import monotonic
 
 import numpy as np
@@ -31,6 +35,98 @@ OUTPUT_CENTER_HZ = 745_000_000
 OUTPUT_BIN_HZ = 10_000_000 / 1024
 OUTPUT_FIRST_BIN = 51
 OUTPUT_STOP_BIN = 973  # Exclusive: bins 51 through 972, exactly 922 points.
+
+
+# ---------------------------------------------------------------- beacon offset measurement
+# `--measure-offset` is a one-shot mode used by the receiver app's LNB/RTL calibration. It does
+# NOT serve a spectrum: it opens the stick, measures where the QO-100 beacon really appears
+# relative to where it should (10,491.500 MHz behind the nominal 9750 MHz LNB LO), prints the
+# answer and exits. The stick must be free, so the normal server has to be stopped first.
+#
+# The measurement is scripts/calibrate_beacon.py's own, unchanged: two overlapping captures per
+# reading, and the beacon centre taken as the midpoint of its two 50% edges. Each reading is a
+# "correction": positive means the beacon appears LOWER than expected on the display grid (the
+# same convention as --correction-khz, so the median can be passed straight back to it).
+#
+# Output is one line per event on stdout (flushed), meant to be parsed by the app:
+#   MEASURE start captures=<n> gain=<db>
+#   CAPTURE <i>/<n> ok correction_khz=<+x.xx> width_khz=<x> contrast_db=<x>
+#   CAPTURE <i>/<n> rejected reason=<text>
+#   RESULT ok accepted=<a> attempts=<n> median_khz=<+x.xx> mean_khz=<+x.xx> stdev_khz=<x.xx>
+#   RESULT failed reason=<text>
+#   RESULT cancelled
+# Exit status: 0 = ok, 1 = failed, 2 = cancelled.
+MEASURE_MIN_ACCEPTED = 10       # same reliability rule as calibrate_beacon.py
+MEASURE_MIN_ACCEPTANCE = 0.5
+MEASURE_DEFAULT_CAPTURES = 30
+
+
+def _load_beacon_measurement():
+    """calibrate_beacon lives in tools/ beside this file when run from source; the frozen
+    binary carries it inside (build_binary.sh passes --paths tools)."""
+    tools = Path(__file__).resolve().parent / 'tools'
+    if tools.is_dir() and str(tools) not in sys.path:
+        sys.path.insert(0, str(tools))
+    import calibrate_beacon
+    return calibrate_beacon
+
+
+def measure_beacon_offset(stop, captures=MEASURE_DEFAULT_CAPTURES, gain=GAIN_DB,
+                          sdr_factory=RtlSdr, emit=None):
+    """Run the measurement; returns the exit status described above."""
+    if emit is None:
+        def emit(line):
+            print(line, flush=True)
+    cb = _load_beacon_measurement()
+    # Deliberately referenced to the NOMINAL LO: the LNB's own error must stay in the result.
+    center = cb.BEACON_RF_HZ - LNB_LO_MHZ * 1e6
+    offsets = cb.diagnostic_grid()
+    window = np.hanning(cb.FFT_SIZE)
+    emit(f"MEASURE start captures={captures} gain={gain:g}")
+    try:
+        sdr = sdr_factory()
+    except Exception as error:   # librtlsdr raises several types for a busy/missing device
+        emit("RESULT failed reason=" + " ".join(f"cannot open the RTL-SDR: {error}".split()))
+        return 1
+    corrections = []
+    try:
+        sdr.sample_rate = cb.SAMPLE_RATE
+        sdr.center_freq = center
+        sdr.set_agc_mode(False)
+        sdr.gain = gain
+        sdr.read_samples(65536)   # flush the first, unsettled samples
+        for index in range(1, captures + 1):
+            if stop.is_set():
+                emit("RESULT cancelled")
+                return 2
+            power = cb.capture_two_portions(sdr, center, offsets, window)
+            try:
+                reading = cb.estimate_offset(offsets, power)
+            except ValueError as error:
+                emit(f"CAPTURE {index}/{captures} rejected reason=" + " ".join(str(error).split()))
+                continue
+            correction_khz = reading['correction_hz'] / 1000.0
+            corrections.append(correction_khz)
+            emit(f"CAPTURE {index}/{captures} ok correction_khz={correction_khz:+.2f} "
+                 f"width_khz={reading['width_hz'] / 1000:.1f} contrast_db={reading['contrast_db']:.1f}")
+    except Exception as error:
+        emit("RESULT failed reason=" + " ".join(f"measurement error: {error}".split()))
+        return 1
+    finally:
+        try:
+            sdr.close()
+        except Exception:
+            pass
+    accepted = len(corrections)
+    if accepted < MEASURE_MIN_ACCEPTED or accepted < captures * MEASURE_MIN_ACCEPTANCE:
+        emit(f"RESULT failed reason=only {accepted} of {captures} captures were usable "
+             "(is the beacon visible and the LNB powered?)")
+        return 1
+    stdev = statistics.stdev(corrections) if accepted > 1 else 0.0
+    emit(f"RESULT ok accepted={accepted} attempts={captures} "
+         f"median_khz={statistics.median(corrections):+.2f} "
+         f"mean_khz={statistics.mean(corrections):+.2f} stdev_khz={stdev:.2f}")
+    return 0
 
 
 def websocket_addresses(port):
@@ -175,11 +271,27 @@ def main():
                         help='Frequency correction in kHz; positive tunes lower and moves signals higher on the fixed display grid (default: 0)')
     parser.add_argument('--ws-port', type=int, default=7681,
                         help='WebSocket listening port, 1–65535 (default: 7681)')
+    parser.add_argument('--measure-offset', action='store_true',
+                        help='One-shot: measure the beacon offset seen by this stick and print '
+                             'the result (see measure_beacon_offset); serves no spectrum')
+    parser.add_argument('--captures', type=int, default=MEASURE_DEFAULT_CAPTURES,
+                        help='Captures for --measure-offset, 10-1000 (default: 30)')
+    parser.add_argument('--gain', type=float, default=GAIN_DB,
+                        help='Tuner gain in dB for --measure-offset (default: 10)')
     args = parser.parse_args()
+    if not 10 <= args.captures <= 1000:
+        parser.error('--captures must be between 10 and 1000')
+    if not math.isfinite(args.gain):
+        parser.error('--gain must be finite')
     if not np.isfinite(args.correction_khz):
         parser.error('--correction-khz must be finite')
     if not 1 <= args.ws_port <= 65535:
         parser.error('--ws-port must be between 1 and 65535')
+    if args.measure_offset:
+        stop = threading.Event()
+        signal.signal(signal.SIGINT, lambda _signum, _frame: stop.set())
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: stop.set())
+        return measure_beacon_offset(stop, args.captures, args.gain)
     if args.self_test:
         from websockets.sync.client import connect
         # websockets 15 can expose an empty Server.sockets tuple when asked
