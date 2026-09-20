@@ -2412,6 +2412,96 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         }
     };
 
+    /* THE "CORRECTIONS FOUND" BLOCK, one numbered row per calibration step.
+     * The two numbers are different kinds of thing - an oscillator frequency
+     * with its deviation, and a shift applied to a display - so they get
+     * separate rows, each with one plain sentence on what it does. Used by the
+     * result screen and by the idle page, so the stored values are always
+     * presented the same way. rtl_state: 0 = row hidden (no RTL-SDR in use),
+     * 1 = measured, 2 = not measured (rtl_note says why, when known). */
+    const auto corrections = [&](double lo_mhz, const std::string & lnb_when, int rtl_state,
+                                 double rtl_khz, const std::string & rtl_when,
+                                 const std::string & rtl_note) {
+        const int value_x = left + (compact ? 236 : 290);
+        /* Small dim text flush with the card's right edge (the dates). */
+        const auto right_text = [&](const std::string & value, int at_y) {
+            const int value_width = text.measure(value, small_size).first;
+            text.draw(value, card.x + card.w - 24 - value_width, at_y, kTextDim, small_size);
+        };
+        y += 8;
+        text.draw("CORRECTIONS FOUND", left, y, kCyan, small_size);
+        y += small_size + 6;
+        const SDL_Rect rule{left, y, card.w - 48, 1};
+        set_colour(renderer, kBorder);
+        SDL_RenderFillRect(renderer, &rule);
+        y += 8;
+
+        /* Row 1: the LNB oscillator. */
+        const double deviation_khz = (lo_mhz - settings.lnb_lo_mhz) * 1000.0;
+        char value[96];
+        text.draw("1   LNB oscillator", left, y, kText, emph_size);
+        std::snprintf(value, sizeof(value), "%.4f MHz  %+.1f kHz", lo_mhz, deviation_khz);
+        text.draw(value, value_x, y - 1, kGreen, mono_big_size, false, true);
+        right_text("measured " + lnb_when, y + 2);
+        y += mono_big_size + 8;
+        char sentence[200];
+        if(std::fabs(deviation_khz) < 0.05)
+            std::snprintf(sentence, sizeof(sentence),
+                          "Your LNB runs on the nominal %.0f MHz. Every tap tunes the MiniTiouner "
+                          "to where the signal really arrives.", settings.lnb_lo_mhz);
+        else
+            std::snprintf(sentence, sizeof(sentence),
+                          "Your LNB runs %.1f kHz %s the nominal %.0f MHz. Every tap now tunes the "
+                          "MiniTiouner to where the signal really arrives.",
+                          std::fabs(deviation_khz), deviation_khz > 0 ? "above" : "below",
+                          settings.lnb_lo_mhz);
+        paragraph(sentence, kTextDim, body_size);
+        y += 8;
+
+        /* Row 2: the RTL-SDR display shift (only when the stick draws the spectrum). */
+        if(rtl_state == 0) return;
+        text.draw("2   RTL-SDR display shift", left, y, kText, emph_size);
+        if(rtl_state == 1) {
+            std::snprintf(value, sizeof(value), "%+.1f kHz", rtl_khz);
+            text.draw(value, value_x, y - 1, kGreen, mono_big_size, false, true);
+            right_text("measured " + rtl_when, y + 2);
+            y += mono_big_size + 8;
+            std::snprintf(sentence, sizeof(sentence),
+                          "The RTL spectrum showed the beacon %.1f kHz too %s. It is now shifted "
+                          "back onto the true frequency axis.",
+                          std::fabs(rtl_khz), rtl_khz > 0 ? "low" : "high");
+            paragraph(sentence, kTextDim, body_size);
+            /* Both shifts contain the LNB's error; what is left over is the
+             * stick's own. "About": it assumes the MiniTiouner as reference. */
+            std::snprintf(sentence, sizeof(sentence),
+                          "Of this, the stick's own error is about %+.1f kHz  (%+.1f - %+.1f).",
+                          rtl_khz - deviation_khz, rtl_khz, deviation_khz);
+            line(sentence, kTextDim, body_size, 6);
+        }
+        else {
+            text.draw("not measured yet", value_x, y - 1, kYellow, mono_big_size, false, true);
+            y += mono_big_size + 8;
+            paragraph("The RTL spectrum still uses the nominal LO until this has been measured" +
+                          std::string(rtl_note.empty() ? "." : " (" + rtl_note + ").") +
+                          " Redo the calibration to measure it.", kYellow, body_size);
+        }
+    };
+    /* The list of measurements needs about this much height; on the small
+     * screen it is left out when the corrections block has used the room. */
+    const auto readings_if_room = [&] {
+        const int rows = (qo100::LnbCalibration::kAttempts + 1) / 2;
+        const int needed = small_size + 6 + rows * (mono_size + 5) + 6;
+        const int footer = 2 * (small_size + 4) + 16;
+        if(y + needed <= card.y + card.h - footer) {
+            readings();
+            return;
+        }
+        int accepted = 0;
+        for(const auto & attempt : cal.attempts()) if(attempt.valid) ++accepted;
+        line(std::to_string(accepted) + " of " + std::to_string(cal.attempts().size()) +
+                 " measurements accepted", kTextDim, small_size, 6);
+    };
+
     if(rtl.phase == RtlPageInfo::Phase::Measuring && rtl.report != nullptr) {
         /* --- step 2: the RTL-SDR stick measures the beacon --- */
         const qo100::RtlOffsetReport & report = *rtl.report;
@@ -2473,31 +2563,13 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
     }
     else if(cal.outcome() == Outcome::Success) {
         /* --- finished, measured --- */
-        line("LNB LO MEASURED", kGreen, title_size, 10);
-        char result[128];
-        std::snprintf(result, sizeof(result), "%.4f MHz  (%+.1f kHz from nominal %.2f MHz)",
-                      cal.result_lo_mhz(), cal.deviation_khz(), settings.lnb_lo_mhz);
-        line(result, kText, mono_big_size, 12, true);
-        if(!spectrum_local) {
-            paragraph("Applied: taps on the spectrum now tune to the true carrier frequency.",
-                      kText, body_size);
-        }
-        else if(rtl.phase == RtlPageInfo::Phase::Stored && rtl.report != nullptr) {
-            char rtl_line[128];
-            std::snprintf(rtl_line, sizeof(rtl_line), "RTL-SDR correction:  %+.1f kHz  (%d captures)",
-                          rtl.report->median_khz(), rtl.report->accepted());
-            line(rtl_line, kText, mono_size, 8, true);
-            paragraph("Applied to both: taps on the RTL-SDR spectrum now tune to the true "
-                      "carrier frequency too.", kText, body_size);
-        }
-        else {
-            paragraph(std::string("The LNB result is stored, but the RTL-SDR could not be "
-                                  "measured (") +
-                      (rtl.phase == RtlPageInfo::Phase::Cancelled ? "cancelled" : rtl.note) +
-                      "). The RTL-SDR spectrum keeps using the nominal LO until it is.",
-                      kYellow, body_size);
-        }
-        readings();
+        line("CALIBRATION DONE", kGreen, title_size, 10);
+        const bool rtl_stored = rtl.phase == RtlPageInfo::Phase::Stored && rtl.report != nullptr;
+        corrections(cal.result_lo_mhz(), settings.lnb_lo_calibrated_at,
+                    !spectrum_local ? 0 : (rtl_stored ? 1 : 2),
+                    rtl_stored ? rtl.report->median_khz() : 0.0, settings.rtl_correction_at,
+                    rtl.phase == RtlPageInfo::Phase::Cancelled ? "cancelled" : rtl.note);
+        readings_if_room();
         warmup_footer();
     }
     else if(cal.outcome() == Outcome::Failed) {
@@ -2511,25 +2583,11 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
     else {
         /* --- idle: show what is stored (or why to run it) --- */
         if(qo100::lnb_calibrated(settings)) {
-            line("LNB CALIBRATED", kGreen, title_size, 10);
-            char stored[128];
-            std::snprintf(stored, sizeof(stored), "Measured LNB LO:  %.4f MHz",
-                          settings.lnb_lo_calibrated_mhz);
-            line(stored, kText, mono_big_size, 8, true);
-            std::snprintf(stored, sizeof(stored), "Deviation from nominal %.2f MHz:  %+.1f kHz",
-                          settings.lnb_lo_mhz,
-                          (settings.lnb_lo_calibrated_mhz - settings.lnb_lo_mhz) * 1000.0);
-            line(stored, kText, mono_size, 8, true);
-            line("Measured on " + settings.lnb_lo_calibrated_at, kTextDim, body_size, 12);
-            if(spectrum_local && qo100::rtl_calibrated(settings)) {
-                std::snprintf(stored, sizeof(stored), "RTL-SDR correction:  %+.1f kHz  (measured %s)",
-                              settings.rtl_correction_khz, settings.rtl_correction_at.c_str());
-                line(stored, kText, mono_size, 12, true);
-            }
-            else if(spectrum_local) {
-                paragraph("The RTL-SDR has not been measured yet, so its spectrum still uses "
-                          "the nominal LO. Redo the calibration to measure it.", kYellow, body_size);
-            }
+            line("CALIBRATED", kGreen, title_size, 10);
+            corrections(settings.lnb_lo_calibrated_mhz, settings.lnb_lo_calibrated_at,
+                        !spectrum_local ? 0 : (qo100::rtl_calibrated(settings) ? 1 : 2),
+                        settings.rtl_correction_khz, settings.rtl_correction_at, "");
+            y += 4;
         }
         else {
             line("NOT CALIBRATED YET", kYellow, title_size, 10);
@@ -2538,8 +2596,10 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
                       "exactly on the carrier - which matters for the narrowest signals.",
                       kText, body_size);
         }
-        paragraph("It takes about a minute and a half. The video stops while it runs, and the beacon "
-                  "must be receivable.", kTextDim, body_size);
+        paragraph(std::string("It takes about ") +
+                      (spectrum_local ? "two minutes" : "a minute and a half") +
+                      ". The video stops while it runs, and the beacon must be receivable.",
+                  kTextDim, body_size);
         if(cal.outcome() == Outcome::Cancelled)
             line("Cancelled - nothing was changed.", kTextDim, body_size);
         if(!receiver_ready)
@@ -4312,6 +4372,16 @@ int main(int argc, char ** argv)
 
     bool running = true;
     AppPage app_page = AppPage::Main;
+    /* DEVELOPMENT AID, screenshot mode only (--screenshot): QO100_SCREENSHOT_PAGE=lnbcal
+     * opens the LNB calibration page and QO100_SCREENSHOT_LOCAL=1 pretends the
+     * local RTL-SDR is the spectrum source, so the page's layout can be
+     * checked at both screen sizes without a receiver. Ignored in normal use. */
+    if(!options.screenshot.empty()) {
+        const char * page = std::getenv("QO100_SCREENSHOT_PAGE");
+        if(page != nullptr && std::strcmp(page, "lnbcal") == 0) app_page = AppPage::LnbCal;
+        const char * local = std::getenv("QO100_SCREENSHOT_LOCAL");
+        if(local != nullptr && local[0] == '1') spectrum_source_local = true;
+    }
     bool fullscreen_video = false;
     bool have_video_frame = false;
     int settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
@@ -6063,6 +6133,13 @@ int main(int argc, char ** argv)
     if(!options.screenshot.empty()) {
         set_colour(renderer, kBackground);
         SDL_RenderClear(renderer);
+        /* Development aid (see QO100_SCREENSHOT_PAGE above): the page itself
+         * instead of the main layout. */
+        if(app_page == AppPage::LnbCal)
+            draw_lnb_cal_page(renderer, text, display.width, display.height, lnb_cal,
+                              receiver_settings, rtl_page, true, spectrum_source_local,
+                              system_uptime_minutes(), TouchState{});
+        else {
         draw_spectrum(renderer, text, layout, *spectrum_texture,
                       spectrum_status, spectrum_marker, receiver_status,
                       selected_frequency_mhz, spectrum_source_local);
@@ -6083,6 +6160,7 @@ int main(int argc, char ** argv)
                     selected_frequency_mhz, current_tune_if_khz,
                     current_tune_symbol_rate_ksps,
                     video_codec, audio_codec, scan_active, TouchState{});
+        }
         SDL_RenderPresent(renderer);
         if(!save_screenshot(renderer, display.width, display.height, options.screenshot))
             qo100::log( "[SCREENSHOT] failed to save %s\n", options.screenshot.c_str());
