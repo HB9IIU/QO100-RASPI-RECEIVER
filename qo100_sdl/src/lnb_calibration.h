@@ -87,12 +87,14 @@ public:
     /* --- tuning constants (every one of these was checked on real
      * hardware with the standalone script scripts/measure_lnb_lo.py) --- */
 
-    /* Measurements per run. Five independent hop-and-acquire cycles take about
-     * 45 s and were repeatable to within the 1 kHz resolution. */
-    static constexpr int kAttempts = 5;
-    /* At least this many of them must be usable, otherwise the run fails
-     * instead of reporting a number nobody should trust. */
-    static constexpr int kMinValid = 3;
+    /* Measurements per run. Each independent hop-and-acquire cycle takes about
+     * 9 s, so ten take about a minute and a half. Real-hardware runs were
+     * repeatable to within the 1 kHz resolution already with fewer; ten make
+     * the median more robust against an occasional odd reading. */
+    static constexpr int kAttempts = 10;
+    /* At least this many of them must be usable (60%), otherwise the run
+     * fails instead of reporting a number nobody should trust. */
+    static constexpr int kMinValid = 6;
     /* How far above the beacon the hop goes. It must be outside the
      * demodulator's search window (which reaches at least 1.2 MHz). */
     static constexpr long kHopKhz = 3000;

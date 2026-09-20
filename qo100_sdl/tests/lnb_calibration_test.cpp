@@ -103,17 +103,17 @@ void test_success()
     check(cal.outcome() == LnbCalibration::Outcome::Success, "outcome is Success");
     check(std::fabs(cal.result_lo_mhz() - 9750.029) < 1e-6, "LO = 10491.5 - 741.471 = 9750.029");
     check(std::fabs(cal.deviation_khz() - 29.0) < 1e-6, "deviation +29 kHz from nominal");
-    check(cal.attempts().size() == 5, "five attempts were made");
+    check(cal.attempts().size() == LnbCalibration::kAttempts, "all ten attempts were made");
     bool all_valid = true;
     for(const auto & a : cal.attempts()) all_valid = all_valid && a.valid && a.if_khz == 741471;
     check(all_valid, "every attempt valid, IF 741471");
     /* 5 attempts x (hop, acquire) = 10 tunes, alternating far / near. */
-    check(run.tunes.size() == 10, "ten tune commands (hop + acquire, five times)");
+    check(run.tunes.size() == 2 * LnbCalibration::kAttempts, "twenty tune commands (hop + acquire, ten times)");
     bool alternate = true;
     for(size_t i = 0; i < run.tunes.size(); ++i)
         alternate = alternate && run.tunes[i] == (i % 2 == 0 ? 741474 + 3000 : 741474);
     check(alternate, "commands alternate: hop to IF+3000, then back to 741474");
-    check(run.seconds > 30 && run.seconds < 90, "takes roughly a minute of simulated time");
+    check(run.seconds > 60 && run.seconds < 150, "takes roughly a minute and a half of simulated time");
 }
 
 void test_median_rejects_outlier()
@@ -148,7 +148,7 @@ void test_no_beacon()
     const Run run = drive(cal, rx, t0);
     check(cal.outcome() == LnbCalibration::Outcome::Failed, "outcome is Failed");
     check(cal.failure_reason().find("did not lock") != std::string::npos, "reason mentions no lock");
-    check(run.seconds < 40, "gave up within ~30 s, did not burn all five attempts");
+    check(run.seconds < 40, "gave up within ~30 s, did not burn all ten attempts");
 }
 
 void test_implausible_lo()

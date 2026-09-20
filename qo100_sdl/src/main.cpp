@@ -2245,10 +2245,10 @@ void draw_lnb_cal_prompt(SDL_Renderer * renderer, TextCache & text,
     draw_rounded_rect(renderer, popup, kPopupRadius, kYellow);
 
     const int centre_x = popup.x + popup.w / 2;
-    text.draw("LNB NOT CALIBRATED", centre_x, popup.y + 36, kYellow, 30, true);
+    text.draw("LNB NOT CALIBRATED", centre_x, popup.y + 36, kYellow, 32, true);
     text.draw("Measure your LNB's real frequency using the beacon?",
               centre_x, popup.y + 80, kText, 18, true);
-    text.draw("Takes about a minute. Video stops while it runs.",
+    text.draw("Takes about 1.5 minutes. Video stops while it runs.",
               centre_x, popup.y + 106, kTextDim, 15, true);
 
     /* The warm-up remark, wrapped to fit inside the popup. */
@@ -2324,9 +2324,15 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
 {
     using Outcome = qo100::LnbCalibration::Outcome;
     const bool compact = width <= 800;
-    const int title_size = compact ? 20 : 24;
-    const int body_size = compact ? 15 : 17;
+    /* Text is only drawn at font sizes preloaded in main() (proportional:
+     * 9 10 11 12 14 15 16 18 20 32 48; monospace: 9 10 11 16 20 26) - any
+     * other size silently draws nothing - so every size below is one of those. */
+    const int title_size = 20;
+    const int body_size = compact ? 15 : 16;
+    const int emph_size = compact ? 16 : 18;     /* status/step line */
     const int small_size = 14;
+    const int mono_size = 16;                    /* the numbers of the report */
+    const int mono_big_size = compact ? 16 : 20; /* the headline LO value */
 
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
@@ -2341,8 +2347,9 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
     const int left = card.x + 24;
     int y = card.y + 16;
     /* One line of text, advancing the cursor. */
-    const auto line = [&](const std::string & value, Colour colour, int size, int gap = 8) {
-        text.draw(value, left, y, colour, size);
+    const auto line = [&](const std::string & value, Colour colour, int size, int gap = 8,
+                          bool mono = false) {
+        text.draw(value, left, y, colour, size, false, mono);
         y += size + gap;
     };
     /* Wrapped paragraph; characters per line estimated from the font size. */
@@ -2352,22 +2359,30 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         for(const std::string & wrapped : wrap_words(value, max_chars)) line(wrapped, colour, size, 4);
         y += 6;
     };
-    /* The list of measurements so far (accepted IF and the LO it implies). */
+    /* The list of measurements so far (accepted IF and the LO it implies), in
+     * the monospace font so the digits line up, in two columns (1-5 left,
+     * 6-10 right) so ten rows still fit the small 800x480 screen. */
     const auto readings = [&] {
         line("Measurements", kTextDim, small_size, 6);
         const auto & attempts = cal.attempts();
+        const int rows_per_column = (qo100::LnbCalibration::kAttempts + 1) / 2;
+        const int column_width = (card.w - 48) / 2;
+        const int row_height = mono_size + 5;
         for(size_t i = 0; i < attempts.size(); ++i) {
             char row[96];
             if(attempts[i].valid)
-                std::snprintf(row, sizeof(row), "%zu   beacon IF %ld kHz   ->   LO %.3f MHz",
-                              i + 1, attempts[i].if_khz,
+                std::snprintf(row, sizeof(row), "%2zu  IF %ld kHz  LO %.3f MHz", i + 1,
+                              attempts[i].if_khz,
                               qo100::LnbCalibration::kBeaconRfMhz - attempts[i].if_khz / 1000.0);
-            else
-                std::snprintf(row, sizeof(row), "%zu   rejected: %s", i + 1,
+            else   /* the reason is cut to fit its column */
+                std::snprintf(row, sizeof(row), "%2zu  rejected: %.20s", i + 1,
                               attempts[i].note.c_str());
-            line(row, attempts[i].valid ? kText : kYellow, small_size + 1, 4);
+            const int column = static_cast<int>(i) / rows_per_column;
+            const int row_in_column = static_cast<int>(i) % rows_per_column;
+            text.draw(row, left + column * column_width, y + row_in_column * row_height,
+                      attempts[i].valid ? kText : kYellow, mono_size, false, true);
         }
-        y += 6;
+        y += rows_per_column * row_height + 6;
     };
     bool warmup_warning = false;
     const std::string warmup = lnb_warmup_text(uptime_minutes, warmup_warning);
@@ -2398,14 +2413,14 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         set_colour(renderer, kBorder);
         SDL_RenderDrawRect(renderer, &bar);
         y += 26;
-        line(cal.step_text(), kText, body_size + 1, 12);
+        line(cal.step_text(), kText, emph_size, 12);
         readings();
         const double running_lo = cal.running_lo_mhz();
         if(running_lo > 0.0) {
             char estimate[96];
             std::snprintf(estimate, sizeof(estimate), "Estimate so far:  LNB LO %.4f MHz  (%+.1f kHz)",
                           running_lo, (running_lo - settings.lnb_lo_mhz) * 1000.0);
-            line(estimate, kGreen, body_size + 1);
+            line(estimate, kGreen, mono_size, 8, true);
         }
         warmup_footer();
     }
@@ -2413,9 +2428,9 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         /* --- finished, measured --- */
         line("LNB LO MEASURED", kGreen, title_size, 10);
         char result[128];
-        std::snprintf(result, sizeof(result), "%.4f MHz    (%+.1f kHz from the configured %.2f MHz)",
+        std::snprintf(result, sizeof(result), "%.4f MHz  (%+.1f kHz from configured %.2f MHz)",
                       cal.result_lo_mhz(), cal.deviation_khz(), settings.lnb_lo_mhz);
-        line(result, kText, body_size + 3, 12);
+        line(result, kText, mono_big_size, 12, true);
         paragraph(spectrum_local
                       ? "Stored. The local RTL-SDR spectrum still uses the configured LO until "
                         "it is calibrated as well."
@@ -2439,11 +2454,11 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
             char stored[128];
             std::snprintf(stored, sizeof(stored), "Measured LNB LO:  %.4f MHz",
                           settings.lnb_lo_calibrated_mhz);
-            line(stored, kText, body_size + 3);
-            std::snprintf(stored, sizeof(stored), "Deviation from the configured %.2f MHz:  %+.1f kHz",
+            line(stored, kText, mono_big_size, 8, true);
+            std::snprintf(stored, sizeof(stored), "Deviation from configured %.2f MHz:  %+.1f kHz",
                           settings.lnb_lo_mhz,
                           (settings.lnb_lo_calibrated_mhz - settings.lnb_lo_mhz) * 1000.0);
-            line(stored, kText, body_size);
+            line(stored, kText, mono_size, 8, true);
             line("Measured on " + settings.lnb_lo_calibrated_at, kTextDim, body_size, 12);
             if(spectrum_local)
                 paragraph("The local RTL-SDR spectrum still uses the configured LO until it is "
@@ -2456,7 +2471,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
                       "exactly on the carrier - which matters for the narrowest signals.",
                       kText, body_size);
         }
-        paragraph("It takes about a minute. The video stops while it runs, and the beacon "
+        paragraph("It takes about a minute and a half. The video stops while it runs, and the beacon "
                   "must be receivable.", kTextDim, body_size);
         if(cal.outcome() == Outcome::Cancelled)
             line("Cancelled - nothing was changed.", kTextDim, body_size);
