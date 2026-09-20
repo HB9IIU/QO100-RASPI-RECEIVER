@@ -46,46 +46,71 @@ def capture_two_portions(sdr, center, offsets, window):
 
 
 def estimate_offset(offsets, power):
-    """Local half-power edges, with conservative width/passband/confidence gates."""
+    """Find the principal transition at each edge and return its midpoint offset."""
     smooth = np.convolve(power, np.ones(21) / 21, mode='same')
-    centers = []
-    edges = None
+    centers = {}
+    edges_by_fraction = {}
     contrasts = []
-    for fraction in (0.35, 0.5, 0.65):
-        pair = []
-        for side in (-1, 1):
-            distance = offsets * side
-            floor = np.median(smooth[(distance > 1.07e6) & (distance < 1.12e6)])
-            plateau = np.median(smooth[(distance > .25e6) & (distance < .55e6)])
-            contrast = 10 * np.log10(max(plateau, 1e-30) / max(floor, 1e-30))
-            if contrast < 3:
-                raise ValueError('Beacon contrast below 3 dB or passband edges not clear')
+    side_crossings = {}
+    for side in (-1, 1):
+        distance = offsets * side
+        order = np.argsort(distance)
+        distance = distance[order]
+        values = smooth[order]
+        floor = np.median(values[(distance > 1.07e6) & (distance < 1.12e6)])
+        plateau = np.median(values[(distance > .25e6) & (distance < .55e6)])
+        contrast = 10 * np.log10(max(plateau, 1e-30) / max(floor, 1e-30))
+        if contrast < 3 or plateau <= floor:
+            raise ValueError('Beacon contrast below 3 dB or passband edges not clear')
+        contrasts.append(float(contrast))
+
+        # Find the strongest sustained outward drop. Spectral ripple may cross
+        # a threshold several times, but it should not replace the slot edge.
+        normalized = (values - floor) / (plateau - floor)
+        candidates = np.flatnonzero((distance > .60e6) & (distance < 1.05e6))
+        bin_width = np.median(np.diff(distance))
+        half_span = max(2, int(round(40_000 / bin_width)))
+        scores = np.full(candidates.size, -np.inf)
+        for position, index in enumerate(candidates):
+            if index >= half_span and index + half_span < normalized.size:
+                inside = np.mean(normalized[index-half_span:index])
+                outside = np.mean(normalized[index:index+half_span])
+                scores[position] = inside - outside
+        # Contrast, plausible width, and edge-symmetry checks below decide
+        # whether the result is trustworthy. Do not impose an additional
+        # steepness threshold here: the real beacon has a gradual shoulder.
+        if not np.isfinite(scores).any() or np.max(scores) <= 0:
+            raise ValueError(f"{'Left' if side == -1 else 'Right'} edge is not clear")
+        principal = distance[candidates[np.argmax(scores)]]
+
+        crossings = {}
+        local = np.flatnonzero((distance > principal - 120_000) &
+                               (distance < principal + 120_000))
+        for fraction in (.35, .5, .65):
             threshold = floor + fraction * (plateau - floor)
-            indices = np.flatnonzero((distance > .60e6) & (distance < 1.05e6))
-            if side == -1:
-                indices = indices[::-1]  # Always walk outward from the beacon.
-            candidates = []
-            for a, b in zip(indices[:-1], indices[1:]):
-                if smooth[a] >= threshold > smooth[b]:
-                    crossing = offsets[a] + (offsets[b] - offsets[a]) * (
-                        (threshold - smooth[a]) / (smooth[b] - smooth[a]))
-                    candidates.append(crossing)
-            if len(candidates) != 1:
+            found = []
+            for a, b in zip(local[:-1], local[1:]):
+                if values[a] >= threshold > values[b]:
+                    found.append(distance[a] + (distance[b] - distance[a]) *
+                                 (threshold - values[a]) / (values[b] - values[a]))
+            if not found:
                 raise ValueError(f"{'Left' if side == -1 else 'Right'} edge: "
-                                 f'{len(candidates)} crossings at {fraction:.0%} threshold')
-            pair.append(candidates[0])
-            if fraction == .5:
-                contrasts.append(float(contrast))
-        centers.append(sum(pair) / 2)
-        if fraction == .5:
-            edges = pair
+                                 f'no crossing at {fraction:.0%} threshold')
+            crossings[fraction] = side * min(found, key=lambda value: abs(value-principal))
+        side_crossings[side] = crossings
+
+    for fraction in (.35, .5, .65):
+        pair = [side_crossings[-1][fraction], side_crossings[1][fraction]]
+        edges_by_fraction[fraction] = pair
+        centers[fraction] = sum(pair) / 2
+    edges = edges_by_fraction[.5]
     width = edges[1] - edges[0]
     if not 1.4e6 <= width <= 2.05e6:
         raise ValueError('Detected beacon width is implausible')
-    spread = max(centers) - min(centers)
+    spread = max(centers.values()) - min(centers.values())
     if spread > 25_000:
         raise ValueError('Asymmetric/distorted edges: center depends too strongly on threshold')
-    return {'correction_hz': float(-centers[1]), 'width_hz': float(width),
+    return {'correction_hz': float(-centers[.5]), 'width_hz': float(width),
             'edge_spread_hz': float(spread), 'contrast_db': min(contrasts)}
 
 
@@ -114,29 +139,25 @@ class DiagnosticPlot:
         self.plt = plt
         self.offsets = offsets
         self.fig, self.ax = plt.subplots(figsize=(12, 6))
-        self.fig.subplots_adjust(bottom=.24)
-        self.raw, = self.ax.plot(offsets / 1000, np.zeros_like(offsets),
-                                 alpha=.35, label='Measured spectrum')
-        self.smoothed, = self.ax.plot([], [], label='Smoothed spectrum')
+        self.fig.subplots_adjust(bottom=.19)
+        self.smoothed, = self.ax.plot([], [], color='tab:blue', label='Smoothed spectrum')
         self.ax.axvline(0, color='black', ls=':', label='Nominal beacon center')
-        self.thresholds = []
+        self.left_edge = self.ax.axvline(np.nan, color='tab:orange', ls='--',
+                                         label='Detected edges')
+        self.right_edge = self.ax.axvline(np.nan, color='tab:orange', ls='--')
+        self.edge_references = []
         for side in (-1, 1):
             bounds = sorted([side * 600, side * 1050])
-            self.ax.axvspan(*bounds, color='orange', alpha=.12,
-                           label='Edge search' if side == -1 else None)
-            self.ax.axvspan(*sorted([side * 1070, side * 1120]), color='gray', alpha=.2,
-                           label='Noise measurement' if side == -1 else None)
-            self.ax.axvspan(*sorted([side * 250, side * 550]), color='green', alpha=.08,
-                           label='Plateau measurement' if side == -1 else None)
-            for fraction in (.35, .5, .65):
-                line, = self.ax.plot(bounds, [0, 0], color='red',
-                                    ls='-' if fraction == .5 else '--', alpha=.6,
-                                    label='35/50/65% power thresholds' if side == -1 and fraction == .5 else None)
-                self.thresholds.append((side, fraction, line))
+            reference, = self.ax.plot(bounds, [np.nan, np.nan], color='tab:green', ls=':',
+                                      label='Local 50% edge reference' if side == -1 else None)
+            marker, = self.ax.plot([], [], marker='o', color='tab:orange', ls='none')
+            self.edge_references.append((side, reference, marker))
+        self.measured_center = self.ax.axvline(np.nan, color='tab:red',
+                                               label='Edge midpoint (measured center)')
         self.ax.set(xlim=(offsets[0]/1000, offsets[-1]/1000),
-                    xlabel=f'Offset from {center/1e6:.6f} MHz LNB output (kHz)',
+                    xlabel=f'Frequency relative to nominal {center/1e6:.6f} MHz IF center (kHz)',
                     ylabel='Relative power (dB/bin)',
-                    title='Beacon diagnostics — two overlapping captures — close window to stop')
+                    title='Beacon center calibration — close window to stop')
         self.ax.grid(alpha=.2)
         self.ax.legend(loc='upper right', fontsize=8)
         self.status = self.fig.text(.08, .06, 'Waiting for samples', fontsize=10)
@@ -147,17 +168,35 @@ class DiagnosticPlot:
         normalization = FFT_SIZE * np.sum(np.hanning(FFT_SIZE)**2)
         def db(values):
             return 10 * np.log10(np.maximum(values / normalization, 1e-30))
-        self.raw.set_ydata(db(power))
         self.smoothed.set_data(self.offsets/1000, db(smooth))
-        for side, fraction, line in self.thresholds:
+        edge_positions = None
+        if not row['rejection']:
+            center = -row['correction_hz'] / 1000
+            half_width = row['width_hz'] / 2000
+            edge_positions = [center-half_width, center+half_width]
+            self.left_edge.set_xdata([edge_positions[0], edge_positions[0]])
+            self.right_edge.set_xdata([edge_positions[1], edge_positions[1]])
+            self.measured_center.set_xdata([center, center])
+        else:
+            self.left_edge.set_xdata([np.nan, np.nan])
+            self.right_edge.set_xdata([np.nan, np.nan])
+            self.measured_center.set_xdata([np.nan, np.nan])
+        for index, (side, reference, marker) in enumerate(self.edge_references):
             distance = self.offsets * side
             floor = np.median(smooth[(distance > 1.07e6) & (distance < 1.12e6)])
             plateau = np.median(smooth[(distance > .25e6) & (distance < .55e6)])
-            threshold = db(floor + fraction*(plateau-floor))
-            line.set_ydata([threshold, threshold])
+            threshold_db = db(floor + .5*(plateau-floor))
+            reference.set_ydata([threshold_db, threshold_db])
+            if edge_positions is not None:
+                marker.set_data([edge_positions[index]], [threshold_db])
+            else:
+                marker.set_data([], [])
         values = db(smooth)[20:-20]
         self.ax.set_ylim(np.percentile(values, 1)-4, np.percentile(values, 99)+5)
-        result = row['rejection'] or f"Accepted: correction {row['correction_hz']/1000:+.1f} kHz"
+        result = row['rejection'] or (f"Center = (left edge + right edge) / 2 = "
+                                      f"{-row['correction_hz']/1000:+.1f} kHz; "
+                                      f"correction {row['correction_hz']/1000:+.1f} kHz; "
+                                      f"width {row['width_hz']/1e6:.3f} MHz")
         self.status.set_text(f"{row['elapsed_s']:.0f}s — accepted {accepted}/{attempts}\n{result}")
         self.fig.canvas.draw_idle()
         self.plt.pause(.001)
