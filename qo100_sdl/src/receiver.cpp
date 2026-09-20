@@ -177,6 +177,14 @@ ReceiverSettings load_receiver_settings(const std::string & repository_root)
     json_object * value = nullptr;
     if(json_object_object_get_ex(root, "lnb_lo_mhz", &value))
         settings.lnb_lo_mhz = json_object_get_double(value);
+    /* Optional keys: a settings.json written before the LNB calibration
+     * existed simply has neither, which reads as "never calibrated". */
+    if(json_object_object_get_ex(root, "lnb_lo_calibrated_mhz", &value))
+        settings.lnb_lo_calibrated_mhz = json_object_get_double(value);
+    if(json_object_object_get_ex(root, "lnb_lo_calibrated_at", &value)) {
+        const char * stamp = json_object_get_string(value);
+        if(stamp != nullptr) settings.lnb_lo_calibrated_at = stamp;
+    }
     if(json_object_object_get_ex(root, "lnb_voltage_enabled", &value))
         settings.lnb_voltage_enabled = json_object_get_boolean(value);
     if(json_object_object_get_ex(root, "lnb_voltage_horizontal", &value))
@@ -188,8 +196,13 @@ ReceiverSettings load_receiver_settings(const std::string & repository_root)
     if(json_object_object_get_ex(root, "exit_full_stop", &value))
         settings.exit_full_stop = json_object_get_boolean(value);
     json_object_put(root);
-    qo100::log( "[SETTINGS] LO=%.1fMHz voltage=%s/%s volume=%d%% display=%s exit=%s\n",
-        settings.lnb_lo_mhz, settings.lnb_voltage_enabled ? "on" : "off",
+    qo100::log( "[SETTINGS] LO=%.1fMHz calibrated=%s voltage=%s/%s volume=%d%% display=%s exit=%s\n",
+        settings.lnb_lo_mhz,
+        lnb_calibrated(settings)
+            ? (std::to_string(settings.lnb_lo_calibrated_mhz) + "MHz@" +
+               settings.lnb_lo_calibrated_at).c_str()
+            : "no",
+        settings.lnb_voltage_enabled ? "on" : "off",
         settings.lnb_voltage_horizontal ? "18V" : "13V", settings.audio_volume_percent,
         settings.display_800x480 ? "800x480" : "1024x600",
         settings.exit_full_stop ? "full-stop" : "restart");
@@ -204,6 +217,14 @@ bool save_receiver_settings(const std::string & repository_root,
     if(root == nullptr) return false;
     json_object_object_add(root, "lnb_lo_mhz",
                            json_object_new_double(settings.lnb_lo_mhz));
+    /* Only written once a calibration exists, so an uncalibrated
+     * settings.json stays exactly as it always was. */
+    if(lnb_calibrated(settings)) {
+        json_object_object_add(root, "lnb_lo_calibrated_mhz",
+                               json_object_new_double(settings.lnb_lo_calibrated_mhz));
+        json_object_object_add(root, "lnb_lo_calibrated_at",
+                               json_object_new_string(settings.lnb_lo_calibrated_at.c_str()));
+    }
     json_object_object_add(root, "lnb_voltage_enabled",
                            json_object_new_boolean(settings.lnb_voltage_enabled));
     json_object_object_add(root, "lnb_voltage_horizontal",

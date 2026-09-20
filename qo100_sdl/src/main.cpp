@@ -38,6 +38,7 @@
 #include <unistd.h>
 
 #include "receiver.h"
+#include "lnb_calibration.h"
 #include "app_log.h"
 #include "chat_client.h"
 #include "video_decoder.h"
@@ -1818,7 +1819,7 @@ void draw_spectrum_source_popup(SDL_Renderer * renderer, TextCache & text,
     }
 }
 
-enum class AppPage { Main, Settings, Chat, Tune };
+enum class AppPage { Main, Settings, Chat, Tune, LnbCal };
 enum class ChatInput { None, Nick, Message };
 
 SDL_Rect page_back_rect(int width)
@@ -1944,6 +1945,17 @@ SDL_Rect settings_autostart_rect(int width, int index)
     return {card.x + 24 + index * 216, card.y + 48, 200, 40};
 }
 
+/* The small "LNB CAL" button in the header of the RECEIVER TUNING card. It
+ * opens the LNB calibration page (see draw_lnb_cal_page). It lives in the
+ * card header, next to the LNB LO setting it relates to, because every other
+ * spot on this page is already taken. */
+SDL_Rect settings_lnb_cal_rect(int width)
+{
+    const SDL_Rect card = settings_receiver_card_rect(width);
+    constexpr int button_width = 132;
+    return {card.x + card.w - button_width - 12, card.y + 6, button_width, 28};
+}
+
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
                         const SDL_Rect & card, const std::string & title, bool compact)
 {
@@ -1977,7 +1989,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                         int exit_behaviour_choice,
                         const std::string & tuner_product,
                         bool longmynd_connected, bool can_use_1024x600,
-                        const TouchState & touch)
+                        bool lnb_cal_done, const TouchState & touch)
 {
     const bool compact = settings_compact(width);
     const int label_size = compact ? 14 : 16;
@@ -1990,6 +2002,12 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
 
     const SDL_Rect receiver_card = settings_receiver_card_rect(width);
     draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING", compact);
+    /* Green once an LNB calibration is stored, yellow while it is still to be
+     * done - the same at-a-glance status as the startup prompt. */
+    const SDL_Rect cal_button = settings_lnb_cal_rect(width);
+    draw_button(renderer, text, cal_button, lnb_cal_done ? "LNB CAL OK" : "LNB CAL",
+                lnb_cal_done ? kGreen : kYellow, compact ? 12 : 14, false,
+                is_pressed(touch, cal_button));
     const int lo_label_y = compact ? receiver_card.y + 46 : receiver_card.y + 50;
     text.draw("LNB LO Offset (MHz)", receiver_card.x + (compact ? 16 : 24), lo_label_y,
               kText, label_size);
@@ -2112,6 +2130,355 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         text.draw("Launches automatically at power-on (kiosk mode)",
                   autostart_card.x + 24, autostart_card.y + autostart_card.h - 20,
                   kTextDim, 14);
+}
+
+/* ------------------------------------------------------------------------
+ * LNB calibration: small helpers, the startup prompt, and the calibration page
+ *
+ * The measurement itself lives in lnb_calibration.h (pure logic, unit-tested).
+ * Everything here is only presentation: what to tell the user before, during
+ * and after a run, and where the buttons are.
+ * ---------------------------------------------------------------------- */
+
+/* How long the system has been up, in whole minutes; -1 if it cannot be read.
+ *
+ * This is the app's stand-in for "how long has the LNB been warming up". The
+ * LNB is powered from outside this app (a bias tee), so the app cannot know
+ * when it was switched on; the Pi and the LNB normally power up together, so
+ * uptime is the best available guess - and the wording shown to the user says
+ * "system" and "may", never that the LNB is definitely cold or warm. */
+long system_uptime_minutes()
+{
+    std::ifstream uptime("/proc/uptime");
+    double seconds = 0.0;
+    if(!(uptime >> seconds)) return -1;
+    return static_cast<long>(seconds / 60.0);
+}
+
+/* An LNB oscillator drifts noticeably while it warms up; 15-30 minutes is the
+ * usual settling time, so anything under this triggers the warning. */
+constexpr long kLnbWarmupMinutes = 20;
+
+/* "YYYY-MM-DD HH:MM" in local time - what gets stored with a calibration. */
+std::string local_timestamp_now()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+    char buffer[32];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &local);
+    return buffer;
+}
+
+/* The warm-up remark shown on the page and in the startup prompt.
+ * `warning` is set when the system has been up for less than
+ * kLnbWarmupMinutes, so the caller can colour it. */
+std::string lnb_warmup_text(long uptime_minutes, bool & warning)
+{
+    warning = uptime_minutes >= 0 && uptime_minutes < kLnbWarmupMinutes;
+    if(warning)
+        return "The system has only been up for " + std::to_string(uptime_minutes) +
+               " min, so the LNB may still be warming up. Its frequency drifts during "
+               "the first 15-30 minutes, so a measurement now may be inaccurate.";
+    return "For the best result, measure after the LNB has been powered for 15-30 minutes.";
+}
+
+/* Very small word-wrap: the text renderer has none, and the reasons and
+ * explanations here are longer than one line on an 800-pixel screen. */
+std::vector<std::string> wrap_words(const std::string & text, size_t max_chars)
+{
+    std::vector<std::string> lines;
+    std::string current;
+    size_t start = 0;
+    while(start <= text.size()) {
+        size_t end = text.find(' ', start);
+        if(end == std::string::npos) end = text.size();
+        const std::string word = text.substr(start, end - start);
+        if(!current.empty() && current.size() + 1 + word.size() > max_chars) {
+            lines.push_back(current);
+            current = word;
+        }
+        else {
+            current = current.empty() ? word : current + " " + word;
+        }
+        start = end + 1;
+    }
+    if(!current.empty()) lines.push_back(current);
+    return lines;
+}
+
+/* ---- startup prompt: "LNB not calibrated yet - calibrate now?" ---- */
+
+enum class LnbCalPromptKind { None, Ask };
+
+SDL_Rect lnb_cal_prompt_rect(int screen_width, int screen_height)
+{
+    const int width = std::min(640, screen_width - 60);
+    constexpr int height = 300;
+    return {(screen_width - width) / 2, (screen_height - height) / 2, width, height};
+}
+
+SDL_Rect lnb_cal_prompt_button_rect(int screen_width, int screen_height, bool calibrate)
+{
+    const SDL_Rect popup = lnb_cal_prompt_rect(screen_width, screen_height);
+    constexpr int button_width = 200;
+    constexpr int gap = 20;
+    const int left = popup.x + (popup.w - (button_width * 2 + gap)) / 2;
+    return {calibrate ? left : left + button_width + gap, popup.y + popup.h - 62,
+            button_width, 44};
+}
+
+void draw_lnb_cal_prompt(SDL_Renderer * renderer, TextCache & text,
+                         int screen_width, int screen_height,
+                         LnbCalPromptKind kind, long uptime_minutes,
+                         const TouchState & touch)
+{
+    if(kind == LnbCalPromptKind::None) return;
+
+    const SDL_Rect screen{0, 0, screen_width, screen_height};
+    set_colour(renderer, {0, 0, 0, 180});
+    SDL_RenderFillRect(renderer, &screen);
+
+    const SDL_Rect popup = lnb_cal_prompt_rect(screen_width, screen_height);
+    constexpr int kPopupRadius = 16;
+    fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
+    draw_rounded_rect(renderer, popup, kPopupRadius, kYellow);
+
+    const int centre_x = popup.x + popup.w / 2;
+    text.draw("LNB NOT CALIBRATED", centre_x, popup.y + 36, kYellow, 30, true);
+    text.draw("Measure your LNB's real frequency using the beacon?",
+              centre_x, popup.y + 80, kText, 18, true);
+    text.draw("Takes about a minute. Video stops while it runs.",
+              centre_x, popup.y + 106, kTextDim, 15, true);
+
+    /* The warm-up remark, wrapped to fit inside the popup. */
+    bool warning = false;
+    const std::string warmup = lnb_warmup_text(uptime_minutes, warning);
+    int y = popup.y + 142;
+    for(const std::string & line : wrap_words(warmup, 62)) {
+        text.draw(line, centre_x, y, warning ? kYellow : kTextDim, 15, true);
+        y += 22;
+    }
+
+    /* If the system is young, make the button say what is being decided. */
+    const SDL_Rect yes_button = lnb_cal_prompt_button_rect(screen_width, screen_height, true);
+    const SDL_Rect no_button = lnb_cal_prompt_button_rect(screen_width, screen_height, false);
+    draw_button(renderer, text, yes_button, warning ? "CALIBRATE ANYWAY" : "CALIBRATE",
+                kGreen, 15, false, is_pressed(touch, yes_button));
+    draw_button(renderer, text, no_button, warning ? "WAIT" : "LATER", kText, 16,
+                false, is_pressed(touch, no_button));
+}
+
+/* ---- the calibration page ---- */
+
+/* What the buttons on the page do. Which ones are shown depends on the state
+ * of the run (see lnb_cal_actions), and drawing and hit-testing both go
+ * through the same list so they can never disagree. */
+enum class LnbCalAction { Start, Cancel, Back, Done, Retry, Close };
+
+std::vector<LnbCalAction> lnb_cal_actions(const qo100::LnbCalibration & cal)
+{
+    using Outcome = qo100::LnbCalibration::Outcome;
+    if(cal.running()) return {LnbCalAction::Cancel};
+    if(cal.outcome() == Outcome::Success) return {LnbCalAction::Done};
+    if(cal.outcome() == Outcome::Failed)
+        return {LnbCalAction::Retry, LnbCalAction::Close};
+    return {LnbCalAction::Start, LnbCalAction::Back};
+}
+
+SDL_Rect lnb_cal_button_rect(int width, int height, size_t index, size_t count)
+{
+    constexpr int button_width = 210;
+    constexpr int gap = 24;
+    const int total = static_cast<int>(count) * button_width +
+                      static_cast<int>(count - 1) * gap;
+    return {(width - total) / 2 + static_cast<int>(index) * (button_width + gap),
+            height - 68, button_width, 46};
+}
+
+const char * lnb_cal_action_label(LnbCalAction action, bool has_calibration)
+{
+    switch(action) {
+    case LnbCalAction::Start:  return has_calibration ? "REDO" : "START";
+    case LnbCalAction::Cancel: return "CANCEL";
+    case LnbCalAction::Back:   return "BACK";
+    case LnbCalAction::Done:   return "DONE";
+    case LnbCalAction::Retry:  return "RETRY";
+    case LnbCalAction::Close:  return "CLOSE";
+    }
+    return "";
+}
+
+/* Whether an action needs a connected receiver (starting a run does; leaving
+ * or cancelling never does). */
+bool lnb_cal_action_needs_receiver(LnbCalAction action)
+{
+    return action == LnbCalAction::Start || action == LnbCalAction::Retry;
+}
+
+void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int height,
+                       const qo100::LnbCalibration & cal,
+                       const qo100::ReceiverSettings & settings,
+                       bool receiver_ready, bool spectrum_local, long uptime_minutes,
+                       const TouchState & touch)
+{
+    using Outcome = qo100::LnbCalibration::Outcome;
+    const bool compact = width <= 800;
+    const int title_size = compact ? 20 : 24;
+    const int body_size = compact ? 15 : 17;
+    const int small_size = 14;
+
+    set_colour(renderer, kBackground);
+    const SDL_Rect screen{0, 0, width, height};
+    SDL_RenderFillRect(renderer, &screen);
+    text.draw("LNB CALIBRATION", 12, 12, kCyan, 20);
+
+    const SDL_Rect card{24, 52, width - 48, height - 52 - 84};
+    fill_panel(renderer, card);
+    set_colour(renderer, kBorder);
+    SDL_RenderDrawRect(renderer, &card);
+
+    const int left = card.x + 24;
+    int y = card.y + 16;
+    /* One line of text, advancing the cursor. */
+    const auto line = [&](const std::string & value, Colour colour, int size, int gap = 8) {
+        text.draw(value, left, y, colour, size);
+        y += size + gap;
+    };
+    /* Wrapped paragraph; characters per line estimated from the font size. */
+    const auto paragraph = [&](const std::string & value, Colour colour, int size) {
+        const size_t max_chars = static_cast<size_t>(
+            std::max(20, static_cast<int>((card.w - 48) / (size * 0.56))));
+        for(const std::string & wrapped : wrap_words(value, max_chars)) line(wrapped, colour, size, 4);
+        y += 6;
+    };
+    /* The list of measurements so far (accepted IF and the LO it implies). */
+    const auto readings = [&] {
+        line("Measurements", kTextDim, small_size, 6);
+        const auto & attempts = cal.attempts();
+        for(size_t i = 0; i < attempts.size(); ++i) {
+            char row[96];
+            if(attempts[i].valid)
+                std::snprintf(row, sizeof(row), "%zu   beacon IF %ld kHz   ->   LO %.3f MHz",
+                              i + 1, attempts[i].if_khz,
+                              qo100::LnbCalibration::kBeaconRfMhz - attempts[i].if_khz / 1000.0);
+            else
+                std::snprintf(row, sizeof(row), "%zu   rejected: %s", i + 1,
+                              attempts[i].note.c_str());
+            line(row, attempts[i].valid ? kText : kYellow, small_size + 1, 4);
+        }
+        y += 6;
+    };
+    bool warmup_warning = false;
+    const std::string warmup = lnb_warmup_text(uptime_minutes, warmup_warning);
+    /* The warm-up remark sits at the bottom of the card in every state. */
+    const auto warmup_footer = [&] {
+        const size_t max_chars = static_cast<size_t>((card.w - 48) / (small_size * 0.56));
+        const auto lines = wrap_words(warmup, max_chars);
+        int footer_y = card.y + card.h - 12 - static_cast<int>(lines.size()) * (small_size + 4);
+        for(const std::string & wrapped : lines) {
+            text.draw(wrapped, left, footer_y, warmup_warning ? kYellow : kTextDim, small_size);
+            footer_y += small_size + 4;
+        }
+    };
+
+    if(cal.running()) {
+        /* --- a run is in progress --- */
+        line("MEASUREMENT " + std::to_string(cal.attempt_number()) + " OF " +
+                 std::to_string(qo100::LnbCalibration::kAttempts),
+             kCyan, title_size, 10);
+        const SDL_Rect bar{left, y, card.w - 48, 14};
+        set_colour(renderer, kBackground);
+        SDL_RenderFillRect(renderer, &bar);
+        SDL_Rect filled = bar;
+        filled.w = bar.w * static_cast<int>(cal.attempts().size()) /
+                   qo100::LnbCalibration::kAttempts;
+        set_colour(renderer, kCyan);
+        SDL_RenderFillRect(renderer, &filled);
+        set_colour(renderer, kBorder);
+        SDL_RenderDrawRect(renderer, &bar);
+        y += 26;
+        line(cal.step_text(), kText, body_size + 1, 12);
+        readings();
+        const double running_lo = cal.running_lo_mhz();
+        if(running_lo > 0.0) {
+            char estimate[96];
+            std::snprintf(estimate, sizeof(estimate), "Estimate so far:  LNB LO %.4f MHz  (%+.1f kHz)",
+                          running_lo, (running_lo - settings.lnb_lo_mhz) * 1000.0);
+            line(estimate, kGreen, body_size + 1);
+        }
+        warmup_footer();
+    }
+    else if(cal.outcome() == Outcome::Success) {
+        /* --- finished, measured --- */
+        line("LNB LO MEASURED", kGreen, title_size, 10);
+        char result[128];
+        std::snprintf(result, sizeof(result), "%.4f MHz    (%+.1f kHz from the configured %.2f MHz)",
+                      cal.result_lo_mhz(), cal.deviation_khz(), settings.lnb_lo_mhz);
+        line(result, kText, body_size + 3, 12);
+        paragraph(spectrum_local
+                      ? "Stored. The local RTL-SDR spectrum still uses the configured LO until "
+                        "it is calibrated as well."
+                      : "Applied: taps on the spectrum now tune to the true carrier frequency.",
+                  kText, body_size);
+        readings();
+        warmup_footer();
+    }
+    else if(cal.outcome() == Outcome::Failed) {
+        /* --- finished, failed --- */
+        line("CALIBRATION FAILED", kRed, title_size, 10);
+        paragraph(cal.failure_reason(), kText, body_size);
+        paragraph("Nothing was changed.", kTextDim, body_size);
+        if(!cal.attempts().empty()) readings();
+        warmup_footer();
+    }
+    else {
+        /* --- idle: show what is stored (or why to run it) --- */
+        if(qo100::lnb_calibrated(settings)) {
+            line("LNB CALIBRATED", kGreen, title_size, 10);
+            char stored[128];
+            std::snprintf(stored, sizeof(stored), "Measured LNB LO:  %.4f MHz",
+                          settings.lnb_lo_calibrated_mhz);
+            line(stored, kText, body_size + 3);
+            std::snprintf(stored, sizeof(stored), "Deviation from the configured %.2f MHz:  %+.1f kHz",
+                          settings.lnb_lo_mhz,
+                          (settings.lnb_lo_calibrated_mhz - settings.lnb_lo_mhz) * 1000.0);
+            line(stored, kText, body_size);
+            line("Measured on " + settings.lnb_lo_calibrated_at, kTextDim, body_size, 12);
+            if(spectrum_local)
+                paragraph("The local RTL-SDR spectrum still uses the configured LO until it is "
+                          "calibrated as well.", kTextDim, body_size);
+        }
+        else {
+            line("NOT CALIBRATED YET", kYellow, title_size, 10);
+            paragraph("A real LNB's oscillator is never exactly 9750 MHz. This measures yours "
+                      "using the QO-100 beacon (10491.500 MHz), so that tap-to-tune lands "
+                      "exactly on the carrier - which matters for the narrowest signals.",
+                      kText, body_size);
+        }
+        paragraph("It takes about a minute. The video stops while it runs, and the beacon "
+                  "must be receivable.", kTextDim, body_size);
+        if(cal.outcome() == Outcome::Cancelled)
+            line("Cancelled - nothing was changed.", kTextDim, body_size);
+        if(!receiver_ready)
+            paragraph("The receiver is not connected, so a calibration cannot run right now.",
+                      kRed, body_size);
+        warmup_footer();
+    }
+
+    const std::vector<LnbCalAction> actions = lnb_cal_actions(cal);
+    for(size_t index = 0; index < actions.size(); ++index) {
+        const SDL_Rect button = lnb_cal_button_rect(width, height, index, actions.size());
+        const bool disabled = lnb_cal_action_needs_receiver(actions[index]) && !receiver_ready;
+        const Colour colour = disabled ? kTextDim
+            : (actions[index] == LnbCalAction::Cancel ? kRed
+               : (actions[index] == LnbCalAction::Start ||
+                  actions[index] == LnbCalAction::Retry ||
+                  actions[index] == LnbCalAction::Done ? kGreen : kCyan));
+        draw_button(renderer, text, button,
+                    lnb_cal_action_label(actions[index], qo100::lnb_calibrated(settings)),
+                    colour, 16, false, !disabled && is_pressed(touch, button));
+    }
 }
 
 struct KeyboardKey {
@@ -3972,7 +4339,22 @@ int main(int argc, char ** argv)
             ? std::max(100000, settings_lo_centimhz - 1)
             : std::min(2000000, settings_lo_centimhz + 1);
     };
-    double selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
+    /* THE LO USED TO CONVERT BETWEEN RF AND IF (IF = RF - LO) for every tune,
+     * marker and scan step. Not simply the configured LO:
+     *  - remote BATC spectrum: its frequency axis is true RF, so the LNB's
+     *    real (calibrated) LO is the right one - if a calibration exists;
+     *  - local RTL-SDR spectrum: that display is built around the NOMINAL
+     *    configured LO, so the LNB error cancels between display and tuner
+     *    and the nominal LO is still the consistent choice. It keeps that
+     *    until the RTL correction is calibrated as well (a later step);
+     *    using the calibrated LO there now would make every tap ~30 kHz off.
+     * Uncalibrated: always the configured LO, exactly as before. */
+    const auto effective_lo_mhz = [&]() -> double {
+        if(qo100::lnb_calibrated(receiver_settings) && !spectrum_source_local)
+            return receiver_settings.lnb_lo_calibrated_mhz;
+        return receiver_settings.lnb_lo_mhz;
+    };
+    double selected_frequency_mhz = effective_lo_mhz() +
                                     beacon_frequency_khz / 1000.0;
     SpectrumMarker spectrum_marker{
         SpectrumMarkerKind::Tune, selected_frequency_mhz, Clock::time_point{}};
@@ -4079,7 +4461,7 @@ int main(int argc, char ** argv)
      * scan steps. */
     const auto scan_advance = [&] {
         if(!scan_active) return;
-        const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+        const double beacon_mhz = effective_lo_mhz() +
                                   beacon_frequency_khz / 1000.0;
         /* Two passes: prefer signals that aren't cooling down, but if every
          * detected signal currently is (a band full of marginal stations),
@@ -4140,12 +4522,71 @@ int main(int argc, char ** argv)
         scan_current_freq_mhz = target->frequency_mhz;
         scan_dwell_deadline = Clock::now() + kScanMaxDwell;
         const long target_if_khz = std::lround(
-            (target->frequency_mhz - receiver_settings.lnb_lo_mhz) * 1000.0);
+            (target->frequency_mhz - effective_lo_mhz()) * 1000.0);
         const long target_symbol_rate_ksps = std::lround(
             target->symbol_rate_ms * 1000.0F);
         qo100::log("[SCAN] moving to %.3fMHz\n", target->frequency_mhz);
         apply_tune(PendingTune{
             target->frequency_mhz, target_if_khz, target_symbol_rate_ksps}, false);
+    };
+    /* ================= LNB calibration glue =================
+     * The measurement itself is qo100::LnbCalibration (lnb_calibration.h);
+     * these lambdas connect it to the receiver, the settings file and the
+     * pages. */
+    qo100::LnbCalibration lnb_cal;
+    LnbCalPromptKind lnb_cal_prompt = LnbCalPromptKind::None;
+    bool lnb_cal_prompt_shown = false;      /* ask at startup at most once per run */
+    bool lnb_cal_was_running = false;       /* to notice the moment a run ends */
+    AppPage lnb_cal_return_page = AppPage::Main;   /* where BACK/DONE goes */
+    const auto lnb_cal_receiver_ready = [&] {
+        return receiver_enabled && receiver_client.control_connected();
+    };
+    /* Send the tune the calibration asked for, if any. reset() drops the
+     * status of the previous frequency so nothing stale is mistaken for a
+     * lock on the new one. */
+    const auto lnb_cal_dispatch = [&] {
+        if(const auto command = lnb_cal.take_command()) {
+            receiver_client.send_tune(command->if_khz, command->symbol_rate_ksps);
+            receiver_status.reset();
+        }
+    };
+    const auto lnb_cal_start = [&] {
+        /* Calibration owns the tuner for the next minute: stop everything
+         * else that would retune behind its back. */
+        scan_active = false;
+        beacon_return_armed = false;
+        tune_pending_apply = false;
+        pending_tune.reset();
+        awaiting_post_tune_unlock = false;
+        /* The plausibility check compares against the CONFIGURED LO. */
+        lnb_cal.start(Clock::now(), beacon_frequency_khz, beacon_symbol_rate_ksps,
+                      receiver_settings.lnb_lo_mhz);
+        lnb_cal_dispatch();
+        app_page = AppPage::LnbCal;
+        qo100::log("[LNB_CAL] started (%d measurements)\n", qo100::LnbCalibration::kAttempts);
+    };
+    /* Runs once when a calibration ends, however it ended. */
+    const auto lnb_cal_finished = [&] {
+        using Outcome = qo100::LnbCalibration::Outcome;
+        if(lnb_cal.outcome() == Outcome::Success) {
+            receiver_settings.lnb_lo_calibrated_mhz = lnb_cal.result_lo_mhz();
+            receiver_settings.lnb_lo_calibrated_at = local_timestamp_now();
+            qo100::save_receiver_settings(repository_root, receiver_settings);
+            qo100::log("[LNB_CAL] done: LNB LO = %.4fMHz (%+.1fkHz from nominal %.3fMHz)\n",
+                       lnb_cal.result_lo_mhz(), lnb_cal.deviation_khz(),
+                       receiver_settings.lnb_lo_mhz);
+        }
+        else if(lnb_cal.outcome() == Outcome::Failed) {
+            qo100::log("[LNB_CAL] failed: %s\n", lnb_cal.failure_reason().c_str());
+        }
+        else {
+            qo100::log("[LNB_CAL] cancelled; nothing changed\n");
+        }
+        /* Success or not, put the receiver back on the beacon - with the NEW
+         * LO when one was just stored, so it is used from the first tune. */
+        apply_tune(PendingTune{
+            effective_lo_mhz() + beacon_frequency_khz / 1000.0,
+            beacon_frequency_khz, beacon_symbol_rate_ksps}, false);
     };
     const auto close_chat_keyboard = [&] {
         chat_input = ChatInput::None;
@@ -4454,6 +4895,45 @@ int main(int argc, char ** argv)
                     continue;
                 }
                 if(update_popup == UpdatePopupKind::Installing) continue;
+                /* Startup prompt: calibrate now, or later. */
+                if(lnb_cal_prompt == LnbCalPromptKind::Ask) {
+                    if(point_in_rect(x, y, lnb_cal_prompt_button_rect(
+                           display.width, display.height, true))) {
+                        lnb_cal_prompt = LnbCalPromptKind::None;
+                        lnb_cal_return_page = AppPage::Main;
+                        lnb_cal_start();
+                    }
+                    else if(point_in_rect(x, y, lnb_cal_prompt_button_rect(
+                                display.width, display.height, false))) {
+                        lnb_cal_prompt = LnbCalPromptKind::None;
+                        qo100::log("[LNB_CAL] startup prompt postponed\n");
+                    }
+                    continue;
+                }
+                if(app_page == AppPage::LnbCal) {
+                    /* The buttons on offer depend on the run's state (see
+                     * lnb_cal_actions); drawing uses the same list, so what is
+                     * tapped is always what is shown. */
+                    const std::vector<LnbCalAction> actions = lnb_cal_actions(lnb_cal);
+                    for(size_t index = 0; index < actions.size(); ++index) {
+                        if(!point_in_rect(x, y, lnb_cal_button_rect(
+                               display.width, display.height, index, actions.size())))
+                            continue;
+                        const LnbCalAction action = actions[index];
+                        if(lnb_cal_action_needs_receiver(action) && !lnb_cal_receiver_ready())
+                            break;      /* greyed out on screen */
+                        if(action == LnbCalAction::Start || action == LnbCalAction::Retry)
+                            lnb_cal_start();
+                        else if(action == LnbCalAction::Cancel)
+                            lnb_cal.cancel();   /* the per-frame check retunes the beacon */
+                        else {          /* Back, Done, Close */
+                            lnb_cal.reset();
+                            app_page = lnb_cal_return_page;
+                        }
+                        break;
+                    }
+                    continue;
+                }
                 if(app_page == AppPage::Settings) {
                     /* LO Offset -/+ are handled entirely on press-down (see
                      * SDL_MOUSEBUTTONDOWN above), not here on release - that's
@@ -4462,8 +4942,28 @@ int main(int argc, char ** argv)
                         app_page = AppPage::Main;
                         qo100::log("[SETTINGS_UI] back to main\n");
                     }
+                    else if(point_in_rect(x, y, settings_lnb_cal_rect(display.width))) {
+                        /* Open the calibration page in its idle state; BACK
+                         * returns here, with any unsaved settings edits intact. */
+                        lnb_cal.reset();
+                        lnb_cal_return_page = AppPage::Settings;
+                        app_page = AppPage::LnbCal;
+                        qo100::log("[LNB_CAL] page opened from settings\n");
+                    }
                     else if(point_in_rect(x, y, settings_save_rect(display.width))) {
+                        const double previous_lo_mhz = receiver_settings.lnb_lo_mhz;
                         receiver_settings.lnb_lo_mhz = settings_lo_centimhz / 100.0;
+                        /* A calibration measured the real LO of THIS LNB. If
+                         * the user has just typed a different LO it no longer
+                         * describes what they are using (a new LNB, say), so
+                         * discard it - the startup prompt then asks again. */
+                        if(std::fabs(receiver_settings.lnb_lo_mhz - previous_lo_mhz) > 1e-4 &&
+                           qo100::lnb_calibrated(receiver_settings)) {
+                            receiver_settings.lnb_lo_calibrated_mhz = 0.0;
+                            receiver_settings.lnb_lo_calibrated_at.clear();
+                            lnb_cal_prompt_shown = false;
+                            qo100::log("[LNB_CAL] LNB LO setting edited; calibration discarded\n");
+                        }
                         receiver_settings.lnb_voltage_enabled =
                             settings_voltage_choice != 0;
                         receiver_settings.lnb_voltage_horizontal =
@@ -4479,7 +4979,7 @@ int main(int argc, char ** argv)
                             receiver_client.send_voltage(
                                 receiver_settings.lnb_voltage_enabled,
                                 receiver_settings.lnb_voltage_horizontal);
-                            selected_frequency_mhz = receiver_settings.lnb_lo_mhz +
+                            selected_frequency_mhz = effective_lo_mhz() +
                                 current_tune_if_khz / 1000.0;
                             qo100::log(
                                 "[SETTINGS_UI] applied LO=%.2fMHz voltage=%s display=%s exit=%s\n",
@@ -4588,7 +5088,7 @@ int main(int argc, char ** argv)
                          * tunes back to the beacon, a fixed, predictable
                          * pair of transitions rather than leaving Main
                          * showing whatever was last dialled in here. */
-                        const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+                        const double beacon_mhz = effective_lo_mhz() +
                                                   beacon_frequency_khz / 1000.0;
                         apply_tune(PendingTune{
                             beacon_mhz, beacon_frequency_khz, beacon_symbol_rate_ksps}, false);
@@ -4644,7 +5144,7 @@ int main(int argc, char ** argv)
                             tune_sr_index =
                                 tune_sr_index_for_value(tune_presets[row].symbol_rate_ksps);
                             tune_pending_apply = false;
-                            const double frequency_mhz = receiver_settings.lnb_lo_mhz +
+                            const double frequency_mhz = effective_lo_mhz() +
                                 tune_presets[row].if_khz / 1000.0;
                             apply_tune(PendingTune{
                                 frequency_mhz, tune_presets[row].if_khz,
@@ -4750,7 +5250,7 @@ int main(int argc, char ** argv)
                     scan_active = !scan_active;
                     if(scan_active) {
                         qo100::log("[SCAN] started\n");
-                        scan_current_freq_mhz = receiver_settings.lnb_lo_mhz +
+                        scan_current_freq_mhz = effective_lo_mhz() +
                                                 beacon_frequency_khz / 1000.0;
                         scan_parked_on_beacon = false;
                         scan_awaiting_signal = false;
@@ -4781,7 +5281,7 @@ int main(int argc, char ** argv)
                         tune_if_khz_to_digits(tune_presets[0].if_khz, tune_digits);
                         tune_sr_index = tune_sr_index_for_value(tune_presets[0].symbol_rate_ksps);
                         tune_pending_apply = false;
-                        const double frequency_mhz = receiver_settings.lnb_lo_mhz +
+                        const double frequency_mhz = effective_lo_mhz() +
                             tune_presets[0].if_khz / 1000.0;
                         apply_tune(PendingTune{
                             frequency_mhz, tune_presets[0].if_khz,
@@ -4849,7 +5349,7 @@ int main(int argc, char ** argv)
                         }
                         const double target_frequency_mhz = selected_signal->frequency_mhz;
                         const long target_if_khz = std::lround(
-                            (target_frequency_mhz - receiver_settings.lnb_lo_mhz) * 1000.0);
+                            (target_frequency_mhz - effective_lo_mhz()) * 1000.0);
                         const long target_symbol_rate_ksps = std::lround(
                             selected_signal->symbol_rate_ms * 1000.0F);
                         const long same_signal_tolerance_khz = std::lround(
@@ -5082,8 +5582,9 @@ int main(int argc, char ** argv)
                  * local broadcast simply stopping - that shouldn't yank
                  * you back to the beacon behind your back while you're
                  * deliberately parked on that frequency. */
-                else if(!scan_active && app_page != AppPage::Tune) {
-                    const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+                else if(!scan_active && app_page != AppPage::Tune &&
+                        app_page != AppPage::LnbCal && !lnb_cal.running()) {
+                    const double beacon_mhz = effective_lo_mhz() +
                                               beacon_frequency_khz / 1000.0;
                     if(std::abs(selected_frequency_mhz - beacon_mhz) > 0.02) {
                         beacon_return_armed = true;
@@ -5096,7 +5597,15 @@ int main(int argc, char ** argv)
                 }
             }
             receiver_was_locked = locked_now;
+            /* A NEW status has just arrived: the calibration reads it. */
+            if(lnb_cal.running()) lnb_cal.on_status(Clock::now(), receiver_status);
         }
+
+        /* Calibration timers, its tune commands, and its end-of-run handling. */
+        if(lnb_cal.running()) lnb_cal.tick(Clock::now());
+        lnb_cal_dispatch();
+        if(lnb_cal_was_running && !lnb_cal.running()) lnb_cal_finished();
+        lnb_cal_was_running = lnb_cal.running();
 
         if(lo_hold_direction != 0 && Clock::now() >= lo_next_repeat_at) {
             step_lo_centimhz(lo_hold_direction);
@@ -5129,9 +5638,25 @@ int main(int argc, char ** argv)
             qo100::log("[UPDATE] prompting user\n");
         }
 
+        /* Ask once per run whether to calibrate the LNB, when nothing has been
+         * calibrated yet. Waits until the app has settled and no other popup
+         * is on screen, so it never stacks on the tuner/RTL-SDR/update popups. */
+        if(!lnb_cal_prompt_shown && use_tuner && lnb_cal_receiver_ready() &&
+           !qo100::lnb_calibrated(receiver_settings) && app_page == AppPage::Main &&
+           !lnb_cal.running() && Clock::now() - run_started >= std::chrono::seconds(8) &&
+           tuner_popup == TunerPopupKind::None &&
+           rtlsdr_ask_popup == RtlSdrAskPopupKind::None &&
+           update_popup == UpdatePopupKind::None &&
+           spectrum_source_popup == SpectrumSourcePopupKind::None &&
+           !spectrum_source_switching) {
+            lnb_cal_prompt_shown = true;
+            lnb_cal_prompt = LnbCalPromptKind::Ask;
+            qo100::log("[LNB_CAL] no calibration stored; asking the user\n");
+        }
+
         if(beacon_return_armed && Clock::now() >= beacon_return_deadline) {
             beacon_return_armed = false;
-            const double beacon_mhz = receiver_settings.lnb_lo_mhz +
+            const double beacon_mhz = effective_lo_mhz() +
                                       beacon_frequency_khz / 1000.0;
             qo100::log("[TUNE] returning to beacon\n");
             apply_tune(PendingTune{
@@ -5148,7 +5673,7 @@ int main(int argc, char ** argv)
             tune_pending_apply = false;
             const long if_khz = tune_digits_to_if_khz(tune_digits);
             const long symbol_rate_ksps = kTuneSrValues[tune_sr_index];
-            const double frequency_mhz = receiver_settings.lnb_lo_mhz + if_khz / 1000.0;
+            const double frequency_mhz = effective_lo_mhz() + if_khz / 1000.0;
             apply_tune(PendingTune{frequency_mhz, if_khz, symbol_rate_ksps}, false);
         }
 
@@ -5273,7 +5798,13 @@ int main(int argc, char ** argv)
                                settings_lo_centimhz, settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
                                tuner_product, receiver_client.monitor_connected(),
-                               can_use_1024x600, touch);
+                               can_use_1024x600, qo100::lnb_calibrated(receiver_settings),
+                               touch);
+        }
+        else if(app_page == AppPage::LnbCal) {
+            draw_lnb_cal_page(renderer, text, display.width, display.height, lnb_cal,
+                              receiver_settings, lnb_cal_receiver_ready(),
+                              spectrum_source_local, system_uptime_minutes(), touch);
         }
         else if(app_page == AppPage::Chat) {
             draw_chat_page(renderer, text, display.width, display.height,
@@ -5337,6 +5868,8 @@ int main(int argc, char ** argv)
          * agreement. */
         draw_spectrum_source_popup(renderer, text, display.width, display.height,
                                    spectrum_source_popup);
+        draw_lnb_cal_prompt(renderer, text, display.width, display.height,
+                            lnb_cal_prompt, system_uptime_minutes(), touch);
         draw_update_popup(renderer, text, display.width, display.height,
                           update_popup, touch);
         draw_rtlsdr_ask_popup(renderer, text, display.width, display.height,

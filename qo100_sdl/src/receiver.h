@@ -8,7 +8,25 @@
 namespace qo100 {
 
 struct ReceiverSettings {
+    /* The LNB local-oscillator frequency as CONFIGURED by the user (nominal,
+     * normally 9750.0). This is what the settings screen edits, and what the
+     * local RTL-SDR spectrum is built around. It is never overwritten by the
+     * automatic calibration - see lnb_lo_calibrated_mhz below. */
     double lnb_lo_mhz = 9750.0;
+    /* The LNB's REAL oscillator frequency, as measured by the automatic LNB
+     * calibration (lnb_calibration.h): the beacon is at exactly 10491.500 MHz
+     * and the MiniTiouner reports the IF it actually finds it at, so
+     *     real LO = 10491.500 MHz - measured beacon IF.
+     * 0 = never calibrated. Used instead of lnb_lo_mhz when tuning from the
+     * remote BATC spectrum (whose frequency axis is true RF). Deliberately a
+     * separate field from lnb_lo_mhz: the local RTL-SDR display is built
+     * with the nominal LO, so it must keep using that one until the RTL
+     * correction is calibrated too (see effective_lo_mhz in main.cpp). */
+    double lnb_lo_calibrated_mhz = 0.0;
+    /* When that measurement was made, "YYYY-MM-DD HH:MM" local time. Empty =
+     * never calibrated. Its presence is what "calibration was done" means at
+     * startup. */
+    std::string lnb_lo_calibrated_at;
     bool lnb_voltage_enabled = false;
     bool lnb_voltage_horizontal = false;
     int audio_volume_percent = 50;
@@ -22,6 +40,12 @@ struct ReceiverSettings {
      * it for good. */
     bool exit_full_stop = false;
 };
+
+/* True when a completed LNB calibration is stored. */
+inline bool lnb_calibrated(const ReceiverSettings & settings)
+{
+    return settings.lnb_lo_calibrated_mhz > 0.0 && !settings.lnb_lo_calibrated_at.empty();
+}
 
 ReceiverSettings load_receiver_settings(const std::string & repository_root);
 bool save_receiver_settings(const std::string & repository_root,
