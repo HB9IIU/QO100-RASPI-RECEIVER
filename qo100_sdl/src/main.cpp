@@ -4339,7 +4339,7 @@ int main(int argc, char ** argv)
      *  - remote BATC spectrum: its frequency axis is true RF, so the LNB's
      *    real (calibrated) LO is the right one - if a calibration exists;
      *  - local RTL-SDR spectrum: that display is built around the NOMINAL
-     *    nominal LO, so the LNB error cancels between display and tuner
+     *    LO, so the LNB error cancels between display and tuner
      *    and the nominal LO is still the consistent choice. It keeps that
      *    until the RTL correction is calibrated as well (a later step);
      *    using the calibrated LO there now would make every tap ~30 kHz off.
