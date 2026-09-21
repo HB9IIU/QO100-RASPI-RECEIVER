@@ -2973,7 +2973,10 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     fill_panel(renderer, layout.status_panel);
     const bool locked = receiver.locked();
     double threshold = 0.0;
-    const bool have_threshold = locked && required_mer(receiver, threshold);
+    /* MER reads exactly 0 for the first moments after lock, before the tuner has
+     * measured it: show "---" (and no margin/quality) instead of a false 0.0 dB. */
+    const bool mer_known = locked && receiver.mer_x10 != 0;
+    const bool have_threshold = mer_known && required_mer(receiver, threshold);
     const double mer_margin = receiver.mer_x10 / 10.0 - threshold;
     Colour quality_colour = kTextDim;
     std::string quality = "---";
@@ -2999,8 +3002,8 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     char ber_text[24] = "---";
     char modfec_text[24] = "---";
     char null_text[24] = "---";
+    if(mer_known) std::snprintf(mer_text, sizeof(mer_text), "%.1f", receiver.mer_x10 / 10.0);
     if(locked) {
-        std::snprintf(mer_text, sizeof(mer_text), "%.1f", receiver.mer_x10 / 10.0);
         std::snprintf(ber_text, sizeof(ber_text), "%.2f%%", receiver.ber_x100 / 100.0);
     }
     if(have_threshold) std::snprintf(margin_text, sizeof(margin_text), "%+.1f", mer_margin);
@@ -3666,8 +3669,9 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     char modfec_text[24] = "---";
     char null_text[24] = "---";
     char ldpc_text[24] = "---";
-    if(locked) {
+    if(locked && receiver.mer_x10 != 0)   /* 0 = not measured yet */
         std::snprintf(mer_text, sizeof(mer_text), "%.1f dB", receiver.mer_x10 / 10.0);
+    if(locked) {
         std::snprintf(ldpc_text, sizeof(ldpc_text), "%ld", receiver.ldpc_errors);
         if(receiver.null_packet_percent >= 0)
             std::snprintf(null_text, sizeof(null_text), "%d%%", receiver.null_packet_percent);
