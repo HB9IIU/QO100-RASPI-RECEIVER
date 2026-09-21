@@ -16,7 +16,7 @@ namespace qo100 {
 using Clock = std::chrono::steady_clock;
 using Microseconds = std::chrono::microseconds;
 
-constexpr size_t kVideoQueueCapacity = 12;
+constexpr size_t kVideoQueueCapacity = 18;
 constexpr int64_t kVideoPrebufferMaxUs = 400000;
 constexpr int64_t kClockDiscontinuityUs = 2000000;
 constexpr int64_t kClockRebaseLateUs = 250000;
