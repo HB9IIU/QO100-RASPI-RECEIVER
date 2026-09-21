@@ -16,7 +16,7 @@ namespace qo100 {
 using Clock = std::chrono::steady_clock;
 using Microseconds = std::chrono::microseconds;
 
-constexpr size_t kVideoQueueCapacity = 6;
+constexpr size_t kVideoQueueCapacity = 12;
 constexpr size_t kVideoPrebufferFrames = 3;
 constexpr int64_t kVideoPrebufferMaxUs = 150000;
 constexpr int64_t kClockDiscontinuityUs = 2000000;
@@ -24,10 +24,10 @@ constexpr int64_t kClockRebaseLateUs = 250000;
 /* The newest queued frame may be at most kClockMaxLagFrames frame intervals
  * (clamped to the two Us bounds) ahead of the presenter's clock; beyond that
  * the clock jumps to kClockTargetLagFrames intervals behind the newest. */
-constexpr int64_t kClockMaxLagFrames = 5;
+constexpr int64_t kClockMaxLagFrames = 8;
 constexpr int64_t kClockTargetLagFrames = 3;
-constexpr int64_t kClockMinMaxLagUs = 150000;
-constexpr int64_t kClockMaxMaxLagUs = 600000;
+constexpr int64_t kClockMinMaxLagUs = 200000;
+constexpr int64_t kClockMaxMaxLagUs = 800000;
 
 using VideoFrame = qo100::VideoFrame;
 

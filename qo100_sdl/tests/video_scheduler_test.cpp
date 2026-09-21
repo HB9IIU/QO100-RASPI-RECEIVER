@@ -12,7 +12,7 @@
 
 using namespace qo100;
 
-static int run(int fps)
+static int run(int fps, int burst_size = 1)
 {
     const int64_t kStepUs = 1000000 / fps;
     const int kBurstFrames = 2 * fps;
@@ -35,9 +35,11 @@ static int run(int fps)
         for(int i = 0; i < kBurstFrames; ++i) push_frame();
         auto next = Clock::now();
         while(!done.load()) {
-            next += Microseconds(kStepUs);
+            /* burst_size > 1: frames arrive in groups, like a decoder that
+             * delivers several at once after a hiccup. */
+            next += Microseconds(kStepUs * burst_size);
             std::this_thread::sleep_until(next);
-            push_frame();
+            for(int i = 0; i < burst_size; ++i) push_frame();
         }
     });
 
@@ -65,7 +67,7 @@ static int run(int fps)
                 static_cast<unsigned long long>(stats.rebases));
     int steady = 0;
     for(int i = 8; i < 12; ++i) steady += shown_per_second[i];
-    std::printf("stream %d fps: steady state (seconds 8-11): %.1f fps, rebases after second 6: %llu\n\n", fps,
+    std::printf("stream %d fps, bursts of %d: steady state (seconds 8-11): %.1f fps, rebases after second 6: %llu\n\n", fps, burst_size,
                 steady / 4.0, static_cast<unsigned long long>(stats.rebases + 1 - rebases_at_6s));
     return steady / 4.0 >= fps * 0.85 ? 0 : 1;
 }
@@ -74,6 +76,8 @@ int main()
 {
     int failed = 0;
     for(int fps : {25, 30, 50, 60}) failed += run(fps);
+    failed += run(30, 4);   /* bursty delivery */
+    failed += run(25, 3);
     std::printf(failed == 0 ? "PASS\n" : "FAIL: %d scenario(s)\n", failed);
     return failed == 0 ? 0 : 1;
 }
