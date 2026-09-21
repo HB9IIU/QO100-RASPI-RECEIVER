@@ -642,6 +642,14 @@ public:
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if(queue_.empty()) first_queued_at_ = Clock::now();
+        if(have_last_pushed_) {
+            const double step_ms = (frame.pts_us - last_pushed_pts_us_) / 1000.0;
+            window_pts_step_sum_ms_ += step_ms;
+            window_pts_step_max_ms_ = std::max(window_pts_step_max_ms_, step_ms);
+            ++window_pushed_;
+        }
+        last_pushed_pts_us_ = frame.pts_us;
+        have_last_pushed_ = true;
         if(!queue_.empty() && frame.pts_us <= queue_.back().pts_us) {
             frame.pts_us = queue_.back().pts_us + 1;
         }
@@ -661,7 +669,11 @@ public:
     std::optional<VideoFrame> take_due(Clock::time_point now)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(queue_.empty()) return std::nullopt;
+        ++window_take_calls_;
+        if(queue_.empty()) {
+            ++window_empty_;
+            return std::nullopt;
+        }
 
         if(!clock_started_) {
             const int64_t wait_us = std::chrono::duration_cast<Microseconds>(
@@ -684,7 +696,11 @@ public:
             ++rebases_;
         }
 
-        if(queue_.front().pts_us > stream_now_us + 2000) return std::nullopt;
+        if(queue_.front().pts_us > stream_now_us + 2000) {
+            ++window_future_;
+            window_future_lead_sum_ms_ += (queue_.front().pts_us - stream_now_us) / 1000.0;
+            return std::nullopt;
+        }
 
         VideoFrame selected = std::move(queue_.front());
         queue_.pop_front();
@@ -698,9 +714,34 @@ public:
         return selected;
     }
 
+    /* What the presenter saw since the last call, to tell "no frame was ready"
+     * (empty), "the next frame isn't due yet" (future) and irregular
+     * timestamps (pts step) apart when frames get dropped. */
+    struct WindowStats {
+        uint64_t take_calls = 0, empty = 0, future = 0, pushed = 0;
+        double avg_future_lead_ms = 0, avg_pts_step_ms = 0, max_pts_step_ms = 0;
+    };
+
+    WindowStats take_window_stats()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        WindowStats out;
+        out.take_calls = window_take_calls_;
+        out.empty = window_empty_;
+        out.future = window_future_;
+        out.pushed = window_pushed_;
+        out.avg_future_lead_ms = window_future_ ? window_future_lead_sum_ms_ / window_future_ : 0;
+        out.avg_pts_step_ms = window_pushed_ ? window_pts_step_sum_ms_ / window_pushed_ : 0;
+        out.max_pts_step_ms = window_pts_step_max_ms_;
+        window_take_calls_ = window_empty_ = window_future_ = window_pushed_ = 0;
+        window_future_lead_sum_ms_ = window_pts_step_sum_ms_ = window_pts_step_max_ms_ = 0;
+        return out;
+    }
+
     void reset()
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        have_last_pushed_ = false;
         queue_.clear();
         clock_started_ = false;
         space_available_.notify_all();
@@ -732,6 +773,10 @@ private:
     uint64_t late_drops_ = 0;
     uint64_t presented_ = 0;
     uint64_t rebases_ = 0;
+    bool have_last_pushed_ = false;
+    int64_t last_pushed_pts_us_ = 0;
+    uint64_t window_take_calls_ = 0, window_empty_ = 0, window_future_ = 0, window_pushed_ = 0;
+    double window_future_lead_sum_ms_ = 0, window_pts_step_sum_ms_ = 0, window_pts_step_max_ms_ = 0;
 };
 
 /* The dB range (0..kDisplayMaxDb) the spectrum plot's colour/height mapping
@@ -6283,6 +6328,14 @@ int main(int argc, char ** argv)
                 static_cast<unsigned long long>(video_decoder.decode_errors()),
                 static_cast<unsigned long long>(video_decoder.reopen_count()),
                 static_cast<unsigned long long>(stats.rebases), stats.depth);
+            const auto window = scheduler.take_window_stats();
+            qo100::log(
+                "[SCHED] loop_calls=%llu no_frame=%llu next_not_due=%llu (avg %.0fms early) "
+                "pts_step avg=%.1fms max=%.0fms\n",
+                static_cast<unsigned long long>(window.take_calls),
+                static_cast<unsigned long long>(window.empty),
+                static_cast<unsigned long long>(window.future),
+                window.avg_future_lead_ms, window.avg_pts_step_ms, window.max_pts_step_ms);
             qo100::log(
                 "[AUDIO] chunks=%llu queue=%ums dropped=%llu underruns=%llu "
                 "rebuffers=%llu errors=%llu\n",
