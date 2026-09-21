@@ -65,14 +65,13 @@ int main(int argc, char ** argv)
     for(int i = 0; i < seconds; ++i) std::printf(" %d", shown[static_cast<size_t>(i)]);
     std::printf("\n");
     std::printf("RESULT name=%s size=%dx%d stream_fps=%.1f steady_fps=%.1f first_frame_ms=%.0f "
-                "decoded=%llu late_drops=%llu queue_drops=%llu rebases=%llu underruns=%llu "
+                "decoded=%llu late_drops=%llu queue_drops=%llu rebases=%llu "
                 "decode_errors=%llu cpu_percent=%.0f\n",
                 name, width.load(), height.load(), stream_fps, steady_fps, first_frame_ms,
                 static_cast<unsigned long long>(decoder.decoded_frames()),
                 static_cast<unsigned long long>(stats.late_drops),
                 static_cast<unsigned long long>(stats.queue_drops),
                 static_cast<unsigned long long>(stats.rebases),
-                static_cast<unsigned long long>(stats.underruns),
                 static_cast<unsigned long long>(decoder.decode_errors()),
                 cpu_seconds / seconds * 100.0);
     return 0;

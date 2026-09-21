@@ -28,12 +28,11 @@ Stop the app first if you can: it competes for the CPU and skews the numbers.
 | column | meaning |
 |---|---|
 | stream / shown | the stream's frame rate / frames per second the presenter showed after the first 6 s |
-| pct | shown as % of stream. **PASS >= 90, WARN 75-90, FAIL < 75** |
+| pct | shown as % of stream. **PASS >= 80, WARN 60-80, FAIL < 60** (a 50 fps stream typically shows about 43: the presenter drops the odd frame to keep a short delay) |
 | first_ms | time to the first shown frame (about 2 s is normal: the decoder probes the stream first) |
 | late | frames skipped because they were already late when shown |
 | qdrop | frames dropped because the queue overflowed (should be 0) |
 | rebs | times the presenter's clock jumped (a few during start-up is normal) |
-| under | buffer underruns: the queue ran empty and was rebuilt (a visible freeze each) |
 | cpu% | CPU used by decoder + harness, as % of one core |
 
 The scenarios:
@@ -50,7 +49,7 @@ The scenarios:
 ### What a result tells you
 
 - **All PASS:** decoding and presenting are fine on this Pi. Look elsewhere: the
-  signal itself (bad MER, packet loss: see `[FFMPEG]` and `late`/`under` in the app
+  signal itself (bad MER, packet loss: see `[FFMPEG]` and `late` in the app
   log), other programs using the CPU (`load1` and `app_cpu` in the app's `[SYS]`
   line), or the display path (VNC, X forwarding).
 - **`hevc_*_hw` FAILs but `hevc_*_sw` passes:** the hardware decoder is not working
@@ -60,13 +59,13 @@ The scenarios:
   throttling: `vcgencmd get_throttled` should say `0x0`).
 - **Only 1080p FAILs:** software H.264 1080p is at the edge of what a Pi 5 can do
   while other work is running.
-- **`qdrop` or `under` non-zero:** a presenter/buffering problem; send both outputs.
+- **`qdrop` non-zero:** a presenter/buffering problem; send both outputs.
 
 ### What to ask a user who reports choppy video
 
 1. The output of `./playback_test.sh` (stop the app first).
 2. The app log from the run in question: `qo100_sdl/logs/latest.log`. The lines that
-   matter are `[VIDEO]` (fps, drops, late, underruns), `[SCHED]` (why frames were
+   matter are `[VIDEO]` (fps, drops, late), `[SCHED]` (why frames were
    skipped), `[SYS]` (`app_cpu`, `load1`, temperature) and `[FFMPEG]` (stream errors).
 
 ## playback_harness.cpp

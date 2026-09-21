@@ -31,9 +31,6 @@ struct AudioChunk {
     std::vector<uint8_t> pcm_s16;
     int sample_rate = 48000;
     int channels = 2;
-    /* Stream time of the first sample, on the same timeline as VideoFrame::pts_us
-     * (both come from the transport stream's PTS). INT64_MIN = not known. */
-    int64_t pts_us = INT64_MIN;
 };
 
 /* FFmpeg writes its own unprefixed, untimestamped lines to stderr, in bursts of

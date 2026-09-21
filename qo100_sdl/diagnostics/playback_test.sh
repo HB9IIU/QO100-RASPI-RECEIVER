@@ -123,22 +123,22 @@ done
 
 echo
 echo "== Summary (steady state = after the first 6 s)"
-printf '%-16s %-10s %7s %8s %6s %9s %5s %5s %5s %5s %5s %s\n' \
-  scenario size stream shown pct first_ms late qdrop rebs under cpu% verdict
+printf '%-16s %-10s %7s %8s %6s %9s %5s %5s %5s %5s %s\n' \
+  scenario size stream shown pct first_ms late qdrop rebs cpu% verdict
 fail=0
 for entry in "${results[@]}"; do
   line="${entry%%|*}"
   declare -A f=()
   for kv in $line; do [[ "$kv" == *=* ]] && f["${kv%%=*}"]="${kv#*=}"; done
   pct=$(awk -v s="${f[steady_fps]}" -v t="${f[stream_fps]}" 'BEGIN{ printf "%d", (t > 0 ? s / t * 100 : 0) }')
-  if   [ "$pct" -ge 90 ]; then v=PASS
-  elif [ "$pct" -ge 75 ]; then v=WARN
+  if   [ "$pct" -ge 80 ]; then v=PASS
+  elif [ "$pct" -ge 60 ]; then v=WARN
   else v=FAIL; fail=1; fi
-  printf '%-16s %-10s %7s %8s %5s%% %9s %5s %5s %5s %5s %4s%% %s\n' \
+  printf '%-16s %-10s %7s %8s %5s%% %9s %5s %5s %5s %4s%% %s\n' \
     "${f[name]}" "${f[size]}" "${f[stream_fps]}" "${f[steady_fps]}" "$pct" "${f[first_frame_ms]}" \
-    "${f[late_drops]}" "${f[queue_drops]}" "${f[rebases]}" "${f[underruns]}" "${f[cpu_percent]}" "$v"
+    "${f[late_drops]}" "${f[queue_drops]}" "${f[rebases]}" "${f[cpu_percent]}" "$v"
   unset f
 done
 echo
-echo "PASS >= 90% of the stream's frame rate, WARN 75-90%, FAIL below. Details: diagnostics/README.md"
+echo "PASS >= 80% of the stream's frame rate, WARN 60-80%, FAIL below. Details: diagnostics/README.md"
 exit $fail

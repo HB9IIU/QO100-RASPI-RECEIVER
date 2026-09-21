@@ -381,7 +381,6 @@ public:
         write_ = 0;
         size_ = 0;
         buffering_ = true;
-        pts_known_ = false;
         ++resets_;
     }
 
@@ -403,25 +402,6 @@ public:
             std::memcpy(ring_.data(), chunk.pcm_s16.data() + first, remaining);
         write_ = (write_ + chunk.pcm_s16.size()) % capacity_;
         size_ += chunk.pcm_s16.size();
-        if(chunk.pts_us != INT64_MIN && bytes_per_second_ > 0) {
-            write_end_pts_us_ = chunk.pts_us + static_cast<int64_t>(chunk.pcm_s16.size()) *
-                                1000000 / bytes_per_second_;
-            pts_known_ = true;
-            last_push_at_ = std::chrono::steady_clock::now();
-        }
-    }
-
-    /* Stream time of the sound that is playing right now (what the picture must
-     * match), from the timestamps of what has been queued minus what is still
-     * waiting in the buffer. Empty when there is no usable audio clock - no
-     * timestamps, or no audio for the last second. */
-    std::optional<int64_t> playback_pts_us() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if(device_ == 0 || !pts_known_ || bytes_per_second_ <= 0 ||
-           std::chrono::steady_clock::now() - last_push_at_ > std::chrono::seconds(1))
-            return std::nullopt;
-        return write_end_pts_us_ - static_cast<int64_t>(size_) * 1000000 / bytes_per_second_;
     }
 
     uint32_t queued_ms() const
@@ -510,9 +490,6 @@ private:
     size_t write_ = 0;
     size_t size_ = 0;
     bool buffering_ = true;
-    bool pts_known_ = false;
-    int64_t write_end_pts_us_ = 0;
-    std::chrono::steady_clock::time_point last_push_at_{};
     std::atomic<int> volume_{100};
     std::atomic<uint64_t> dropped_chunks_{0};
     std::atomic<uint64_t> underruns_{0};
@@ -6072,18 +6049,7 @@ int main(int argc, char ** argv)
             spectrum_marker.kind = SpectrumMarkerKind::None;
         }
 
-        /* The picture follows the sound that is being heard (see
-         * VideoScheduler::take_due). The device plays what is in the buffer a
-         * little after we hand it over, so the audio clock is shifted back by
-         * that: QO100_AV_OFFSET_MS (default 100) to tune it. */
-        static const int64_t audio_device_latency_us = [] {
-            const char * value = std::getenv("QO100_AV_OFFSET_MS");
-            return static_cast<int64_t>(value != nullptr ? std::atoi(value) : 100) * 1000;
-        }();
-        std::optional<int64_t> audio_clock;
-        if(const auto position = audio_output.playback_pts_us())
-            audio_clock = *position - audio_device_latency_us;
-        auto due_frame = scheduler.take_due(Clock::now(), audio_clock);
+        auto due_frame = scheduler.take_due(Clock::now());
         /* A frame from the decoder session that was running before the last
          * retune/reset, still in flight: not the new signal's picture. */
         if(due_frame && use_tuner && due_frame->session <= tune_reopen_before)
@@ -6252,8 +6218,7 @@ int main(int argc, char ** argv)
             const uint64_t late_drop_delta = stats.late_drops - previous_late_drops;
             qo100::log(
                 "[VIDEO] fps=%.1f shown=%llu drop=%llu late=%llu stalls=%llu "
-                "max_gap=%.0fms decoded=%llu errors=%llu reopen=%llu rebases=%llu depth=%zu "
-                "underruns=%llu\n",
+                "max_gap=%.0fms decoded=%llu errors=%llu reopen=%llu rebases=%llu depth=%zu\n",
                 presented_delta / window_seconds,
                 static_cast<unsigned long long>(stats.presented),
                 static_cast<unsigned long long>(queue_drop_delta),
@@ -6263,14 +6228,12 @@ int main(int argc, char ** argv)
                 static_cast<unsigned long long>(video_decoder.decoded_frames()),
                 static_cast<unsigned long long>(video_decoder.decode_errors()),
                 static_cast<unsigned long long>(video_decoder.reopen_count()),
-                static_cast<unsigned long long>(stats.rebases), stats.depth,
-                static_cast<unsigned long long>(stats.underruns));
+                static_cast<unsigned long long>(stats.rebases), stats.depth);
             const auto window = scheduler.take_window_stats();
             qo100::log(
-                "[SCHED] loop_calls=%llu audio_clock=%llu no_frame=%llu next_not_due=%llu "
-                "(avg %.0fms early) pts_step avg=%.1fms max=%.0fms\n",
+                "[SCHED] loop_calls=%llu no_frame=%llu next_not_due=%llu (avg %.0fms early) "
+                "pts_step avg=%.1fms max=%.0fms\n",
                 static_cast<unsigned long long>(window.take_calls),
-                static_cast<unsigned long long>(window.audio_clock),
                 static_cast<unsigned long long>(window.empty),
                 static_cast<unsigned long long>(window.future),
                 window.avg_future_lead_ms, window.avg_pts_step_ms, window.max_pts_step_ms);

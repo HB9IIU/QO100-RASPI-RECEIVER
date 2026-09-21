@@ -16,27 +16,18 @@ namespace qo100 {
 using Clock = std::chrono::steady_clock;
 using Microseconds = std::chrono::microseconds;
 
-/* Room for as much video as the audio buffer can hold (up to a second, at up to
- * 60 fps): with the audio as the clock, frames wait here until their sound plays. */
-constexpr size_t kVideoQueueCapacity = 64;
-constexpr int64_t kVideoPrebufferMaxUs = 400000;
+constexpr size_t kVideoQueueCapacity = 6;
+constexpr size_t kVideoPrebufferFrames = 3;
+constexpr int64_t kVideoPrebufferMaxUs = 150000;
 constexpr int64_t kClockDiscontinuityUs = 2000000;
 constexpr int64_t kClockRebaseLateUs = 250000;
-/* Jitter buffer: playback runs this far behind the newest decoded frame -
- * kClockTargetLagFrames frame intervals, kept within the two Us bounds. The
- * decoder hands frames over in clumps (a DVB-S2 frame at a few hundred kS/s
- * carries ~100ms of stream, so packets arrive in bursts), and a lag of only
- * 150-200ms was measured to underrun every few seconds on a clean 30fps HEVC
- * service. The clock jumps forward again
- * if the lag grows beyond that plus kClockLagSlack. */
-constexpr int64_t kClockTargetLagFrames = 6;
-constexpr int64_t kClockMinTargetLagUs = 300000;
-constexpr int64_t kClockMaxTargetLagUs = 400000;
-constexpr int64_t kClockLagSlackFrames = 4;
-constexpr int64_t kClockMinLagSlackUs = 100000;
-/* An empty queue this long means an underrun: rebuild the buffer (freeze
- * briefly) rather than show every late frame as it dribbles in. */
-constexpr int64_t kUnderrunRebufferUs = 100000;
+/* The newest queued frame may be at most kClockMaxLagFrames frame intervals
+ * (clamped to the two Us bounds) ahead of the presenter's clock; beyond that
+ * the clock jumps to kClockTargetLagFrames intervals behind the newest. */
+constexpr int64_t kClockMaxLagFrames = 5;
+constexpr int64_t kClockTargetLagFrames = 3;
+constexpr int64_t kClockMinMaxLagUs = 150000;
+constexpr int64_t kClockMaxMaxLagUs = 600000;
 
 using VideoFrame = qo100::VideoFrame;
 
@@ -76,55 +67,19 @@ public:
         queue_.push_back(std::move(frame));
     }
 
-    /* audio_clock_us: the stream time of the sound being heard right now, when the
-     * audio is playing. Then the picture simply follows it (lip sync, whatever the
-     * audio buffer does). Without it - no audio, or the audio has stalled - the
-     * frames are paced against the wall clock as before. */
-    std::optional<VideoFrame> take_due(Clock::time_point now,
-                                       std::optional<int64_t> audio_clock_us = std::nullopt)
+    std::optional<VideoFrame> take_due(Clock::time_point now)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ++window_take_calls_;
-        if(audio_clock_us && !queue_.empty() &&
-           std::llabs(queue_.front().pts_us - *audio_clock_us) <= kClockDiscontinuityUs) {
-            ++window_audio_clock_;
-            if(queue_.front().pts_us > *audio_clock_us + 2000) {
-                ++window_future_;
-                window_future_lead_sum_ms_ += (queue_.front().pts_us - *audio_clock_us) / 1000.0;
-                return std::nullopt;
-            }
-            VideoFrame selected = std::move(queue_.front());
-            queue_.pop_front();
-            while(!queue_.empty() && queue_.front().pts_us <= *audio_clock_us + 2000) {
-                selected = std::move(queue_.front());
-                queue_.pop_front();
-                ++late_drops_;
-            }
-            ++presented_;
-            space_available_.notify_one();
-            return selected;
-        }
         if(queue_.empty()) {
             ++window_empty_;
-            if(clock_started_) {
-                if(empty_since_ == Clock::time_point{}) empty_since_ = now;
-                else if(std::chrono::duration_cast<Microseconds>(now - empty_since_).count() >=
-                        kUnderrunRebufferUs) {
-                    clock_started_ = false;
-                    ++underruns_;
-                }
-            }
             return std::nullopt;
         }
-        empty_since_ = Clock::time_point{};
-        const int64_t target_lag_us = std::clamp<int64_t>(
-            kClockTargetLagFrames * step_ema_us_, kClockMinTargetLagUs, kClockMaxTargetLagUs);
 
         if(!clock_started_) {
             const int64_t wait_us = std::chrono::duration_cast<Microseconds>(
                 now - first_queued_at_).count();
-            const int64_t buffered_us = queue_.back().pts_us - queue_.front().pts_us;
-            if(buffered_us < target_lag_us && wait_us < kVideoPrebufferMaxUs)
+            if(queue_.size() < kVideoPrebufferFrames && wait_us < kVideoPrebufferMaxUs)
                 return std::nullopt;
             anchor_pts_us_ = queue_.front().pts_us;
             anchor_wall_ = now;
@@ -148,10 +103,11 @@ public:
          * oldest out before it ever became due and nothing would be shown.
          * Jump the clock forward to keep a short, fixed lag behind the newest. */
         const int64_t newest_lead_us = queue_.back().pts_us - stream_now_us;
-        const int64_t max_lag_us = target_lag_us +
-            std::max<int64_t>(kClockLagSlackFrames * step_ema_us_, kClockMinLagSlackUs);
+        const int64_t max_lag_us = std::clamp<int64_t>(
+            kClockMaxLagFrames * step_ema_us_, kClockMinMaxLagUs, kClockMaxMaxLagUs);
         if(newest_lead_us > max_lag_us) {
-            stream_now_us = queue_.back().pts_us - target_lag_us;
+            stream_now_us = queue_.back().pts_us -
+                std::clamp<int64_t>(kClockTargetLagFrames * step_ema_us_, 60000, 250000);
             anchor_pts_us_ = stream_now_us;
             anchor_wall_ = now;
             ++rebases_;
@@ -179,7 +135,7 @@ public:
      * (empty), "the next frame isn't due yet" (future) and irregular
      * timestamps (pts step) apart when frames get dropped. */
     struct WindowStats {
-        uint64_t take_calls = 0, empty = 0, future = 0, pushed = 0, audio_clock = 0;
+        uint64_t take_calls = 0, empty = 0, future = 0, pushed = 0;
         double avg_future_lead_ms = 0, avg_pts_step_ms = 0, max_pts_step_ms = 0;
     };
 
@@ -191,11 +147,10 @@ public:
         out.empty = window_empty_;
         out.future = window_future_;
         out.pushed = window_pushed_;
-        out.audio_clock = window_audio_clock_;
         out.avg_future_lead_ms = window_future_ ? window_future_lead_sum_ms_ / window_future_ : 0;
         out.avg_pts_step_ms = window_pushed_ ? window_pts_step_sum_ms_ / window_pushed_ : 0;
         out.max_pts_step_ms = window_pts_step_max_ms_;
-        window_take_calls_ = window_empty_ = window_future_ = window_pushed_ = window_audio_clock_ = 0;
+        window_take_calls_ = window_empty_ = window_future_ = window_pushed_ = 0;
         window_future_lead_sum_ms_ = window_pts_step_sum_ms_ = window_pts_step_max_ms_ = 0;
         return out;
     }
@@ -215,13 +170,12 @@ public:
         uint64_t presented;
         uint64_t rebases;
         size_t depth;
-        uint64_t underruns;
     };
 
     Stats stats() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        return {queue_drops_, late_drops_, presented_, rebases_, queue_.size(), underruns_};
+        return {queue_drops_, late_drops_, presented_, rebases_, queue_.size()};
     }
 
 private:
@@ -236,13 +190,10 @@ private:
     uint64_t late_drops_ = 0;
     uint64_t presented_ = 0;
     uint64_t rebases_ = 0;
-    uint64_t underruns_ = 0;
-    Clock::time_point empty_since_{};
     bool have_last_pushed_ = false;
     int64_t step_ema_us_ = 0;   /* typical frame interval of the stream, from the pts steps */
     int64_t last_pushed_pts_us_ = 0;
-    uint64_t window_take_calls_ = 0, window_empty_ = 0, window_future_ = 0, window_pushed_ = 0,
-             window_audio_clock_ = 0;
+    uint64_t window_take_calls_ = 0, window_empty_ = 0, window_future_ = 0, window_pushed_ = 0;
     double window_future_lead_sum_ms_ = 0, window_pts_step_sum_ms_ = 0, window_pts_step_max_ms_ = 0;
 };
 
