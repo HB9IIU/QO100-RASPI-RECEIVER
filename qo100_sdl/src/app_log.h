@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <dirent.h>
 #include <mutex>
@@ -42,8 +43,27 @@ inline std::FILE *& log_file()
 /* Also writes every log line to <directory>/qo100_<date>_<time>.log (and points
  * <directory>/latest.log at it), so a run started by the service, with no
  * terminal, still leaves a log. Only the newest `keep` files are kept. */
-inline void open_log_file(const std::string & directory, size_t keep = 10)
+struct LogFileState {
+    std::string directory;
+    size_t keep = 10;
+    size_t written = 0;
+};
+
+inline LogFileState & log_file_state()
 {
+    static LogFileState state;
+    return state;
+}
+
+/* A run that goes on for days must not grow one file without bound: past this
+ * size the log continues in a fresh file (the retention below still applies). */
+constexpr size_t kLogFileMaxBytes = 20u * 1024u * 1024u;
+
+/* Caller holds log_mutex(). */
+inline void open_log_file_locked(const std::string & directory, size_t keep)
+{
+    if(log_file() != nullptr) { std::fclose(log_file()); log_file() = nullptr; }
+    log_file_state() = {directory, keep, 0};
     mkdir(directory.c_str(), 0755);
     std::vector<std::string> old_logs;
     if(DIR * dir = opendir(directory.c_str())) {
@@ -66,13 +86,18 @@ inline void open_log_file(const std::string & directory, size_t keep = 10)
     localtime_r(&now, &local);
     std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &local);
     const std::string path = directory + "/qo100_" + stamp + ".log";
-    std::lock_guard<std::mutex> lock(log_mutex());
     log_file() = std::fopen(path.c_str(), "w");
     if(log_file() != nullptr) {
         const std::string link = directory + "/latest.log";
         unlink(link.c_str());
         if(symlink(("qo100_" + std::string(stamp) + ".log").c_str(), link.c_str()) != 0) {}
     }
+}
+
+inline void open_log_file(const std::string & directory, size_t keep = 10)
+{
+    std::lock_guard<std::mutex> lock(log_mutex());
+    open_log_file_locked(directory, keep);
 }
 
 inline void log(const char * format, ...)
@@ -92,6 +117,11 @@ inline void log(const char * format, ...)
     if(log_file() != nullptr) {
         std::fputs(line, log_file());
         std::fflush(log_file());
+        log_file_state().written += std::strlen(line);
+        if(log_file_state().written >= kLogFileMaxBytes) {
+            const LogFileState state = log_file_state();
+            open_log_file_locked(state.directory, state.keep);
+        }
     }
 }
 

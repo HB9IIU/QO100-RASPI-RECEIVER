@@ -5,6 +5,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
@@ -28,6 +29,22 @@ extern "C" {
 
 namespace qo100 {
 namespace {
+
+/* Pi 5 has a hardware HEVC decoder (V4L2 stateless, reached through FFmpeg's
+ * "drm" hwaccel) but no H.264 one. The codec picks DRM_PRIME frames when the
+ * hardware path is available; otherwise the default (software) format. */
+AVPixelFormat pick_hardware_format(AVCodecContext * context, const AVPixelFormat * formats)
+{
+    for(const AVPixelFormat * format = formats; *format != AV_PIX_FMT_NONE; ++format)
+        if(*format == AV_PIX_FMT_DRM_PRIME) return *format;
+    return avcodec_default_get_format(context, formats);
+}
+
+bool hardware_decode_allowed()
+{
+    const char * value = std::getenv("QO100_HW_DECODE");
+    return value == nullptr || std::strcmp(value, "0") != 0;
+}
 
 /* Must match receiver.cpp's ts_destination_address()/ts_destination_port()
  * defaults - this is the receiving end of the same UDP feed Longmynd sends
@@ -77,6 +94,7 @@ struct VideoDecoder::Impl {
     AudioCallback audio_callback;
     std::atomic<bool> running{false};
     std::atomic<bool> reset_requested{false};
+    std::atomic<bool> hardware_broken{false};   /* HW HEVC failed on a stream; stay in software */
     std::thread thread;
     std::atomic<uint64_t> frame_count{0};
     std::atomic<uint64_t> audio_chunk_count{0};
@@ -253,14 +271,43 @@ struct VideoDecoder::Impl {
         codec_context->thread_count = 2;
         codec_context->thread_type = FF_THREAD_FRAME;
         codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        bool hardware = false;
+        AVBufferRef * hardware_device = nullptr;
+        if(decoder->id == AV_CODEC_ID_HEVC && hardware_decode_allowed() && !hardware_broken.load() &&
+           av_hwdevice_ctx_create(&hardware_device, AV_HWDEVICE_TYPE_DRM, nullptr, nullptr, 0) >= 0) {
+            codec_context->hw_device_ctx = av_buffer_ref(hardware_device);
+            codec_context->get_format = pick_hardware_format;
+            codec_context->thread_count = 1;    /* hwaccels don't use frame threads */
+            hardware = true;
+        }
         result = avcodec_open2(codec_context, decoder, nullptr);
+        if(result < 0 && hardware) {
+            /* Hardware path refused: reopen the same stream in software. */
+            qo100::log("[VIDEO] hardware HEVC decode unavailable (%s); using software\n",
+                       ffmpeg_error(result).c_str());
+            avcodec_free_context(&codec_context);
+            av_buffer_unref(&hardware_device);
+            hardware = false;
+            codec_context = avcodec_alloc_context3(decoder);
+            if(codec_context != nullptr &&
+               avcodec_parameters_to_context(codec_context,
+                   format->streams[video_stream]->codecpar) >= 0) {
+                codec_context->thread_count = 2;
+                codec_context->thread_type = FF_THREAD_FRAME;
+                codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+                result = avcodec_open2(codec_context, decoder, nullptr);
+            }
+        }
         if(result < 0) {
             ++errors;
             qo100::log( "[VIDEO] decoder open: %s\n", ffmpeg_error(result).c_str());
             avcodec_free_context(&codec_context);
+            av_buffer_unref(&hardware_device);
             avformat_close_input(&format);
             return;
         }
+        if(hardware)
+            qo100::log("[VIDEO] HEVC hardware decode (V4L2 stateless via DRM)\n");
         set_codec(decoder->name);
 
         const AVStream * stream = format->streams[video_stream];
@@ -305,10 +352,13 @@ struct VideoDecoder::Impl {
 
         AVPacket * packet = av_packet_alloc();
         AVFrame * frame = av_frame_alloc();
+        AVFrame * hardware_copy = av_frame_alloc();   /* DRM_PRIME frame -> system memory */
+        uint64_t hardware_errors = 0;
         SwsContext * scaler = nullptr;
         SwrContext * resampler = nullptr;
         int64_t fallback_pts_us = 0;
         bool have_fallback = false;
+        uint64_t frame_count_in_session = 0;
 
         while(running.load(std::memory_order_relaxed) &&
               !reset_requested.load(std::memory_order_relaxed)) {
@@ -328,6 +378,12 @@ struct VideoDecoder::Impl {
                     if(result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
                     if(result < 0) {
                         ++errors;
+                        if(hardware && frame_count_in_session == 0 && ++hardware_errors >= 50) {
+                            hardware_broken = true;
+                            qo100::log("[VIDEO] hardware HEVC decode not working for this stream; "
+                                       "using software from the next reopen\n");
+                            reset_requested = true;
+                        }
                         break;
                     }
                     int64_t pts_us = 0;
@@ -348,14 +404,26 @@ struct VideoDecoder::Impl {
                         pts_us = fallback_pts_us;
                     }
 
+                    const AVFrame * source = frame;
+                    if(frame->format == AV_PIX_FMT_DRM_PRIME) {
+                        av_frame_unref(hardware_copy);
+                        if(av_hwframe_transfer_data(hardware_copy, frame, 0) < 0) {
+                            ++errors;
+                            av_frame_unref(frame);
+                            continue;
+                        }
+                        source = hardware_copy;
+                    }
                     VideoFrame converted;
-                    if(convert_frame(frame, scaler, pts_us, converted)) {
+                    if(convert_frame(source, scaler, pts_us, converted)) {
                         converted.session = reopens.load();
                         callback(std::move(converted));
                         ++frame_count;
+                        ++frame_count_in_session;
                     }
                     else ++errors;
                     av_frame_unref(frame);
+                    av_frame_unref(hardware_copy);
                 }
             }
             else if(audio_context != nullptr && packet->stream_index == audio_stream) {
@@ -388,6 +456,8 @@ struct VideoDecoder::Impl {
         swr_free(&resampler);
         sws_freeContext(scaler);
         av_frame_free(&frame);
+        av_frame_free(&hardware_copy);
+        av_buffer_unref(&hardware_device);
         av_packet_free(&packet);
         avcodec_free_context(&audio_context);
         avcodec_free_context(&codec_context);
