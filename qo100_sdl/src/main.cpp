@@ -3229,8 +3229,9 @@ SDL_Rect tune_back_button_rect(int width, int height)
     constexpr int kPad = 16;
     constexpr int kRightColW = 190;
     const int right_col_x = width - kPad - kRightColW;
-    return {right_col_x, height - kPad - kStatusButtonHeight,
-            kRightColW, kStatusButtonHeight};
+    /* Same inset as the preset buttons above it (tune_preset_button_rect). */
+    return {right_col_x + 8, height - kPad - kStatusButtonHeight,
+            kRightColW - 16, kStatusButtonHeight};
 }
 
 /* Hard ceiling regardless of how much space is actually available (see
@@ -3250,17 +3251,26 @@ constexpr auto kTuneToastDuration = std::chrono::milliseconds(1500);
  * the two can't drift apart. Sits between the status card (fixed height)
  * and the back button (see tune_back_button_rect), taking whatever
  * height is left between them. */
+/* The status card at the top of the right column: MER, MODCOD, TS NULL,
+ * SERVICE and PROVIDER under the lock line. Shared with the drawing code so
+ * the presets card below it always starts where the status card ends. */
+constexpr int kTuneStatusRows = 5;
+int tune_status_row_height(int width) { return settings_compact(width) ? 20 : 22; }
+int tune_status_card_height(int width)
+{
+    return 30 + kTuneStatusRows * tune_status_row_height(width) + 10;
+}
+
 SDL_Rect tune_presets_card_rect(int width, int height)
 {
     constexpr int kPad = 16;
     constexpr int kRightColW = 190;
-    constexpr int kStatusRowH = 22;
-    constexpr int kStatusH = 30 + 4 * kStatusRowH + 10;
+    const int status_h = tune_status_card_height(width);
     const int right_col_x = width - kPad - kRightColW;
     const int status_card_y = kPad;
     const SDL_Rect back_button = tune_back_button_rect(width, height);
-    return {right_col_x, status_card_y + kStatusH + 10,
-            kRightColW, back_button.y - 10 - (status_card_y + kStatusH + 10)};
+    return {right_col_x, status_card_y + status_h + 10,
+            kRightColW, back_button.y - 10 - (status_card_y + status_h + 10)};
 }
 
 /* The compact (800-wide) presets card is much shorter than the wide
@@ -3643,8 +3653,8 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
      * kFontSize for its narrow/800-wide case) - this column is similarly
      * narrow, so no reason for it to run smaller text than that page. */
     constexpr int kStatusFontSize = 14;
-    const int status_row_h = 22;
-    const int status_h = 30 + 4 * status_row_h + 10;
+    const int status_row_h = tune_status_row_height(width);
+    const int status_h = tune_status_card_height(width);
     const SDL_Rect status_card{right_col_x, content_y, kRightColW, status_h};
     fill_panel(renderer, status_card);
     /* Real telemetry, same fields/formatting as the main page's
@@ -3668,26 +3678,47 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     char mer_text[24] = "---";
     char modfec_text[24] = "---";
     char null_text[24] = "---";
-    char ldpc_text[24] = "---";
     if(locked && receiver.mer_x10 != 0)   /* 0 = not measured yet */
         std::snprintf(mer_text, sizeof(mer_text), "%.1f dB", receiver.mer_x10 / 10.0);
     if(locked) {
-        std::snprintf(ldpc_text, sizeof(ldpc_text), "%ld", receiver.ldpc_errors);
         if(receiver.null_packet_percent >= 0)
             std::snprintf(null_text, sizeof(null_text), "%d%%", receiver.null_packet_percent);
     }
     if(modcod != nullptr)
         std::snprintf(modfec_text, sizeof(modfec_text), "%s %s", modcod->modulation, modcod->fec);
     const int row_y = status_card.y + 34;
-    const char * labels[] = {"MER", "MODCOD", "TS NULL", "LDPC ERR"};
-    const char * values[] = {mer_text, modfec_text, null_text, ldpc_text};
-    for(int i = 0; i < 4; ++i) {
+    /* Names come from the transmitting station and can be long: shrink to
+     * font 12 and cut with ".." to whatever width is left after the label. */
+    const auto fit_to_width = [&](std::string value, int font_size, int max_width) {
+        if(value.empty()) return std::string("---");
+        if(text.measure(value, font_size).first <= max_width) return value;
+        while(!value.empty() && text.measure(value + "..", font_size).first > max_width) {
+            value.pop_back();
+            while(!value.empty() && (static_cast<unsigned char>(value.back()) & 0xC0) == 0x80)
+                value.pop_back();      /* never leave half a UTF-8 character */
+        }
+        return value + "..";
+    };
+    constexpr int kNameFontSize = 12;
+    /* Width left for a value: the card minus its margins, the label, and a gap. */
+    const auto value_room = [&](const char * label) {
+        return status_card.w - 20 - text.measure(label, kStatusFontSize).first - 8;
+    };
+    const std::string service_text = locked
+        ? fit_to_width(receiver.service_name, kNameFontSize, value_room("SERVICE")) : std::string("---");
+    const std::string provider_text = locked
+        ? fit_to_width(receiver.service_provider, kNameFontSize, value_room("PROVIDER")) : std::string("---");
+    const char * labels[] = {"MER", "MODCOD", "TS NULL", "SERVICE", "PROVIDER"};
+    const std::string values[] = {mer_text, modfec_text, null_text, service_text, provider_text};
+    for(int i = 0; i < kTuneStatusRows; ++i) {
         const int y = row_y + i * status_row_h;
+        const int value_font = i >= 3 ? kNameFontSize : kStatusFontSize;
         text.draw(labels[i], status_card.x + 10, y, kTextDim, kStatusFontSize);
-        const auto [value_w, value_h] = text.measure(values[i], kStatusFontSize);
+        const auto [value_w, value_h] = text.measure(values[i], value_font);
         (void)value_h;
-        text.draw(values[i], status_card.x + status_card.w - 10 - value_w, y,
-                  kText, kStatusFontSize);
+        /* The smaller name font sits a little lower: line its baseline up. */
+        text.draw(values[i], status_card.x + status_card.w - 10 - value_w,
+                  y + (i >= 3 ? 1 : 0), kText, value_font);
     }
 
     /* Leaves room below for the back button (tune_back_button_rect),
@@ -6267,12 +6298,23 @@ int main(int argc, char ** argv)
             draw_lnb_cal_page(renderer, text, display.width, display.height, lnb_cal,
                               receiver_settings, rtl_page, true, spectrum_source_local,
                               system_uptime_minutes(), TouchState{});
-        else if(app_page == AppPage::Tune)
+        else if(app_page == AppPage::Tune) {
+            /* QO100_SCREENSHOT_SAMPLE=1: fill the status card with sample values
+             * (long names included) so its layout can be checked without a signal. */
+            if(const char * sample = std::getenv("QO100_SCREENSHOT_SAMPLE"); sample != nullptr && sample[0] == '1') {
+                receiver_status.demod_state = 4;
+                receiver_status.mer_x10 = 77;
+                receiver_status.modcod = 5;
+                receiver_status.null_packet_percent = 3;
+                receiver_status.service_name = "F8TRT_Pascal_Long_Name";
+                receiver_status.service_provider = "Radio Club de Test";
+            }
             draw_tune_page(renderer, text, display.width, display.height, TouchState{},
                            tune_digits, tune_sr_index, tune_rf_port,
                            video_texture, have_video_frame,
                            video_source_width, video_source_height, video_notice, 0.0,
                            receiver_status, tune_presets, std::string(), 1e9);
+        }
         else {
         draw_spectrum(renderer, text, layout, *spectrum_texture,
                       spectrum_status, spectrum_marker, receiver_status,
