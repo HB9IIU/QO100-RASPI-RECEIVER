@@ -17,6 +17,10 @@ struct VideoFrame {
     size_t u_offset = 0;
     size_t v_offset = 0;
     int64_t pts_us = 0;
+    /* Decoder session (VideoDecoder::reopen_count() at the time) that produced
+     * this frame, so frames still in flight from before a retune/reset can be
+     * told apart from new ones. */
+    uint64_t session = 0;
 
     const uint8_t * y_plane() const { return yuv420.data(); }
     const uint8_t * u_plane() const { return yuv420.data() + u_offset; }

@@ -33,6 +33,7 @@
 #include <limits.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -3912,6 +3913,32 @@ std::string read_proc_field(const std::string & path, const std::string & key)
 /* Resident memory of this process, for spotting a slow leak over a long
  * unattended run (e.g. an unbounded cache) that a single boot-time
  * snapshot can't show. */
+/* Whole-machine load, and this process's CPU use over the interval since the
+ * previous call - so a log shows whether the Pi itself was busy (VNC, an IDE)
+ * when frames were dropped. */
+double system_load_1min()
+{
+    double load = -1.0;
+    if(std::FILE * file = std::fopen("/proc/loadavg", "r")) {
+        if(std::fscanf(file, "%lf", &load) != 1) load = -1.0;
+        std::fclose(file);
+    }
+    return load;
+}
+
+double process_cpu_percent(double window_seconds)
+{
+    static double previous_seconds = 0.0;
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    const double now_seconds = usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1e6 +
+                               usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1e6;
+    const double percent = window_seconds > 0.0
+        ? (now_seconds - previous_seconds) / window_seconds * 100.0 : 0.0;
+    previous_seconds = now_seconds;
+    return percent;
+}
+
 long process_rss_kb()
 {
     const std::string field = read_proc_field("/proc/self/status", "VmRSS:");
@@ -4374,6 +4401,7 @@ int main(int argc, char ** argv)
     qo100::ReceiverStatus receiver_status;
     bool receiver_was_locked = false;
     bool lock_detail_pending = false;
+    bool beacon_return_quiet = false;
     auto lock_detail_since = Clock::time_point{};
     /* Set by the popup handler / main loop once these exist (declared below);
      * the restart itself is defined further down next to apply_tune's state. */
@@ -4635,10 +4663,10 @@ int main(int argc, char ** argv)
                                          receiver_settings.lnb_voltage_horizontal);
         /* The decoder opened the multicast address; make it pick up the new
          * QO100_TS_ADDR, and time "video acquired" from now. */
+        tune_reopen_before = video_decoder.reopen_count();
         video_decoder.request_reset();
         video_notice = VideoNotice::Tuning;
         video_notice_started_at = Clock::now();
-        tune_reopen_before = video_decoder.reopen_count();
     };
     auto last_stats = run_started;
     auto last_present_wall = Clock::time_point{};
@@ -5848,8 +5876,9 @@ int main(int argc, char ** argv)
                     receiver_status.symbol_rate_ksps);
                 if(beacon_return_armed) {
                     beacon_return_armed = false;
-                    qo100::log(
-                        "[TUNE] lock regained; cancelled pending return to beacon\n");
+                    if(!beacon_return_quiet)
+                        qo100::log(
+                            "[TUNE] lock regained; cancelled pending return to beacon\n");
                 }
             }
             else if(!locked_now && receiver_was_locked) {
@@ -5887,9 +5916,13 @@ int main(int argc, char ** argv)
                     if(std::abs(selected_frequency_mhz - beacon_mhz) > 0.02) {
                         beacon_return_armed = true;
                         beacon_return_deadline = Clock::now() + kBeaconReturnDelay;
-                        qo100::log(
-                            "[TUNE] beacon return in %lldms unless lock comes back\n",
-                            static_cast<long long>(kBeaconReturnDelay.count()));
+                        /* The drop right after a retune is routine: arm the
+                         * watchdog, but only say so if it isn't. */
+                        beacon_return_quiet = Clock::now() - last_tune < std::chrono::seconds(3);
+                        if(!beacon_return_quiet)
+                            qo100::log(
+                                "[TUNE] beacon return in %lldms unless lock comes back\n",
+                                static_cast<long long>(kBeaconReturnDelay.count()));
                     }
                 }
             }
@@ -5901,9 +5934,12 @@ int main(int argc, char ** argv)
                 if((!service.empty() && receiver_status.mer_x10 > 0) ||
                    Clock::now() - lock_detail_since >= std::chrono::seconds(3)) {
                     lock_detail_pending = false;
-                    qo100::log("[TUNE] stream: MER=%.1fdB service=%s\n",
+                    qo100::log("[TUNE] stream: MER=%.1fdB service=%s carrier settled at "
+                               "RF %.3fMHz (%+ldkHz from requested IF)\n",
                                receiver_status.mer_x10 / 10.0,
-                               service.empty() ? "---" : service.c_str());
+                               service.empty() ? "---" : service.c_str(),
+                               effective_lo_mhz() + receiver_status.carrier_khz / 1000.0,
+                               receiver_status.carrier_khz - current_tune_if_khz);
                 }
             }
             if(!locked_now) lock_detail_pending = false;
@@ -6064,7 +6100,12 @@ int main(int argc, char ** argv)
             spectrum_marker.kind = SpectrumMarkerKind::None;
         }
 
-        if(auto frame = scheduler.take_due(Clock::now())) {
+        auto due_frame = scheduler.take_due(Clock::now());
+        /* A frame from the decoder session that was running before the last
+         * retune/reset, still in flight: not the new signal's picture. */
+        if(due_frame && use_tuner && due_frame->session <= tune_reopen_before)
+            due_frame.reset();
+        if(auto frame = std::move(due_frame)) {
             if(video_texture == nullptr || frame->width != video_source_width ||
                frame->height != video_source_height) {
                 SDL_DestroyTexture(video_texture);
@@ -6095,7 +6136,7 @@ int main(int argc, char ** argv)
                     spectrum_marker.kind = SpectrumMarkerKind::None;
                 if((video_notice == VideoNotice::Tuning ||
                     video_notice == VideoNotice::NoVideoStream) &&
-                   video_decoder.reopen_count() > tune_reopen_before) {
+                   frame->session > tune_reopen_before) {
                     const double acquisition_seconds = std::chrono::duration<double>(
                         Clock::now() - video_notice_started_at).count();
                     video_notice = VideoNotice::None;
@@ -6257,7 +6298,9 @@ int main(int argc, char ** argv)
                 static_cast<unsigned long long>(receiver_client.replaced_updates()),
                 static_cast<unsigned long long>(spectrum_feed.received_frames()),
                 static_cast<unsigned long long>(spectrum_feed.replaced_frames()));
-            qo100::log("[SYS] rss=%ldMB cpu_temp=%.1fC textures=%zu\n",
+            qo100::log("[SYS] app_cpu=%.0f%% load1=%.1f (4 cores) rss=%ldMB cpu_temp=%.1fC "
+                       "textures=%zu\n",
+                       process_cpu_percent(window_seconds), system_load_1min(),
                        process_rss_kb() / 1024, cpu_temperature_c(), text.texture_count());
             qo100::flush_ffmpeg_log_summary();
             previous_presented = stats.presented;

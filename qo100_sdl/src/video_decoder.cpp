@@ -350,6 +350,7 @@ struct VideoDecoder::Impl {
 
                     VideoFrame converted;
                     if(convert_frame(frame, scaler, pts_us, converted)) {
+                        converted.session = reopens.load();
                         callback(std::move(converted));
                         ++frame_count;
                     }
