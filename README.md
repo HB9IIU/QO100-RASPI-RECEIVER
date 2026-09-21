@@ -67,7 +67,8 @@ starts it offers to calibrate.
 ## Second RF input: A / B
 
 The MiniTiouner has two RF inputs, and you can now choose between them on the
-**TUNE** page with the new **RF port** buttons, next to the symbol rate.
+**TUNE** page with the new **RF port** buttons, next to the symbol rate (see
+the picture of the page just below).
 
 - **A** is the top connector — the default, and where your QO-100 LNB
   belongs. **B** is the bottom connector.
@@ -84,8 +85,6 @@ The MiniTiouner has two RF inputs, and you can now choose between them on the
   frequencies **146.500 MHz** (2 m), **437.000 MHz** (70 cm), **1249.000 MHz**
   and **1280.000 MHz** (23 cm) on B. They only apply to a fresh install: the
   favourites you already have keep working and stay on port A.
-
-<img src="assets/tune_page.png" alt="TUNE page with the RF port buttons A and B" width="70%">
 
 ## Manual Tune
 
