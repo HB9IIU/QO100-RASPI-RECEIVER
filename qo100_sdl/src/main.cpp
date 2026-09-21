@@ -4481,25 +4481,26 @@ int main(int argc, char ** argv)
     std::vector<qo100::TunePreset> tune_presets = qo100::load_tune_presets(repository_root);
     /* First run (no tune_presets.json yet) - fill however many buttons
      * actually fit (see tune_preset_capacity) with genuinely distinct
-     * starting points (cycling this list if capacity ever exceeds it),
-     * not kMaxTunePresets copies of the same value - identical buttons
+     * starting points (fewer buttons rather than repeats if capacity
+     * exceeds the list), not copies of the same value - identical buttons
      * all "retune" to whatever's already tuned, which looks exactly like
      * tapping them does nothing. Overwriting one via long-press is how
      * they get customised from here. */
     if(tune_presets.empty()) {
         constexpr qo100::TunePreset kDefaultPresets[] = {
             {beacon_frequency_khz, beacon_symbol_rate_ksps}, // QO-100 beacon
-            {2405000, 1000, 1},                              // Pluto/bench test (port B)
-            {436500, 333, 1},                                // 70cm ATV (port B)
-            {144600, 125, 1},                                // 2m test (port B)
+            {146500, 125, 1},                                // 2m DATV (port B)
+            {437000, 333, 1},                                // 70cm DATV (port B)
+            {1249000, 1000, 1},                              // 23cm repeater input (port B)
+            {1280000, 1000, 1},                              // 23cm simplex (port B)
         };
         constexpr int kDefaultCount =
             sizeof(kDefaultPresets) / sizeof(kDefaultPresets[0]);
         const int capacity = tune_preset_capacity(display.width, display.height);
-        for(int i = 0; i < capacity; ++i)
-            tune_presets.push_back(kDefaultPresets[i % kDefaultCount]);
+        for(int i = 0; i < std::min(capacity, kDefaultCount); ++i)
+            tune_presets.push_back(kDefaultPresets[i]);
         qo100::save_tune_presets(repository_root, tune_presets);
-        qo100::log("[PRESETS] seeded %d distinct default(s)\n", capacity);
+        qo100::log("[PRESETS] seeded %zu default(s)\n", tune_presets.size());
     }
     /* Which preset button (0-based) is currently pressed, and when/where
      * the press started - a tap released quickly loads it, held past
