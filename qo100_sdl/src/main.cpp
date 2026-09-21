@@ -2252,7 +2252,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
     SDL_RenderFillRect(renderer, &screen);
-    text.draw("LNB CALIBRATION", 12, 12, kCyan, 20);
+    text.draw("FREQUENCY OFFSET CALIBRATION", 12, 12, kCyan, 20);
 
     const SDL_Rect card{24, 52, width - 48, height - 52 - 84};
     fill_panel(renderer, card);
