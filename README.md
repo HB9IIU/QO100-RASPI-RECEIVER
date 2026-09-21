@@ -18,6 +18,22 @@ touch — no keyboard or mouse needed once it's set up.
 </tr>
 </table>
 
+# ⚡ Quick start
+
+On your Raspberry Pi (with the MiniTiouner plugged in and the Pi online), open
+a terminal and paste:
+
+```bash
+cd ~
+git clone https://github.com/HB9IIU/QO100-RASPI-RECEIVER.git DATVreceiver
+cd ~/DATVreceiver
+scripts/initialSetup.sh
+```
+
+That installs everything, builds the app, sets it to start at boot, and
+**reboots the Pi at the end**. It asks for your password and one Enter
+keypress along the way. More detail is in [Setup, step by step](#setup-step-by-step).
+
 # 🆕 WHAT'S NEW!!!
 
 ## Frequency Offset Calibration — no more entering offsets by hand
