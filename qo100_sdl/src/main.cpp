@@ -4333,7 +4333,10 @@ int main(int argc, char ** argv)
      * beacon is up while the boot popups are still being answered; if the
      * RTL-SDR popup is answered YES (field use, loopback), it is restarted
      * on loopback (see restart_longmynd_on_loopback). */
-    if(use_tuner) start_longmynd();
+    /* --screenshot must never touch the tuner: starting longmynd here would stop
+     * the one a running app owns (LongmyndProcess::start clears "stale" owned
+     * processes), and take its MiniTiouner away. */
+    if(use_tuner && options.screenshot.empty()) start_longmynd();
     qo100::ReceiverStatus receiver_status;
     bool receiver_was_locked = false;
     bool lock_detail_pending = false;
