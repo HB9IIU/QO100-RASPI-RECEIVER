@@ -6171,7 +6171,8 @@ int main(int argc, char ** argv)
             const uint64_t late_drop_delta = stats.late_drops - previous_late_drops;
             qo100::log(
                 "[VIDEO] fps=%.1f shown=%llu drop=%llu late=%llu stalls=%llu "
-                "max_gap=%.0fms decoded=%llu errors=%llu reopen=%llu rebases=%llu depth=%zu\n",
+                "max_gap=%.0fms decoded=%llu errors=%llu reopen=%llu rebases=%llu depth=%zu "
+                "underruns=%llu\n",
                 presented_delta / window_seconds,
                 static_cast<unsigned long long>(stats.presented),
                 static_cast<unsigned long long>(queue_drop_delta),
@@ -6181,7 +6182,8 @@ int main(int argc, char ** argv)
                 static_cast<unsigned long long>(video_decoder.decoded_frames()),
                 static_cast<unsigned long long>(video_decoder.decode_errors()),
                 static_cast<unsigned long long>(video_decoder.reopen_count()),
-                static_cast<unsigned long long>(stats.rebases), stats.depth);
+                static_cast<unsigned long long>(stats.rebases), stats.depth,
+                static_cast<unsigned long long>(stats.underruns));
             const auto window = scheduler.take_window_stats();
             qo100::log(
                 "[SCHED] loop_calls=%llu no_frame=%llu next_not_due=%llu (avg %.0fms early) "

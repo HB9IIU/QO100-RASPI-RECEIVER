@@ -6,13 +6,14 @@
 #include "../src/video_scheduler.h"
 
 #include <atomic>
+#include <random>
 #include <cstdio>
 #include <thread>
 #include <vector>
 
 using namespace qo100;
 
-static int run(int fps, int burst_size = 1)
+static int run(int fps, int burst_size = 1, int jitter_ms = 0)
 {
     const int64_t kStepUs = 1000000 / fps;
     const int kBurstFrames = 2 * fps;
@@ -34,6 +35,18 @@ static int run(int fps, int burst_size = 1)
         std::this_thread::sleep_until(start + std::chrono::seconds(2));   /* probing */
         for(int i = 0; i < kBurstFrames; ++i) push_frame();
         auto next = Clock::now();
+        std::mt19937 random(1234);
+        std::uniform_int_distribution<int> jitter(0, std::max(jitter_ms, 1));
+        auto last_arrival = Clock::now();
+        while(!done.load() && jitter_ms > 0) {
+            /* Network-like jitter: each frame is late by up to jitter_ms, but
+             * frames still arrive in order. */
+            next += Microseconds(kStepUs);
+            auto arrival = std::max(next + std::chrono::milliseconds(jitter(random)), last_arrival);
+            last_arrival = arrival;
+            std::this_thread::sleep_until(arrival);
+            push_frame();
+        }
         while(!done.load()) {
             /* burst_size > 1: frames arrive in groups, like a decoder that
              * delivers several at once after a hiccup. */
@@ -67,8 +80,9 @@ static int run(int fps, int burst_size = 1)
                 static_cast<unsigned long long>(stats.rebases));
     int steady = 0;
     for(int i = 8; i < 12; ++i) steady += shown_per_second[i];
-    std::printf("stream %d fps, bursts of %d: steady state (seconds 8-11): %.1f fps, rebases after second 6: %llu\n\n", fps, burst_size,
-                steady / 4.0, static_cast<unsigned long long>(stats.rebases + 1 - rebases_at_6s));
+    std::printf("stream %d fps, bursts of %d, jitter %dms: steady state (seconds 8-11): %.1f fps, rebases after second 6: %llu, late_drops=%llu underruns=%llu\n\n", fps, burst_size, jitter_ms,
+                steady / 4.0, static_cast<unsigned long long>(stats.rebases + 1 - rebases_at_6s),
+                static_cast<unsigned long long>(stats.late_drops), static_cast<unsigned long long>(stats.underruns));
     return steady / 4.0 >= fps * 0.85 ? 0 : 1;
 }
 
@@ -78,6 +92,8 @@ int main()
     for(int fps : {25, 30, 50, 60}) failed += run(fps);
     failed += run(30, 4);   /* bursty delivery */
     failed += run(25, 3);
+    failed += run(50, 1, 120);   /* jittery arrival */
+    failed += run(30, 1, 150);
     std::printf(failed == 0 ? "PASS\n" : "FAIL: %d scenario(s)\n", failed);
     return failed == 0 ? 0 : 1;
 }

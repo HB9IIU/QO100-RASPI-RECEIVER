@@ -17,17 +17,22 @@ using Clock = std::chrono::steady_clock;
 using Microseconds = std::chrono::microseconds;
 
 constexpr size_t kVideoQueueCapacity = 12;
-constexpr size_t kVideoPrebufferFrames = 3;
-constexpr int64_t kVideoPrebufferMaxUs = 150000;
+constexpr int64_t kVideoPrebufferMaxUs = 400000;
 constexpr int64_t kClockDiscontinuityUs = 2000000;
 constexpr int64_t kClockRebaseLateUs = 250000;
-/* The newest queued frame may be at most kClockMaxLagFrames frame intervals
- * (clamped to the two Us bounds) ahead of the presenter's clock; beyond that
- * the clock jumps to kClockTargetLagFrames intervals behind the newest. */
-constexpr int64_t kClockMaxLagFrames = 8;
-constexpr int64_t kClockTargetLagFrames = 3;
-constexpr int64_t kClockMinMaxLagUs = 200000;
-constexpr int64_t kClockMaxMaxLagUs = 800000;
+/* Jitter buffer: playback runs this far behind the newest decoded frame -
+ * kClockTargetLagFrames frame intervals, kept within the two Us bounds. The
+ * decoder hands frames over in clumps (packets arrive in bursts), so a lag of
+ * only a couple of frames starves the presenter. The clock jumps forward again
+ * if the lag grows beyond that plus kClockLagSlack. */
+constexpr int64_t kClockTargetLagFrames = 6;
+constexpr int64_t kClockMinTargetLagUs = 150000;
+constexpr int64_t kClockMaxTargetLagUs = 300000;
+constexpr int64_t kClockLagSlackFrames = 4;
+constexpr int64_t kClockMinLagSlackUs = 100000;
+/* An empty queue this long means an underrun: rebuild the buffer (freeze
+ * briefly) rather than show every late frame as it dribbles in. */
+constexpr int64_t kUnderrunRebufferUs = 100000;
 
 using VideoFrame = qo100::VideoFrame;
 
@@ -73,13 +78,25 @@ public:
         ++window_take_calls_;
         if(queue_.empty()) {
             ++window_empty_;
+            if(clock_started_) {
+                if(empty_since_ == Clock::time_point{}) empty_since_ = now;
+                else if(std::chrono::duration_cast<Microseconds>(now - empty_since_).count() >=
+                        kUnderrunRebufferUs) {
+                    clock_started_ = false;
+                    ++underruns_;
+                }
+            }
             return std::nullopt;
         }
+        empty_since_ = Clock::time_point{};
+        const int64_t target_lag_us = std::clamp<int64_t>(
+            kClockTargetLagFrames * step_ema_us_, kClockMinTargetLagUs, kClockMaxTargetLagUs);
 
         if(!clock_started_) {
             const int64_t wait_us = std::chrono::duration_cast<Microseconds>(
                 now - first_queued_at_).count();
-            if(queue_.size() < kVideoPrebufferFrames && wait_us < kVideoPrebufferMaxUs)
+            const int64_t buffered_us = queue_.back().pts_us - queue_.front().pts_us;
+            if(buffered_us < target_lag_us && wait_us < kVideoPrebufferMaxUs)
                 return std::nullopt;
             anchor_pts_us_ = queue_.front().pts_us;
             anchor_wall_ = now;
@@ -103,11 +120,10 @@ public:
          * oldest out before it ever became due and nothing would be shown.
          * Jump the clock forward to keep a short, fixed lag behind the newest. */
         const int64_t newest_lead_us = queue_.back().pts_us - stream_now_us;
-        const int64_t max_lag_us = std::clamp<int64_t>(
-            kClockMaxLagFrames * step_ema_us_, kClockMinMaxLagUs, kClockMaxMaxLagUs);
+        const int64_t max_lag_us = target_lag_us +
+            std::max<int64_t>(kClockLagSlackFrames * step_ema_us_, kClockMinLagSlackUs);
         if(newest_lead_us > max_lag_us) {
-            stream_now_us = queue_.back().pts_us -
-                std::clamp<int64_t>(kClockTargetLagFrames * step_ema_us_, 60000, 250000);
+            stream_now_us = queue_.back().pts_us - target_lag_us;
             anchor_pts_us_ = stream_now_us;
             anchor_wall_ = now;
             ++rebases_;
@@ -170,12 +186,13 @@ public:
         uint64_t presented;
         uint64_t rebases;
         size_t depth;
+        uint64_t underruns;
     };
 
     Stats stats() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        return {queue_drops_, late_drops_, presented_, rebases_, queue_.size()};
+        return {queue_drops_, late_drops_, presented_, rebases_, queue_.size(), underruns_};
     }
 
 private:
@@ -190,6 +207,8 @@ private:
     uint64_t late_drops_ = 0;
     uint64_t presented_ = 0;
     uint64_t rebases_ = 0;
+    uint64_t underruns_ = 0;
+    Clock::time_point empty_since_{};
     bool have_last_pushed_ = false;
     int64_t step_ema_us_ = 0;   /* typical frame interval of the stream, from the pts steps */
     int64_t last_pushed_pts_us_ = 0;
