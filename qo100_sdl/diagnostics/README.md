@@ -14,7 +14,7 @@ cd qo100_sdl/diagnostics
 ```
 
 It generates short synthetic streams (test pattern with noise, video plus MP2 audio,
-a keyframe every 2 s) with `ffmpeg`, sends each one in real time over loopback
+a keyframe every 2 s, 20 s long so nothing loops during the 16 s run) with `ffmpeg`, sends each one in real time over loopback
 (`127.0.0.1:5610`, never the app's own multicast address) into the app's **real**
 `VideoDecoder` and `VideoScheduler`, and polls the presenter at 60 Hz like the render
 loop does. It then reports the frame rate actually shown against the stream's own.

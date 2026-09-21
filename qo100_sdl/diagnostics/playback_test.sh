@@ -74,7 +74,7 @@ if [ ! -x "$BIN" ] || [ "$HERE/playback_harness.cpp" -nt "$BIN" ] || \
 fi
 
 make_stream() {  # name encoder size fps
-  local file="$WORK/$1.ts" enc="$2" size="$3" fps="$4" opts
+  local file="$WORK/$1.20s.ts" enc="$2" size="$3" fps="$4" opts
   [ -s "$file" ] && return 0
   case "$enc" in
     libx265) opts="-preset ultrafast -x265-params log-level=error:keyint=$((fps*2))" ;;
@@ -82,7 +82,7 @@ make_stream() {  # name encoder size fps
   esac
   ffmpeg -hide_banner -loglevel error -y \
     -f lavfi -i "testsrc2=size=$size:rate=$fps,noise=alls=15:allf=t" \
-    -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 12 \
+    -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 20 \
     -c:v "$enc" $opts -b:v 1500k -c:a mp2 -b:a 128k -shortest -f mpegts "$file" 2>/dev/null
   [ -s "$file" ]
 }
@@ -105,7 +105,7 @@ for spec in "${SCENARIOS[@]}"; do
   fi
   make_stream "$name" "$enc" "$size" "$fps" || { echo "$name: could not generate the stream"; continue; }
 
-  ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$WORK/$name.ts" -c copy \
+  ffmpeg -hide_banner -loglevel error -re -i "$WORK/$name.20s.ts" -c copy \
     -f mpegts "udp://127.0.0.1:$PORT?pkt_size=1316" &
   sender=$!
   sleep 0.5
