@@ -29,6 +29,15 @@ struct AudioChunk {
     int channels = 2;
 };
 
+/* FFmpeg writes its own unprefixed, untimestamped lines to stderr, in bursts of
+ * dozens per second when the stream is corrupt. install_ffmpeg_log_capture()
+ * takes that over: warnings and errors are counted by message (digits
+ * ignored, so "concealing 1998 DC" and "concealing 3529 DC" are one kind)
+ * instead of printed, and flush_ffmpeg_log_summary() logs one compact
+ * [FFMPEG] line per kind since the last flush. */
+void install_ffmpeg_log_capture();
+void flush_ffmpeg_log_summary();
+
 class VideoDecoder {
 public:
     using FrameCallback = std::function<void(VideoFrame &&)>;

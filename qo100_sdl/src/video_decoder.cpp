@@ -15,6 +15,7 @@ extern "C" {
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdarg>
 #include <cstddef>
 #include <cmath>
 #include <cstdio>
@@ -23,6 +24,7 @@ extern "C" {
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace qo100 {
 namespace {
@@ -446,6 +448,89 @@ uint64_t VideoDecoder::decode_errors() const { return impl_->errors.load(); }
 uint64_t VideoDecoder::audio_decode_errors() const
 {
     return impl_->audio_errors.load();
+}
+
+
+namespace {
+
+std::mutex & ffmpeg_log_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+struct FfmpegLogKind {
+    std::string text;
+    unsigned long count = 0;
+    bool error = false;
+};
+
+std::vector<FfmpegLogKind> & ffmpeg_log_kinds()
+{
+    static std::vector<FfmpegLogKind> kinds;
+    return kinds;
+}
+
+void ffmpeg_log_callback(void * context, int level, const char * format, va_list arguments)
+{
+    if(level > AV_LOG_WARNING) return;
+    char line[512];
+    int print_prefix = 0;
+    av_log_format_line2(context, level, format, arguments, line, sizeof(line), &print_prefix);
+    /* "[h264 @ 0x7f...] text" -> "h264: text", digits collapsed to '#'. */
+    std::string component, message;
+    const char * open = std::strchr(line, '[');
+    const char * at = open != nullptr ? std::strstr(open, " @ ") : nullptr;
+    const char * close = at != nullptr ? std::strchr(at, ']') : nullptr;
+    if(open == line && close != nullptr) {
+        component.assign(open + 1, at);
+        message = close + 1;
+    }
+    else message = line;
+    bool in_number = false;
+    std::string key = component.empty() ? "" : component + ":";
+    for(char c : message) {
+        if(std::isdigit(static_cast<unsigned char>(c))) {
+            if(!in_number) key += '#';
+            in_number = true;
+        }
+        else {
+            in_number = false;
+            if(c != '\n' && c != '\r') key += c;
+        }
+    }
+    std::lock_guard<std::mutex> lock(ffmpeg_log_mutex());
+    auto & kinds = ffmpeg_log_kinds();
+    for(auto & kind : kinds) {
+        if(kind.text == key) { ++kind.count; return; }
+    }
+    if(kinds.size() < 64) kinds.push_back({key, 1, level <= AV_LOG_ERROR});
+}
+
+} // namespace
+
+void install_ffmpeg_log_capture() { av_log_set_callback(ffmpeg_log_callback); }
+
+void flush_ffmpeg_log_summary()
+{
+    std::vector<FfmpegLogKind> kinds;
+    {
+        std::lock_guard<std::mutex> lock(ffmpeg_log_mutex());
+        kinds.swap(ffmpeg_log_kinds());
+    }
+    std::sort(kinds.begin(), kinds.end(),
+              [](const FfmpegLogKind & a, const FfmpegLogKind & b) { return a.count > b.count; });
+    unsigned long total = 0;
+    for(const auto & kind : kinds) total += kind.count;
+    constexpr size_t kShown = 4;
+    for(size_t i = 0; i < kinds.size() && i < kShown; ++i)
+        qo100::log("[FFMPEG] %s (x%lu)\n", kinds[i].text.c_str(), kinds[i].count);
+    if(kinds.size() > kShown) {
+        unsigned long rest = 0;
+        for(size_t i = kShown; i < kinds.size(); ++i) rest += kinds[i].count;
+        qo100::log("[FFMPEG] +%zu other kinds (x%lu); %lu messages in all\n",
+                   kinds.size() - kShown, rest, total);
+    }
 }
 
 } // namespace qo100

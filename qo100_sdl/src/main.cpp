@@ -4108,6 +4108,10 @@ private:
 int main(int argc, char ** argv)
 {
     qo100::reset_log_clock();
+    /* libwebsockets' own "NOTICE" banner/timestamps and FFmpeg's raw stderr
+     * lines would otherwise interleave with ours unformatted. */
+    lws_set_log_level(LLL_ERR | LLL_WARN, nullptr);
+    qo100::install_ffmpeg_log_capture();
     log_startup_banner();
     const Options options = parse_options(argc, argv);
     const std::string repository_root = repository_directory();
@@ -5573,6 +5577,7 @@ int main(int argc, char ** argv)
                     const double clicked = kSpectrumStartMhz +
                         static_cast<double>(x - layout.spectrum_plot.x) /
                         layout.spectrum_plot.w * kSpectrumSpanMhz;
+                    qo100::log("[TOUCH] spectrum x=%d -> %.3fMHz\n", x, clicked);
                     const DetectedSignal * selected_signal = nullptr;
                     for(const auto & signal : spectrum_texture->signals()) {
                         const double half_width = std::max(0.02,
@@ -5604,6 +5609,13 @@ int main(int argc, char ** argv)
                             (target_frequency_mhz - effective_lo_mhz()) * 1000.0);
                         const long target_symbol_rate_ksps = std::lround(
                             selected_signal->symbol_rate_ms * 1000.0F);
+                        qo100::log(
+                            "[TOUCH] snapped to detected signal %.3fMHz (touch %+.0fkHz off) "
+                            "width=%.2fMHz SR~%ldkS/s -> IF=%ldkHz\n",
+                            target_frequency_mhz,
+                            (clicked - target_frequency_mhz) * 1000.0,
+                            static_cast<double>(selected_signal->measured_width_mhz),
+                            target_symbol_rate_ksps, target_if_khz);
                         const long same_signal_tolerance_khz = std::lround(
                             std::max(0.02,
                                 static_cast<double>(selected_signal->measured_width_mhz) / 2.0) *
@@ -5800,9 +5812,13 @@ int main(int argc, char ** argv)
                 const std::string service = !receiver_status.service_name.empty()
                     ? receiver_status.service_name : receiver_status.service_provider;
                 qo100::log(
-                    "[TUNE] lock: %s IF=%ldkHz SR=%ldkS/s MER=%.1fdB service=%s\n",
+                    "[TUNE] lock: %s carrier IF=%ldkHz (RF %.3fMHz, %+ldkHz from requested "
+                    "IF=%ldkHz) SR=%ldkS/s MER=%.1fdB service=%s\n",
                     receiver_status.demod_state == 4 ? "DVB-S2" : "DVB-S",
-                    receiver_status.carrier_khz, receiver_status.symbol_rate_ksps,
+                    receiver_status.carrier_khz,
+                    effective_lo_mhz() + receiver_status.carrier_khz / 1000.0,
+                    receiver_status.carrier_khz - current_tune_if_khz, current_tune_if_khz,
+                    receiver_status.symbol_rate_ksps,
                     receiver_status.mer_x10 / 10.0,
                     service.empty() ? "---" : service.c_str());
                 if(beacon_return_armed) {
@@ -5842,8 +5858,7 @@ int main(int argc, char ** argv)
                         beacon_return_armed = true;
                         beacon_return_deadline = Clock::now() + kBeaconReturnDelay;
                         qo100::log(
-                            "[TUNE] lock lost on non-beacon signal; returning to "
-                            "beacon in %lldms unless it comes back\n",
+                            "[TUNE] beacon return in %lldms unless lock comes back\n",
                             static_cast<long long>(kBeaconReturnDelay.count()));
                     }
                 }
@@ -6168,37 +6183,39 @@ int main(int argc, char ** argv)
             const uint64_t queue_drop_delta = stats.queue_drops - previous_queue_drops;
             const uint64_t late_drop_delta = stats.late_drops - previous_late_drops;
             qo100::log(
-                "[PRESENT] fps=%.1f drop=%llu late=%llu max_gap=%.1fms stalls=%llu "
-                "shown=%llu rebases=%llu depth=%zu "
-                 "spectrum=%llu replaced=%llu "
-                 "tuner_status=%s updates=%llu overwritten=%llu tune_control=%s "
-                 "decode=%llu reopen=%llu errors=%llu "
-                 "audio_chunks=%llu audio_q=%ums audio_drop=%llu "
-                 "audio_under=%llu audio_rebuffer=%llu audio_errors=%llu "
-                 "textures=%zu rss=%ldkB cpu_temp=%.1fC\n",
+                "[VIDEO] fps=%.1f shown=%llu drop=%llu late=%llu stalls=%llu "
+                "max_gap=%.0fms decoded=%llu errors=%llu reopen=%llu rebases=%llu depth=%zu\n",
                 presented_delta / window_seconds,
+                static_cast<unsigned long long>(stats.presented),
                 static_cast<unsigned long long>(queue_drop_delta),
                 static_cast<unsigned long long>(late_drop_delta),
-                interval_max_gap_us / 1000.0,
                 static_cast<unsigned long long>(interval_stalls),
-                static_cast<unsigned long long>(stats.presented),
-                static_cast<unsigned long long>(stats.rebases), stats.depth,
-                static_cast<unsigned long long>(spectrum_feed.received_frames()),
-                static_cast<unsigned long long>(spectrum_feed.replaced_frames()),
-                receiver_client.monitor_connected() ? "CONNECTED" : "DISCONNECTED",
+                interval_max_gap_us / 1000.0,
+                static_cast<unsigned long long>(video_decoder.decoded_frames()),
+                static_cast<unsigned long long>(video_decoder.decode_errors()),
+                static_cast<unsigned long long>(video_decoder.reopen_count()),
+                static_cast<unsigned long long>(stats.rebases), stats.depth);
+            qo100::log(
+                "[AUDIO] chunks=%llu queue=%ums dropped=%llu underruns=%llu "
+                "rebuffers=%llu errors=%llu\n",
+                static_cast<unsigned long long>(video_decoder.decoded_audio_chunks()),
+                audio_output.queued_ms(),
+                static_cast<unsigned long long>(audio_output.dropped_chunks()),
+                static_cast<unsigned long long>(audio_output.underruns()),
+                static_cast<unsigned long long>(audio_output.rebuffers()),
+                static_cast<unsigned long long>(video_decoder.audio_decode_errors()));
+            qo100::log(
+                "[LINK] tuner=%s control=%s status_updates=%llu overwritten=%llu "
+                "spectrum_frames=%llu replaced=%llu\n",
+                receiver_client.monitor_connected() ? "up" : "DOWN",
+                receiver_client.control_connected() ? "up" : "DOWN",
                 static_cast<unsigned long long>(receiver_client.received_updates()),
                 static_cast<unsigned long long>(receiver_client.replaced_updates()),
-                receiver_client.control_connected() ? "CONNECTED" : "DISCONNECTED",
-                 static_cast<unsigned long long>(video_decoder.decoded_frames()),
-                 static_cast<unsigned long long>(video_decoder.reopen_count()),
-                 static_cast<unsigned long long>(video_decoder.decode_errors()),
-                 static_cast<unsigned long long>(video_decoder.decoded_audio_chunks()),
-                 audio_output.queued_ms(),
-                 static_cast<unsigned long long>(audio_output.dropped_chunks()),
-                 static_cast<unsigned long long>(audio_output.underruns()),
-                 static_cast<unsigned long long>(audio_output.rebuffers()),
-                 static_cast<unsigned long long>(video_decoder.audio_decode_errors()),
-                 text.texture_count(), process_rss_kb(), cpu_temperature_c());
+                static_cast<unsigned long long>(spectrum_feed.received_frames()),
+                static_cast<unsigned long long>(spectrum_feed.replaced_frames()));
+            qo100::log("[SYS] rss=%ldMB cpu_temp=%.1fC textures=%zu\n",
+                       process_rss_kb() / 1024, cpu_temperature_c(), text.texture_count());
+            qo100::flush_ffmpeg_log_summary();
             previous_presented = stats.presented;
             previous_queue_drops = stats.queue_drops;
             previous_late_drops = stats.late_drops;

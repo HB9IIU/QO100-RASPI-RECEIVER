@@ -805,7 +805,9 @@ struct LongmyndClient::Impl {
                     const int written = lws_write(websocket, buffer.data() + LWS_PRE,
                                                   command.size(), LWS_WRITE_TEXT);
                     if(written < 0) qo100::log( "[LONGMYND-WS] control write failed\n");
-                    else qo100::log( "[LONGMYND-WS] sent %s\n", command.c_str());
+                    /* Tunes ("C...") are already logged as [TUNE] by the caller. */
+                    else if(command[0] != 'C')
+                        qo100::log( "[LONGMYND-WS] sent %s\n", command.c_str());
                 }
                 if(more) lws_callback_on_writable(websocket);
                 break;
