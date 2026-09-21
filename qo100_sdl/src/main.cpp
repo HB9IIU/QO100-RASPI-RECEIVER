@@ -4317,9 +4317,9 @@ int main(int argc, char ** argv)
      * message already in flight when the tune command landed can still
      * describe the *previous* signal (still locked, old service name) and
      * briefly overwrite the fresh reset() below before genuinely new status
-     * arrives. Discard any "still locked" report until we've seen at least
-     * one real unlocked report since the tune - that unlocked report proves
-     * we're finally seeing status generated after the retune took effect. */
+     * arrives. Until a report shows up that describes the requested signal
+     * (or 3s pass), a "still locked" report about a different signal is
+     * discarded. */
     bool awaiting_post_tune_unlock = false;
     auto last_tune = Clock::time_point{};
     auto last_spectrum_click = Clock::time_point{};
@@ -5755,9 +5755,22 @@ int main(int argc, char ** argv)
 
         if(receiver_enabled && receiver_client.consume_status(receiver_status)) {
             if(awaiting_post_tune_unlock) {
-                if(receiver_status.locked()) {
-                    /* Stale pre-tune message - undo it rather than let it
-                     * flash the old lock/service name back onto the display. */
+                /* A "locked" report is the real thing if it describes the
+                 * signal we just asked for (same carrier and symbol rate).
+                 * Waiting for an unlocked report first, as this used to,
+                 * never ended when the tuner re-locked so fast (the beacon,
+                 * or the same frequency again) that no unlocked report was
+                 * ever sent: the info box then stayed blank. */
+                const bool describes_requested_signal =
+                    std::labs(receiver_status.carrier_khz - current_tune_if_khz) <=
+                        std::max(100L, current_tune_symbol_rate_ksps / 2) &&
+                    std::labs(receiver_status.symbol_rate_ksps - current_tune_symbol_rate_ksps) <=
+                        std::max(5L, current_tune_symbol_rate_ksps / 10);
+                if(receiver_status.locked() && !describes_requested_signal &&
+                   Clock::now() - last_tune < std::chrono::seconds(3)) {
+                    /* Stale pre-tune message about the previous signal - undo
+                     * it rather than flash the old lock/service name back onto
+                     * the display. */
                     receiver_status.reset();
                 }
                 else {
