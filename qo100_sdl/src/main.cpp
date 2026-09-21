@@ -4366,16 +4366,18 @@ int main(int argc, char ** argv)
         }
     };
     /* Longmynd is told where to send the transport stream only once, on its
-     * command line. With a stick plugged in the RTL-SDR popup decides that
-     * (YES = field use, loopback; NO = multicast as usual), so hold longmynd
-     * back until it has been answered. Without a stick nothing waits. */
-    bool longmynd_start_pending = false;
-    if(use_tuner) {
-        if(rtlsdr_ask_popup == RtlSdrAskPopupKind::None) start_longmynd();
-        else longmynd_start_pending = true;
-    }
+     * command line. It starts at once on the usual multicast address so the
+     * beacon is up while the boot popups are still being answered; if the
+     * RTL-SDR popup is answered YES (field use, loopback), it is restarted
+     * on loopback (see restart_longmynd_on_loopback). */
+    if(use_tuner) start_longmynd();
     qo100::ReceiverStatus receiver_status;
     bool receiver_was_locked = false;
+    bool lock_detail_pending = false;
+    auto lock_detail_since = Clock::time_point{};
+    /* Set by the popup handler / main loop once these exist (declared below);
+     * the restart itself is defined further down next to apply_tune's state. */
+    std::function<void()> restart_longmynd_on_loopback;
     /* longmynd's websocket status has only a single latest-message slot, not
      * a queue (see LongmyndClient::on_monitor) - right after retuning, one
      * message already in flight when the tune command landed can still
@@ -4622,6 +4624,22 @@ int main(int argc, char ** argv)
     auto video_notice_started_at = run_started;
     auto last_video_frame_at = run_started;
     uint64_t tune_reopen_before = 0;
+    restart_longmynd_on_loopback = [&] {
+        qo100::log("[LONGMYND] restarting on loopback for local RTL-SDR use\n");
+        longmynd->stop();
+        receiver_status.reset();
+        sent_rf_port = 0;    /* a fresh longmynd starts on port A */
+        receiver_enabled = longmynd->start(beacon_frequency_khz, beacon_symbol_rate_ksps);
+        if(receiver_enabled)
+            receiver_client.send_voltage(receiver_settings.lnb_voltage_enabled,
+                                         receiver_settings.lnb_voltage_horizontal);
+        /* The decoder opened the multicast address; make it pick up the new
+         * QO100_TS_ADDR, and time "video acquired" from now. */
+        video_decoder.request_reset();
+        video_notice = VideoNotice::Tuning;
+        video_notice_started_at = Clock::now();
+        tune_reopen_before = video_decoder.reopen_count();
+    };
     auto last_stats = run_started;
     auto last_present_wall = Clock::time_point{};
     int64_t interval_max_gap_us = 0;
@@ -5096,9 +5114,11 @@ int main(int argc, char ** argv)
                             /* YES means field use with no network: send the
                              * transport stream over loopback instead of
                              * multicast (which dies when the cable is
-                             * pulled). Longmynd hasn't started yet. An
-                             * explicit QO100_TS_ADDR still wins. */
+                             * pulled). Longmynd is already running on
+                             * multicast and gets restarted. An explicit
+                             * QO100_TS_ADDR still wins. */
                             setenv("QO100_TS_ADDR", "127.0.0.1", 0);
+                            if(receiver_enabled) restart_longmynd_on_loopback();
                             spectrum_feed.switch_target(local_spectrum_config());
                             spectrum_source_local = true;
                             spectrum_source_switching = true;
@@ -5603,11 +5623,23 @@ int main(int argc, char ** argv)
                             scan_active = false;
                             qo100::log("[SCAN] cancelled by manual selection\n");
                         }
-                        const double target_frequency_mhz = selected_signal->frequency_mhz;
-                        const long target_if_khz = std::lround(
+                        double target_frequency_mhz = selected_signal->frequency_mhz;
+                        long target_if_khz = std::lround(
                             (target_frequency_mhz - effective_lo_mhz()) * 1000.0);
-                        const long target_symbol_rate_ksps = std::lround(
+                        long target_symbol_rate_ksps = std::lround(
                             selected_signal->symbol_rate_ms * 1000.0F);
+                        /* The spectrum peak of the wide beacon sits ~27kHz above
+                         * its true carrier. Anything that close to the beacon
+                         * is the beacon: tune its exact IF, which also keeps
+                         * the beacon-return watchdog from treating it as some
+                         * other signal. */
+                        const double beacon_rf_mhz = effective_lo_mhz() +
+                                                     beacon_frequency_khz / 1000.0;
+                        if(std::abs(target_frequency_mhz - beacon_rf_mhz) <= 0.06) {
+                            target_frequency_mhz = beacon_rf_mhz;
+                            target_if_khz = beacon_frequency_khz;
+                            target_symbol_rate_ksps = beacon_symbol_rate_ksps;
+                        }
                         qo100::log(
                             "[TOUCH] snapped to detected signal %.3fMHz (touch %+.0fkHz off) "
                             "width=%.2fMHz SR~%ldkS/s -> IF=%ldkHz\n",
@@ -5787,13 +5819,6 @@ int main(int argc, char ** argv)
             }
         }
 
-        if(longmynd_start_pending && rtlsdr_ask_popup == RtlSdrAskPopupKind::None) {
-            longmynd_start_pending = false;
-            start_longmynd();
-            /* The decoder already opened the default address while waiting;
-             * make it pick up a changed QO100_TS_ADDR. */
-            video_decoder.request_reset();
-        }
         if(receiver_enabled && receiver_client.consume_status(receiver_status)) {
             if(awaiting_post_tune_unlock) {
                 if(receiver_status.locked()) {
@@ -5810,16 +5835,17 @@ int main(int argc, char ** argv)
                 scan_locked_at = Clock::now();
                 const std::string service = !receiver_status.service_name.empty()
                     ? receiver_status.service_name : receiver_status.service_provider;
+                (void)service;
+                lock_detail_pending = true;
+                lock_detail_since = Clock::now();
                 qo100::log(
                     "[TUNE] lock: %s carrier IF=%ldkHz (RF %.3fMHz, %+ldkHz from requested "
-                    "IF=%ldkHz) SR=%ldkS/s MER=%.1fdB service=%s\n",
+                    "IF=%ldkHz) SR=%ldkS/s\n",
                     receiver_status.demod_state == 4 ? "DVB-S2" : "DVB-S",
                     receiver_status.carrier_khz,
                     effective_lo_mhz() + receiver_status.carrier_khz / 1000.0,
                     receiver_status.carrier_khz - current_tune_if_khz, current_tune_if_khz,
-                    receiver_status.symbol_rate_ksps,
-                    receiver_status.mer_x10 / 10.0,
-                    service.empty() ? "---" : service.c_str());
+                    receiver_status.symbol_rate_ksps);
                 if(beacon_return_armed) {
                     beacon_return_armed = false;
                     qo100::log(
@@ -5827,7 +5853,12 @@ int main(int argc, char ** argv)
                 }
             }
             else if(!locked_now && receiver_was_locked) {
-                qo100::log( "[TUNE] lock lost\n");
+                /* Right after a tune the tuner resets and drops lock by itself;
+                 * that isn't the signal going away. */
+                if(Clock::now() - last_tune < std::chrono::seconds(3))
+                    qo100::log("[TUNE] retuning (lock reset)\n");
+                else
+                    qo100::log("[TUNE] lock lost\n");
                 /* scan_locked_at <= scan_tuned_at means this edge is just the
                  * reset-induced drop from the *previous* scan step catching
                  * up (status updates arrive on their own cadence, not every
@@ -5862,6 +5893,20 @@ int main(int argc, char ** argv)
                     }
                 }
             }
+            /* MER and the service name arrive a moment after lock itself, so
+             * they're logged once they're known (or after 3s regardless). */
+            if(lock_detail_pending && locked_now) {
+                const std::string service = !receiver_status.service_name.empty()
+                    ? receiver_status.service_name : receiver_status.service_provider;
+                if((!service.empty() && receiver_status.mer_x10 > 0) ||
+                   Clock::now() - lock_detail_since >= std::chrono::seconds(3)) {
+                    lock_detail_pending = false;
+                    qo100::log("[TUNE] stream: MER=%.1fdB service=%s\n",
+                               receiver_status.mer_x10 / 10.0,
+                               service.empty() ? "---" : service.c_str());
+                }
+            }
+            if(!locked_now) lock_detail_pending = false;
             receiver_was_locked = locked_now;
             /* A NEW status has just arrived: the calibration reads it. */
             if(lnb_cal.running()) lnb_cal.on_status(Clock::now(), receiver_status);

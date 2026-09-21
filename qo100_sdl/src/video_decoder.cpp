@@ -82,6 +82,9 @@ struct VideoDecoder::Impl {
     std::atomic<uint64_t> audio_chunk_count{0};
     std::atomic<uint64_t> reopens{0};
     std::atomic<uint64_t> errors{0};
+    /* Nothing arriving on the input yet (tuner not started/no signal) - kept out
+     * of `errors`, which counts real decode problems. */
+    std::atomic<uint64_t> open_failures{0};
     std::atomic<uint64_t> audio_errors{0};
     mutable std::mutex codec_mutex;
     std::string codec;
@@ -209,9 +212,11 @@ struct VideoDecoder::Impl {
         if(result < 0) {
             avformat_free_context(format);
             if(running.load() && !reset_requested.load()) {
-                ++errors;
-                if(errors.load() <= 3 || errors.load() % 20 == 0)
-                    qo100::log( "[VIDEO] input open: %s\n", ffmpeg_error(result).c_str());
+                const uint64_t failures = ++open_failures;
+                if(failures <= 3 || failures % 20 == 0)
+                    qo100::log( "[VIDEO] input open: %s (attempt %llu)\n",
+                                ffmpeg_error(result).c_str(),
+                                static_cast<unsigned long long>(failures));
             }
             return;
         }
@@ -475,8 +480,13 @@ void ffmpeg_log_callback(void * context, int level, const char * format, va_list
 {
     if(level > AV_LOG_WARNING) return;
     char line[512];
-    int print_prefix = 0;
+    /* FFmpeg can emit one message in pieces ("Packet corrupt (...)" then "."):
+     * the state says whether this piece continues an unfinished line, and a
+     * continuation is not a new message. */
+    thread_local int print_prefix = 1;
+    const bool continuation = print_prefix == 0;
     av_log_format_line2(context, level, format, arguments, line, sizeof(line), &print_prefix);
+    if(continuation) return;
     /* "[h264 @ 0x7f...] text" -> "h264: text", digits collapsed to '#'. */
     std::string component, message;
     const char * open = std::strchr(line, '[');
