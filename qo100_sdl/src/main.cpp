@@ -3773,15 +3773,14 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
             ? 1.0 : std::clamp(1.0 - (fraction - fade_start) / (1.0 - fade_start), 0.0, 1.0);
         const auto alpha = static_cast<uint8_t>(std::lround(opacity * 255));
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-        /* Triple the original size (font 16->48, so everything else
-         * scales 3x too) and centred on the whole screen rather than
-         * pinned near the top - big and unmissable rather than a subtle
-         * corner notice. */
-        constexpr int kToastFontSize = 48;
+        /* Centred on the whole screen rather than pinned near the top -
+         * unmissable rather than a subtle corner notice, but no longer as big as
+         * it was (font 48): 32 is the next size down that's preloaded. */
+        constexpr int kToastFontSize = 32;
         const auto [text_w, text_h] = text.measure(toast_text, kToastFontSize);
         (void)text_h;
-        const SDL_Rect toast{(width - text_w - 120) / 2, (height - 108) / 2,
-                             text_w + 120, 108};
+        const SDL_Rect toast{(width - text_w - 90) / 2, (height - 76) / 2,
+                             text_w + 90, 76};
         fill_rounded_rect(renderer, toast, 24, {0x14, 0x2a, 0x1c, alpha});
         draw_rounded_rect(renderer, toast, 24, {kGreen.r, kGreen.g, kGreen.b, alpha});
         text.draw(toast_text, toast.x + toast.w / 2, toast.y + toast.h / 2,
@@ -6004,7 +6003,7 @@ int main(int argc, char ** argv)
             tune_presets[row].symbol_rate_ksps = kTuneSrValues[tune_sr_index];
             tune_presets[row].rf_port = tune_rf_port;
             qo100::save_tune_presets(repository_root, tune_presets);
-            tune_toast_text = "SAVED " + tune_format_if_khz(tune_presets[row].if_khz);
+            tune_toast_text = "Pre-set Saved";
             tune_toast_started_at = Clock::now();
             qo100::log("[TUNE_UI] preset %d overwritten: %s\n", row,
                       tune_format_if_khz(tune_presets[row].if_khz).c_str());
@@ -6313,7 +6312,10 @@ int main(int argc, char ** argv)
                            tune_digits, tune_sr_index, tune_rf_port,
                            video_texture, have_video_frame,
                            video_source_width, video_source_height, video_notice, 0.0,
-                           receiver_status, tune_presets, std::string(), 1e9);
+                           receiver_status, tune_presets,
+                           std::getenv("QO100_SCREENSHOT_SAMPLE") != nullptr ? "Pre-set Saved"
+                                                                             : std::string(),
+                           0.2);
         }
         else {
         draw_spectrum(renderer, text, layout, *spectrum_texture,
