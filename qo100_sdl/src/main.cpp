@@ -1638,8 +1638,8 @@ void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
 
     const int centre_x = popup.x + popup.w / 2;
     if(kind == TunerPopupKind::Detected) {
-        text.draw("TUNER DETECTED", centre_x, popup.y + 45, kGreen, 32, true);
-        text.draw(product, centre_x, popup.y + 112, kText, 20, true);
+        text.draw("DETECTED TUNER", centre_x, popup.y + 45, kGreen, 32, true);
+        text.draw(product, centre_x, popup.y + 105, kGreen, 32, true);
     }
     else {
         text.draw("NO TUNER FOUND", centre_x, popup.y + 40, kRed, 32, true);
