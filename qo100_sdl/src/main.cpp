@@ -4138,9 +4138,12 @@ int main(int argc, char ** argv)
      * lines would otherwise interleave with ours unformatted. */
     lws_set_log_level(LLL_ERR | LLL_WARN, nullptr);
     qo100::install_ffmpeg_log_capture();
-    log_startup_banner();
     const Options options = parse_options(argc, argv);
     const std::string repository_root = repository_directory();
+    /* A log file per run (qo100_sdl/logs/), except for one-shot screenshots. */
+    if(options.screenshot.empty())
+        qo100::open_log_file(repository_root + "/qo100_sdl/logs");
+    log_startup_banner();
     const std::string settings_path = repository_root + "/qo100_sdl/settings.json";
     const bool settings_file_exists = std::ifstream(settings_path).good();
     qo100::ReceiverSettings receiver_settings =

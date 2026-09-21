@@ -57,3 +57,6 @@ screenshots/
 # Claude Code's own local settings/permissions - machine-specific, not
 # project config
 .claude/
+
+# Per-run app logs
+qo100_sdl/logs/
