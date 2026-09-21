@@ -283,6 +283,8 @@ std::vector<TunePreset> load_tune_presets(const std::string & repository_root)
                 preset.if_khz = json_object_get_int64(value);
             if(json_object_object_get_ex(entry, "symbol_rate_ksps", &value))
                 preset.symbol_rate_ksps = json_object_get_int64(value);
+            if(json_object_object_get_ex(entry, "rf_port", &value))
+                preset.rf_port = json_object_get_int(value) == 1 ? 1 : 0;
             if(preset.if_khz > 0) presets.push_back(std::move(preset));
         }
     }
@@ -303,6 +305,7 @@ bool save_tune_presets(const std::string & repository_root,
         json_object_object_add(entry, "if_khz", json_object_new_int64(preset.if_khz));
         json_object_object_add(entry, "symbol_rate_ksps",
                                json_object_new_int64(preset.symbol_rate_ksps));
+        json_object_object_add(entry, "rf_port", json_object_new_int(preset.rf_port));
         json_object_array_add(list, entry);
     }
     json_object_object_add(root, "presets", list);
@@ -966,6 +969,11 @@ void LongmyndClient::send_tune(long frequency_khz, long symbol_rate_ksps)
 {
     impl_->queue("C" + std::to_string(frequency_khz) + "," +
                  std::to_string(symbol_rate_ksps));
+}
+
+void LongmyndClient::send_rf_port(int rf_port)
+{
+    impl_->queue("T" + std::to_string(rf_port == 1 ? 1 : 0));
 }
 
 void LongmyndClient::send_voltage(bool enabled, bool horizontal)

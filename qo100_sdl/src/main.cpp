@@ -3485,50 +3485,6 @@ std::string tune_format_if_khz(long if_khz)
     return text;
 }
 
-/* Shared by the drawing code and the scroll hit-test below, so the two
- * can't drift apart. Symbol rate only ever shows one short number plus
- * its scale, so it gets less width than the seven-digit frequency wheel.
- * The freq/SR row is a fixed height (matching what tune_freq_metrics'
- * digit sizes were tuned for, per compact/wide) rather than a percentage
- * of whatever's left, so the video panel above it is the one that grows
- * or shrinks as the page's available height changes. */
-void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card, SDL_Rect & sr_card)
-{
-    constexpr int kPad = 16;
-    constexpr int kGap = 12;
-    constexpr int kRightColW = 190;
-    const int content_y = kPad;
-    const int content_h = height - content_y - kPad;
-    const int main_col_w = width - kPad - kGap - kRightColW - kPad;
-    /* Just enough for the digit wheel/value plus its title row (see
-     * tune_freq_metrics/tune_sr_font_size for the sizes this has to fit) -
-     * trimmed down from the original mockup's much taller cards so the
-     * video panel above gets the freed-up height instead. */
-    const int lower_h = settings_compact(width) ? 92 : 128;
-    const int lower_y = content_y + content_h - lower_h;
-    const int freq_w = (main_col_w - kGap) * 7 / 10;
-    const int sr_w = main_col_w - kGap - freq_w;
-    freq_card = {kPad, lower_y, freq_w, lower_h};
-    sr_card = {freq_card.x + freq_card.w + kGap, lower_y, sr_w, lower_h};
-}
-
-/* Shared by the drawing code and the tap-to-fullscreen hit-test below -
- * fills whatever's left above the freq/SR row (see tune_lower_cards_rect
- * for why that's a fixed height), same as the main page's own video
- * panel does above its own status row. */
-SDL_Rect tune_video_panel_rect(int width, int height)
-{
-    constexpr int kPad = 16;
-    constexpr int kGap = 12;
-    constexpr int kRightColW = 190;
-    const int content_y = kPad;
-    const int main_col_w = width - kPad - kGap - kRightColW - kPad;
-    SDL_Rect freq_card, sr_card;
-    tune_lower_cards_rect(width, height, freq_card, sr_card);
-    const int video_panel_h = freq_card.y - kGap - content_y;
-    return {kPad, content_y, main_col_w, video_panel_h};
-}
-
 /* Digit size scales with the display this is built for - the 800-wide
  * panel's freq_card is noticeably shorter than the 1024-wide one's (see
  * tune_lower_cards_rect), so one fixed size would either clip on the
@@ -3547,6 +3503,76 @@ TuneFreqMetrics tune_freq_metrics(int width)
      * ascent/descent). */
     if(settings_compact(width)) return {46, 58, 48, 36};
     return {70, 90, 76, 56};
+}
+
+/* Shared by the drawing code and the scroll hit-test below, so the two
+ * can't drift apart. Symbol rate only ever shows one short number plus
+ * its scale, so it gets less width than the seven-digit frequency wheel.
+ * The freq/SR row is a fixed height (matching what tune_freq_metrics'
+ * digit sizes were tuned for, per compact/wide) rather than a percentage
+ * of whatever's left, so the video panel above it is the one that grows
+ * or shrinks as the page's available height changes. */
+void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card,
+                           SDL_Rect & sr_card, SDL_Rect & rf_card)
+{
+    constexpr int kPad = 16;
+    constexpr int kGap = 12;
+    constexpr int kRightColW = 190;
+    const int content_y = kPad;
+    const int content_h = height - content_y - kPad;
+    const int main_col_w = width - kPad - kGap - kRightColW - kPad;
+    /* Just enough for the digit wheel/value plus its title row (see
+     * tune_freq_metrics/tune_sr_font_size for the sizes this has to fit) -
+     * trimmed down from the original mockup's much taller cards so the
+     * video panel above gets the freed-up height instead. */
+    const int lower_h = settings_compact(width) ? 92 : 128;
+    const int lower_y = content_y + content_h - lower_h;
+    /* The frequency card is only as wide as its seven wheels need (see
+     * tune_freq_metrics/tune_freq_wheel_centre_x); what's left is shared
+     * between the symbol rate and the RF port A/B card. */
+    const TuneFreqMetrics m = tune_freq_metrics(width);
+    const int freq_w = 7 * m.wheel_w + 10 + 8 + (settings_compact(width) ? 8 : 24);
+    const int rf_w = settings_compact(width) ? 72 : 100;
+    const int sr_w = main_col_w - 2 * kGap - freq_w - rf_w;
+    freq_card = {kPad, lower_y, freq_w, lower_h};
+    sr_card = {freq_card.x + freq_card.w + kGap, lower_y, sr_w, lower_h};
+    rf_card = {sr_card.x + sr_card.w + kGap, lower_y, rf_w, lower_h};
+}
+
+void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card, SDL_Rect & sr_card)
+{
+    SDL_Rect rf_card;
+    tune_lower_cards_rect(width, height, freq_card, sr_card, rf_card);
+}
+
+/* The two RF port buttons stacked inside the RF port card: A (TOP, port 0)
+ * above B (BOTTOM, port 1). Shared by the drawing code and the tap
+ * hit-test, so the two can't drift apart. */
+SDL_Rect tune_rf_button_rect(int width, int height, int port)
+{
+    SDL_Rect freq_card, sr_card, rf_card;
+    tune_lower_cards_rect(width, height, freq_card, sr_card, rf_card);
+    constexpr int kTop = 30, kBottomPad = 8, kGap = 6;
+    const int button_h = (rf_card.h - kTop - kBottomPad - kGap) / 2;
+    return {rf_card.x + 10, rf_card.y + kTop + port * (button_h + kGap),
+            rf_card.w - 20, button_h};
+}
+
+/* Shared by the drawing code and the tap-to-fullscreen hit-test below -
+ * fills whatever's left above the freq/SR row (see tune_lower_cards_rect
+ * for why that's a fixed height), same as the main page's own video
+ * panel does above its own status row. */
+SDL_Rect tune_video_panel_rect(int width, int height)
+{
+    constexpr int kPad = 16;
+    constexpr int kGap = 12;
+    constexpr int kRightColW = 190;
+    const int content_y = kPad;
+    const int main_col_w = width - kPad - kGap - kRightColW - kPad;
+    SDL_Rect freq_card, sr_card;
+    tune_lower_cards_rect(width, height, freq_card, sr_card);
+    const int video_panel_h = freq_card.y - kGap - content_y;
+    return {kPad, content_y, main_col_w, video_panel_h};
 }
 
 /* Centre x of digit wheel `index`, matching the draw loop below exactly
@@ -3577,7 +3603,7 @@ SDL_Rect tune_freq_wheel_rect(int width, int height, int index)
  * clipping - measured against DSEG7-Classic-Bold's actual glyph widths
  * (see tune_freq_metrics), not point size, same reasoning as there. Font
  * size must be in the preloaded seven-segment size list in main(). */
-int tune_sr_font_size(int width) { return settings_compact(width) ? 40 : 60; }
+int tune_sr_font_size(int width) { (void)width; return 36; }
 
 /* Manual Tune page. The frequency digit wheels (drag) and symbol rate
  * (tap/wheel) debounce into a real apply_tune - see kTuneApplyDebounce
@@ -3596,7 +3622,7 @@ int tune_sr_font_size(int width) { return settings_compact(width) ? 40 : 60; }
  * button row) is the only way back now. */
 void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
                     int width, int height, const TouchState & touch,
-                    const int (&tune_digits)[7], int tune_sr_index,
+                    const int (&tune_digits)[7], int tune_sr_index, int tune_rf_port,
                     SDL_Texture * video_texture, bool have_video_frame,
                     int video_source_width, int video_source_height,
                     VideoNotice video_notice, double video_notice_elapsed_seconds,
@@ -3624,8 +3650,8 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
      * Tapping it goes fullscreen, same as the main page's own video panel
      * - see tune_video_panel_rect and the SDL_MOUSEBUTTONUP handling in
      * main() for AppPage::Tune. */
-    SDL_Rect freq_card, sr_card;
-    tune_lower_cards_rect(width, height, freq_card, sr_card);
+    SDL_Rect freq_card, sr_card, rf_card;
+    tune_lower_cards_rect(width, height, freq_card, sr_card, rf_card);
     const SDL_Rect video_panel = tune_video_panel_rect(width, height);
     fill_panel(renderer, video_panel);
     const SDL_Rect video_inner{video_panel.x + 6, video_panel.y + 6,
@@ -3644,6 +3670,7 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     /* ---- frequency + symbol rate row ---- */
     fill_panel(renderer, freq_card);
     fill_panel(renderer, sr_card);
+    fill_panel(renderer, rf_card);
     /* Same size/colour as a preset row's name (e.g. "Pluto Bench" below) -
      * these are the two other card titles on this page, so they read at
      * the same weight rather than the dimmer/smaller style used for the
@@ -3655,8 +3682,18 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
      * tune_lower_cards_rect - it only ever holds a short number), and
      * this is the longer of the two titles - too wide for the compact/
      * 800-wide card's title row at the same size as the other one. */
-    text.draw("SYMBOL RATE (kS/s, tap)", sr_card.x + 12, sr_card.y + 10, kText,
+    text.draw("SR (kS/s) (tap)", sr_card.x + 12, sr_card.y + 10, kText,
               settings_compact(width) ? 11 : 14);
+    /* RF port: A = TOP F-connector (default), B = BOTTOM. The filled one is
+     * the port in use - see tune_rf_port in main(). */
+    text.draw("RF port", rf_card.x + 12, rf_card.y + 10, kText,
+              settings_compact(width) ? 11 : 14);
+    for(int port = 0; port < 2; ++port) {
+        const SDL_Rect button = tune_rf_button_rect(width, height, port);
+        draw_button(renderer, text, button, port == 0 ? "A" : "B", kCyan,
+                    settings_compact(width) ? 14 : 20, tune_rf_port == port,
+                    is_pressed(touch, button));
+    }
 
     /* frequency: one scrollable digit wheel per digit, like an iOS time
      * picker spun per-digit instead of per-field (a frequency has no
@@ -3776,7 +3813,8 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
         const qo100::TunePreset & preset = tune_presets[i];
         const SDL_Rect button = tune_preset_button_rect(width, height, i, preset_count);
         const bool is_current = preset.if_khz == current_if_khz &&
-                                preset.symbol_rate_ksps == current_sr_ksps;
+                                preset.symbol_rate_ksps == current_sr_ksps &&
+                                preset.rf_port == tune_rf_port;
         draw_button(renderer, text, button, tune_format_if_khz(preset.if_khz), kCyan, 20,
                    is_current, is_pressed(touch, button));
     }
@@ -4351,8 +4389,18 @@ int main(int argc, char ** argv)
         double frequency_mhz;
         long if_khz;
         long symbol_rate_ksps;
+        int rf_port = 0;   /* 0 = A (TOP, default), 1 = B (BOTTOM); only the Tune page picks B */
     };
     std::optional<PendingTune> pending_tune;
+    /* RF port the tuner was last told to use (longmynd starts on A), so a
+     * "T" command only goes out when it actually changes. */
+    int sent_rf_port = 0;
+    const auto send_rf_port_if_changed = [&](int rf_port) {
+        if(rf_port == sent_rf_port) return;
+        sent_rf_port = rf_port;
+        receiver_client.send_rf_port(rf_port);
+        qo100::log("[TUNE] RF port -> %c\n", rf_port == 1 ? 'B' : 'A');
+    };
 
     std::atomic<bool> producer_running{options.demo};
     std::thread producer;
@@ -4373,12 +4421,13 @@ int main(int argc, char ** argv)
     bool running = true;
     AppPage app_page = AppPage::Main;
     /* DEVELOPMENT AID, screenshot mode only (--screenshot): QO100_SCREENSHOT_PAGE=lnbcal
-     * opens the LNB calibration page and QO100_SCREENSHOT_LOCAL=1 pretends the
+     * (or tune) opens the LNB calibration (or Manual Tune) page and QO100_SCREENSHOT_LOCAL=1 pretends the
      * local RTL-SDR is the spectrum source, so the page's layout can be
      * checked at both screen sizes without a receiver. Ignored in normal use. */
     if(!options.screenshot.empty()) {
         const char * page = std::getenv("QO100_SCREENSHOT_PAGE");
         if(page != nullptr && std::strcmp(page, "lnbcal") == 0) app_page = AppPage::LnbCal;
+        else if(page != nullptr && std::strcmp(page, "tune") == 0) app_page = AppPage::Tune;
         const char * local = std::getenv("QO100_SCREENSHOT_LOCAL");
         if(local != nullptr && local[0] == '1') spectrum_source_local = true;
     }
@@ -4413,6 +4462,7 @@ int main(int argc, char ** argv)
      * that's actually locked and visible right now. */
     int tune_digits[7] = {0, 7, 4, 1, 4, 7, 4};
     int tune_sr_index = 9; // 1500 kS/s
+    int tune_rf_port = 0;  // A; loaded from/saved with the favourites
     bool tune_digit_dragging = false;
     int tune_drag_index = -1;
     int tune_drag_start_y = 0;
@@ -4439,9 +4489,9 @@ int main(int argc, char ** argv)
     if(tune_presets.empty()) {
         constexpr qo100::TunePreset kDefaultPresets[] = {
             {beacon_frequency_khz, beacon_symbol_rate_ksps}, // QO-100 beacon
-            {2405000, 1000},                                 // Pluto/bench test
-            {436500, 333},                                   // 70cm ATV
-            {144600, 125},                                    // 2m test
+            {2405000, 1000, 1},                              // Pluto/bench test (port B)
+            {436500, 333, 1},                                // 70cm ATV (port B)
+            {144600, 125, 1},                                // 2m test (port B)
         };
         constexpr int kDefaultCount =
             sizeof(kDefaultPresets) / sizeof(kDefaultPresets[0]);
@@ -4584,6 +4634,7 @@ int main(int argc, char ** argv)
         tune_reopen_before = video_decoder.reopen_count();
         video_decoder.request_reset();
         audio_output.reset();
+        send_rf_port_if_changed(tune.rf_port);
         receiver_client.send_tune(tune.if_khz, tune.symbol_rate_ksps);
         qo100::log(
             "[TUNE] %s%.3fMHz -> IF=%ldkHz SR=%ldkS/s\n",
@@ -4687,6 +4738,7 @@ int main(int argc, char ** argv)
      * lock on the new one. */
     const auto lnb_cal_dispatch = [&] {
         if(const auto command = lnb_cal.take_command()) {
+            send_rf_port_if_changed(0);   /* the beacon is always on port A */
             receiver_client.send_tune(command->if_khz, command->symbol_rate_ksps);
             receiver_status.reset();
         }
@@ -5281,6 +5333,16 @@ int main(int argc, char ** argv)
                         tune_preset_press_row = -1;
                         continue;
                     }
+                    for(int port = 0; port < 2; ++port) {
+                        if(point_in_rect(x, y, tune_rf_button_rect(display.width, display.height, port)) &&
+                           port != tune_rf_port) {
+                            tune_rf_port = port;
+                            tune_pending_apply = true;
+                            /* A button, not a drag - no need to wait out the debounce. */
+                            tune_last_change_at = Clock::time_point{};
+                            qo100::log("[TUNE_UI] RF port -> %c\n", port == 1 ? 'B' : 'A');
+                        }
+                    }
                     SDL_Rect freq_card, sr_card;
                     tune_lower_cards_rect(display.width, display.height, freq_card, sr_card);
                     if(point_in_rect(x, y, sr_card)) {
@@ -5313,12 +5375,14 @@ int main(int argc, char ** argv)
                             tune_if_khz_to_digits(tune_presets[row].if_khz, tune_digits);
                             tune_sr_index =
                                 tune_sr_index_for_value(tune_presets[row].symbol_rate_ksps);
+                            tune_rf_port = tune_presets[row].rf_port;
                             tune_pending_apply = false;
                             const double frequency_mhz = effective_lo_mhz() +
                                 tune_presets[row].if_khz / 1000.0;
                             apply_tune(PendingTune{
                                 frequency_mhz, tune_presets[row].if_khz,
-                                tune_presets[row].symbol_rate_ksps}, false);
+                                tune_presets[row].symbol_rate_ksps,
+                                tune_presets[row].rf_port}, false);
                             qo100::log("[TUNE_UI] preset %d loaded\n", row);
                         }
                     }
@@ -5448,12 +5512,14 @@ int main(int argc, char ** argv)
                     if(!tune_presets.empty()) {
                         tune_if_khz_to_digits(tune_presets[0].if_khz, tune_digits);
                         tune_sr_index = tune_sr_index_for_value(tune_presets[0].symbol_rate_ksps);
+                        tune_rf_port = tune_presets[0].rf_port;
                         tune_pending_apply = false;
                         const double frequency_mhz = effective_lo_mhz() +
                             tune_presets[0].if_khz / 1000.0;
                         apply_tune(PendingTune{
                             frequency_mhz, tune_presets[0].if_khz,
-                            tune_presets[0].symbol_rate_ksps}, false);
+                            tune_presets[0].symbol_rate_ksps,
+                            tune_presets[0].rf_port}, false);
                     }
                     qo100::log("[TUNE_UI] opened\n");
                     continue;
@@ -5848,7 +5914,7 @@ int main(int argc, char ** argv)
             const long if_khz = tune_digits_to_if_khz(tune_digits);
             const long symbol_rate_ksps = kTuneSrValues[tune_sr_index];
             const double frequency_mhz = effective_lo_mhz() + if_khz / 1000.0;
-            apply_tune(PendingTune{frequency_mhz, if_khz, symbol_rate_ksps}, false);
+            apply_tune(PendingTune{frequency_mhz, if_khz, symbol_rate_ksps, tune_rf_port}, false);
         }
 
         /* Preset long-press-to-overwrite fires the instant the threshold
@@ -5866,6 +5932,7 @@ int main(int argc, char ** argv)
             const int row = tune_preset_press_row;
             tune_presets[row].if_khz = tune_digits_to_if_khz(tune_digits);
             tune_presets[row].symbol_rate_ksps = kTuneSrValues[tune_sr_index];
+            tune_presets[row].rf_port = tune_rf_port;
             qo100::save_tune_presets(repository_root, tune_presets);
             tune_toast_text = "SAVED " + tune_format_if_khz(tune_presets[row].if_khz);
             tune_toast_started_at = Clock::now();
@@ -5999,7 +6066,7 @@ int main(int argc, char ** argv)
         }
         else if(app_page == AppPage::Tune) {
             draw_tune_page(renderer, text, display.width, display.height, touch,
-                          tune_digits, tune_sr_index,
+                          tune_digits, tune_sr_index, tune_rf_port,
                           video_texture, have_video_frame,
                           video_source_width, video_source_height, video_notice,
                           std::chrono::duration<double>(
@@ -6139,6 +6206,12 @@ int main(int argc, char ** argv)
             draw_lnb_cal_page(renderer, text, display.width, display.height, lnb_cal,
                               receiver_settings, rtl_page, true, spectrum_source_local,
                               system_uptime_minutes(), TouchState{});
+        else if(app_page == AppPage::Tune)
+            draw_tune_page(renderer, text, display.width, display.height, TouchState{},
+                           tune_digits, tune_sr_index, tune_rf_port,
+                           video_texture, have_video_frame,
+                           video_source_width, video_source_height, video_notice, 0.0,
+                           receiver_status, tune_presets, std::string(), 1e9);
         else {
         draw_spectrum(renderer, text, layout, *spectrum_texture,
                       spectrum_status, spectrum_marker, receiver_status,

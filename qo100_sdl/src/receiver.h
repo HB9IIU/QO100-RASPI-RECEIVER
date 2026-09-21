@@ -100,6 +100,9 @@ bool save_receiver_settings(const std::string & repository_root,
 struct TunePreset {
     long if_khz = 0;
     long symbol_rate_ksps = 0;
+    /* MiniTiouner RF input: 0 = A (TOP F-connector, the default), 1 = B
+     * (BOTTOM). Missing from older tune_presets.json files, which load as A. */
+    int rf_port = 0;
 };
 
 std::vector<TunePreset> load_tune_presets(const std::string & repository_root);
@@ -220,6 +223,8 @@ public:
     void stop();
     bool consume_status(ReceiverStatus & status);
     void send_tune(long frequency_khz, long symbol_rate_ksps);
+    /* 0 = A (TOP), 1 = B (BOTTOM) - longmynd's "T" command. */
+    void send_rf_port(int rf_port);
     void send_voltage(bool enabled, bool horizontal);
     bool monitor_connected() const;
     bool control_connected() const;
