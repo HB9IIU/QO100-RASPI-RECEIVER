@@ -20,6 +20,73 @@ touch — no keyboard or mouse needed once it's set up.
 
 # 🆕 WHAT'S NEW!!!
 
+## Frequency Offset Calibration — no more entering offsets by hand
+
+You no longer have to work out your LNB's frequency error and type an offset
+into the settings yourself. The receiver now **measures it by itself**, using
+the QO-100 wideband beacon (which sits at exactly 10491.500 MHz) as the
+reference, and uses the result for all tuning and for the spectrum.
+
+<img src="assets/calibration_page.png" alt="Frequency Offset Calibration page with both corrections found" width="70%">
+
+**Why it matters.** Every LNB's oscillator is a few tens of kHz away from its
+nominal 9750 MHz (a typical one: about +30 kHz). Wide signals still lock, but
+the narrowest QO-100 signals have a lock window of only tens of kHz, so an
+uncorrected error can stop them locking at all. With the correction in place,
+tapping a signal on the spectrum tunes the MiniTiouner to where that signal
+really arrives.
+
+**Two corrections, measured one after the other:**
+
+1. **LNB oscillator** — measured with the MiniTiouner. Each measurement tunes
+   away from the beacon and locks onto it again from scratch; ten of them are
+   combined into the result.
+2. **RTL-SDR display shift** — only if you use a local RTL-SDR for the
+   spectrum. The page also measures how far that spectrum is shifted and shifts
+   it back onto the true frequency axis. It shows how much of the shift is your
+   stick's own error and how much is the LNB's.
+
+**How to run it**
+
+- **At startup**, if nothing has been calibrated yet, the app asks
+  *CALIBRATION NEEDED* — tap **CALIBRATE**. It asks at most once per run.
+- **Any time later:** **SET** → **LNB CAL** → **START** (it says **REDO** once
+  you have a calibration).
+- It takes about a minute and a half (about two minutes with the RTL-SDR
+  step). The video and the spectrum pause while it runs, and the beacon must
+  be receivable.
+- For the best result, **measure after the LNB has been powered for 15–30
+  minutes** — the oscillator drifts while it warms up, so a repeat
+  measurement a couple of kHz away from the first is normal.
+- **SET** now shows the LNB LO as a read-only value (*calibrated*, or *nominal
+  – not calibrated* if you have not run it yet); the manual −/+ editor is gone.
+
+**Existing installations:** just update as usual. The first time the app
+starts it offers to calibrate.
+
+## Second RF input: A / B
+
+The MiniTiouner has two RF inputs, and you can now choose between them on the
+**TUNE** page with the new **RF port** buttons, next to the symbol rate.
+
+- **A** is the top connector — the default, and where your QO-100 LNB
+  belongs. **B** is the bottom connector.
+- **Each favourite remembers its port.** Tapping a favourite switches the
+  port as well as the frequency; pressing and holding one saves the current
+  port with it. The port button matching the selected favourite lights up.
+- **Everything on the QO-100 side always uses A:** the beacon, tapping the
+  spectrum, SCAN, the calibration, and the **QO-100** button, which brings
+  you back to the beacon on port A.
+- **On port B there is no LNB**, so the number on the dial is the real
+  frequency (for example 437.000), not an IF. The LNB bias voltage setting is
+  not changed by the port choice.
+- **New default favourites:** the QO-100 beacon (A), then the DATV calling
+  frequencies **146.500 MHz** (2 m), **437.000 MHz** (70 cm), **1249.000 MHz**
+  and **1280.000 MHz** (23 cm) on B. They only apply to a fresh install: the
+  favourites you already have keep working and stay on port A.
+
+<img src="assets/tune_page.png" alt="TUNE page with the RF port buttons A and B" width="70%">
+
 ## Manual Tune
 
 A new **TUNE** page lets you dial in any frequency the MiniTiouner can
@@ -36,7 +103,7 @@ signal, or anything else off the beaten path.
 - **Tap the Symbol Rate** to cycle through the standard rates.
 - **Presets** (the row of frequency buttons): tap one to load it
   instantly, or **press and hold** one to save whatever you're currently
-  tuned to into that slot — a "SAVED ..." banner confirms it.
+  tuned to into that slot — a "Pre-set Saved" banner confirms it.
 - **Tap the picture** to go fullscreen, tap it again to come back.
 - Tap **QO-100** to leave the Tune page — this always retunes straight
   back to the beacon, so you can't wander off and lose track of where you
@@ -182,7 +249,8 @@ before rebuilding), safe to re-run any time.
 - The small **L** or **R** marker on the spectrum identifies the selected
   source: local RTL-SDR or remote BATC.
 - **CHAT** — opens the QO-100 wideband chat.
-- **SET** — LNB settings (local oscillator offset, bias voltage), screen
+- **SET** — LNB bias voltage and the frequency offset calibration
+  (**LNB CAL**), screen
   resolution, what **EXIT** does (see below), and whether the app auto
   starts at boot. The **SET** page's own **EXIT** button just closes
   the SET page and returns to the main screen — a different action from

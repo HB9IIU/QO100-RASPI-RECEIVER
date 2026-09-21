@@ -6300,21 +6300,25 @@ int main(int argc, char ** argv)
         else if(app_page == AppPage::Tune) {
             /* QO100_SCREENSHOT_SAMPLE=1: fill the status card with sample values
              * (long names included) so its layout can be checked without a signal. */
-            if(const char * sample = std::getenv("QO100_SCREENSHOT_SAMPLE"); sample != nullptr && sample[0] == '1') {
+            const char * sample = std::getenv("QO100_SCREENSHOT_SAMPLE");
+            const bool sample_long = sample != nullptr && sample[0] == '1';
+            const bool sample_readme = sample != nullptr && std::strcmp(sample, "readme") == 0;
+            if(sample_long || sample_readme) {
                 receiver_status.demod_state = 4;
                 receiver_status.mer_x10 = 77;
                 receiver_status.modcod = 5;
                 receiver_status.null_packet_percent = 3;
-                receiver_status.service_name = "F8TRT_Pascal_Long_Name";
-                receiver_status.service_provider = "Radio Club de Test";
+                /* "1": long names (checks truncation) plus the save toast;
+                 * "readme": tidy values for the README picture. */
+                receiver_status.service_name = sample_long ? "F8TRT_Pascal_Long_Name" : "QO-100 DATV";
+                receiver_status.service_provider = sample_long ? "Radio Club de Test" : "Test card";
             }
             draw_tune_page(renderer, text, display.width, display.height, TouchState{},
                            tune_digits, tune_sr_index, tune_rf_port,
                            video_texture, have_video_frame,
                            video_source_width, video_source_height, video_notice, 0.0,
                            receiver_status, tune_presets,
-                           std::getenv("QO100_SCREENSHOT_SAMPLE") != nullptr ? "Pre-set Saved"
-                                                                             : std::string(),
+                           sample_long ? "Pre-set Saved" : std::string(),
                            0.2);
         }
         else {
