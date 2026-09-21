@@ -43,6 +43,7 @@
 #include "app_log.h"
 #include "chat_client.h"
 #include "video_decoder.h"
+#include "video_scheduler.h"
 
 namespace {
 
@@ -51,11 +52,6 @@ using Microseconds = std::chrono::microseconds;
 
 constexpr int kReferenceWidth = 1024;
 constexpr int kReferenceHeight = 600;
-constexpr size_t kVideoQueueCapacity = 6;
-constexpr size_t kVideoPrebufferFrames = 3;
-constexpr int64_t kVideoPrebufferMaxUs = 150000;
-constexpr int64_t kClockDiscontinuityUs = 2000000;
-constexpr int64_t kClockRebaseLateUs = 250000;
 
 struct Colour {
     uint8_t r;
@@ -635,149 +631,7 @@ private:
 };
 
 using VideoFrame = qo100::VideoFrame;
-
-class VideoScheduler {
-public:
-    void push(VideoFrame frame)
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if(queue_.empty()) first_queued_at_ = Clock::now();
-        if(have_last_pushed_) {
-            const double step_ms = (frame.pts_us - last_pushed_pts_us_) / 1000.0;
-            window_pts_step_sum_ms_ += step_ms;
-            window_pts_step_max_ms_ = std::max(window_pts_step_max_ms_, step_ms);
-            ++window_pushed_;
-        }
-        last_pushed_pts_us_ = frame.pts_us;
-        have_last_pushed_ = true;
-        if(!queue_.empty() && frame.pts_us <= queue_.back().pts_us) {
-            frame.pts_us = queue_.back().pts_us + 1;
-        }
-        if(queue_.size() >= kVideoQueueCapacity) {
-            const bool space_available = space_available_.wait_for(lock,
-                std::chrono::milliseconds(25), [this] {
-                    return queue_.size() < kVideoQueueCapacity;
-                });
-            if(!space_available) {
-                ++queue_drops_;
-                return;
-            }
-        }
-        queue_.push_back(std::move(frame));
-    }
-
-    std::optional<VideoFrame> take_due(Clock::time_point now)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++window_take_calls_;
-        if(queue_.empty()) {
-            ++window_empty_;
-            return std::nullopt;
-        }
-
-        if(!clock_started_) {
-            const int64_t wait_us = std::chrono::duration_cast<Microseconds>(
-                now - first_queued_at_).count();
-            if(queue_.size() < kVideoPrebufferFrames && wait_us < kVideoPrebufferMaxUs)
-                return std::nullopt;
-            anchor_pts_us_ = queue_.front().pts_us;
-            anchor_wall_ = now;
-            clock_started_ = true;
-        }
-
-        int64_t stream_now_us = anchor_pts_us_ +
-            std::chrono::duration_cast<Microseconds>(now - anchor_wall_).count();
-        const int64_t front_delta = queue_.front().pts_us - stream_now_us;
-        if(std::llabs(front_delta) > kClockDiscontinuityUs ||
-           stream_now_us - queue_.front().pts_us > kClockRebaseLateUs) {
-            anchor_pts_us_ = queue_.front().pts_us;
-            anchor_wall_ = now;
-            stream_now_us = anchor_pts_us_;
-            ++rebases_;
-        }
-
-        if(queue_.front().pts_us > stream_now_us + 2000) {
-            ++window_future_;
-            window_future_lead_sum_ms_ += (queue_.front().pts_us - stream_now_us) / 1000.0;
-            return std::nullopt;
-        }
-
-        VideoFrame selected = std::move(queue_.front());
-        queue_.pop_front();
-        while(!queue_.empty() && queue_.front().pts_us <= stream_now_us + 2000) {
-            selected = std::move(queue_.front());
-            queue_.pop_front();
-            ++late_drops_;
-        }
-        ++presented_;
-        space_available_.notify_one();
-        return selected;
-    }
-
-    /* What the presenter saw since the last call, to tell "no frame was ready"
-     * (empty), "the next frame isn't due yet" (future) and irregular
-     * timestamps (pts step) apart when frames get dropped. */
-    struct WindowStats {
-        uint64_t take_calls = 0, empty = 0, future = 0, pushed = 0;
-        double avg_future_lead_ms = 0, avg_pts_step_ms = 0, max_pts_step_ms = 0;
-    };
-
-    WindowStats take_window_stats()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        WindowStats out;
-        out.take_calls = window_take_calls_;
-        out.empty = window_empty_;
-        out.future = window_future_;
-        out.pushed = window_pushed_;
-        out.avg_future_lead_ms = window_future_ ? window_future_lead_sum_ms_ / window_future_ : 0;
-        out.avg_pts_step_ms = window_pushed_ ? window_pts_step_sum_ms_ / window_pushed_ : 0;
-        out.max_pts_step_ms = window_pts_step_max_ms_;
-        window_take_calls_ = window_empty_ = window_future_ = window_pushed_ = 0;
-        window_future_lead_sum_ms_ = window_pts_step_sum_ms_ = window_pts_step_max_ms_ = 0;
-        return out;
-    }
-
-    void reset()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        have_last_pushed_ = false;
-        queue_.clear();
-        clock_started_ = false;
-        space_available_.notify_all();
-    }
-
-    struct Stats {
-        uint64_t queue_drops;
-        uint64_t late_drops;
-        uint64_t presented;
-        uint64_t rebases;
-        size_t depth;
-    };
-
-    Stats stats() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return {queue_drops_, late_drops_, presented_, rebases_, queue_.size()};
-    }
-
-private:
-    mutable std::mutex mutex_;
-    std::condition_variable space_available_;
-    std::deque<VideoFrame> queue_;
-    Clock::time_point first_queued_at_{};
-    Clock::time_point anchor_wall_{};
-    int64_t anchor_pts_us_ = 0;
-    bool clock_started_ = false;
-    uint64_t queue_drops_ = 0;
-    uint64_t late_drops_ = 0;
-    uint64_t presented_ = 0;
-    uint64_t rebases_ = 0;
-    bool have_last_pushed_ = false;
-    int64_t last_pushed_pts_us_ = 0;
-    uint64_t window_take_calls_ = 0, window_empty_ = 0, window_future_ = 0, window_pushed_ = 0;
-    double window_future_lead_sum_ms_ = 0, window_pts_step_sum_ms_ = 0, window_pts_step_max_ms_ = 0;
-};
+using qo100::VideoScheduler;
 
 /* The dB range (0..kDisplayMaxDb) the spectrum plot's colour/height mapping
  * is tuned against - referenced by Layout below to compute extra headroom
