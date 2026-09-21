@@ -3224,7 +3224,6 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     static int displayed_peak = 0;
     displayed_peak = std::max(audio_peak_percent, displayed_peak - 3);
     const int vu_row_y = grid_bottom + kVolRowH;
-    text.draw("VU", left_x, vu_row_y, kTextDim);
     constexpr int kVuSegments = 20;
     constexpr int kVuGap = 3;
     const int vu_row_w = std::min(track.w, filled.w + kVolumeKnobRadius);
