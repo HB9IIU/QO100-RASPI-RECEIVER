@@ -1538,7 +1538,7 @@ void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
 
     const int centre_x = popup.x + popup.w / 2;
     if(kind == TunerPopupKind::Detected) {
-        text.draw("TUNER DETECTED", centre_x, popup.y + 45, kText, 32, true);
+        text.draw("DETECTED TUNER", centre_x, popup.y + 45, kText, 32, true);
         text.draw(product, centre_x, popup.y + 105, kGreen, 32, true);
     }
     else {
@@ -5700,9 +5700,9 @@ int main(int argc, char ** argv)
         }
 
         if(boot_stage_opened && tuner_popup == TunerPopupKind::Detected &&
-           Clock::now() - tuner_popup_started_at >= std::chrono::seconds(2)) {
+           Clock::now() - tuner_popup_started_at >= std::chrono::milliseconds(1500)) {
             tuner_popup = TunerPopupKind::None;
-            qo100::log("[TUNER_USB] detected popup closed after 2 seconds\n");
+            qo100::log("[TUNER_USB] detected popup closed after 1.5 seconds\n");
         }
         if(spectrum_source_popup != SpectrumSourcePopupKind::None &&
            Clock::now() - spectrum_source_popup_started_at >= std::chrono::seconds(3)) {
