@@ -16,18 +16,20 @@ namespace qo100 {
 using Clock = std::chrono::steady_clock;
 using Microseconds = std::chrono::microseconds;
 
-constexpr size_t kVideoQueueCapacity = 18;
+constexpr size_t kVideoQueueCapacity = 30;
 constexpr int64_t kVideoPrebufferMaxUs = 400000;
 constexpr int64_t kClockDiscontinuityUs = 2000000;
 constexpr int64_t kClockRebaseLateUs = 250000;
 /* Jitter buffer: playback runs this far behind the newest decoded frame -
  * kClockTargetLagFrames frame intervals, kept within the two Us bounds. The
- * decoder hands frames over in clumps (packets arrive in bursts), so a lag of
- * only a couple of frames starves the presenter. The clock jumps forward again
+ * decoder hands frames over in clumps (a DVB-S2 frame at a few hundred kS/s
+ * carries ~100ms of stream, so packets arrive in bursts), and a lag of only
+ * 150-200ms was measured to underrun every few seconds on a clean 30fps HEVC
+ * service. The clock jumps forward again
  * if the lag grows beyond that plus kClockLagSlack. */
 constexpr int64_t kClockTargetLagFrames = 6;
-constexpr int64_t kClockMinTargetLagUs = 150000;
-constexpr int64_t kClockMaxTargetLagUs = 300000;
+constexpr int64_t kClockMinTargetLagUs = 300000;
+constexpr int64_t kClockMaxTargetLagUs = 400000;
 constexpr int64_t kClockLagSlackFrames = 4;
 constexpr int64_t kClockMinLagSlackUs = 100000;
 /* An empty queue this long means an underrun: rebuild the buffer (freeze
