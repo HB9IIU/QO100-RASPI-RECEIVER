@@ -4003,10 +4003,13 @@ public:
     {
         std::thread([this, repository_root = std::move(repository_root)] {
             run(repository_root);
+            finished_.store(true);
         }).detach();
     }
 
     bool available() const { return available_.load(); }
+    /* The check has ended, whatever it found (including "no internet"). */
+    bool finished() const { return finished_.load(); }
 
 private:
     void run(const std::string & repository_root)
@@ -4026,6 +4029,7 @@ private:
     }
 
     std::atomic<bool> available_{false};
+    std::atomic<bool> finished_{false};
 };
 
 /* Runs scripts/apply_update.sh in the background to apply an update the
@@ -4603,7 +4607,14 @@ int main(int argc, char ** argv)
         return entry != scan_cooldowns.end() && Clock::now() < entry->cooldown_until;
     };
     const auto run_started = Clock::now();
-    const auto tuner_popup_started_at = run_started;
+    /* Boot order: update check first, then the tuner popup, then the RTL-SDR
+     * question. The tuner/RTL-SDR popups are held back (boot_stage_opened
+     * false) until the update check has ended with nothing to offer, or its
+     * answer (YES restarts the app, NO carries on) is in, or
+     * kUpdateCheckWait has passed - offline start-up mustn't sit waiting. */
+    auto tuner_popup_started_at = run_started;
+    bool boot_stage_opened = false;
+    constexpr auto kUpdateCheckWait = std::chrono::seconds(4);
     VideoNotice video_notice = use_tuner ? VideoNotice::Tuning : VideoNotice::None;
     auto video_notice_started_at = run_started;
     auto last_video_frame_at = run_started;
@@ -5053,7 +5064,13 @@ int main(int argc, char ** argv)
                 const bool completed_chat_drag = chat_history_dragging &&
                                                  chat_history_drag_moved;
                 chat_history_dragging = false;
-                if(tuner_popup != TunerPopupKind::None) {
+                /* Tuner/RTL-SDR popups still waiting for the update check:
+                 * nothing visible yet, so swallow the tap. */
+                if(!boot_stage_opened && update_popup == UpdatePopupKind::None &&
+                   (tuner_popup != TunerPopupKind::None ||
+                    rtlsdr_ask_popup != RtlSdrAskPopupKind::None))
+                    continue;
+                if(boot_stage_opened && tuner_popup != TunerPopupKind::None) {
                     if(tuner_popup == TunerPopupKind::NotFound) {
                         const SDL_Rect close_button =
                             tuner_popup_close_rect(display.width, display.height);
@@ -5065,7 +5082,7 @@ int main(int argc, char ** argv)
                     }
                     continue;
                 }
-                if(rtlsdr_ask_popup == RtlSdrAskPopupKind::Ask) {
+                if(boot_stage_opened && rtlsdr_ask_popup == RtlSdrAskPopupKind::Ask) {
                     const SDL_Rect yes_button =
                         rtlsdr_ask_popup_button_rect(display.width, display.height, true);
                     const SDL_Rect no_button =
@@ -5705,7 +5722,7 @@ int main(int argc, char ** argv)
             }
         }
 
-        if(tuner_popup == TunerPopupKind::Detected &&
+        if(boot_stage_opened && tuner_popup == TunerPopupKind::Detected &&
            Clock::now() - tuner_popup_started_at >= std::chrono::seconds(3)) {
             tuner_popup = TunerPopupKind::None;
             qo100::log("[TUNER_USB] detected popup closed after 3 seconds\n");
@@ -5866,13 +5883,20 @@ int main(int argc, char ** argv)
             }
         }
         else if(!update_prompt_shown && update_checker.available() &&
-                tuner_popup == TunerPopupKind::None &&
-                rtlsdr_ask_popup == RtlSdrAskPopupKind::None &&
-                spectrum_source_popup == SpectrumSourcePopupKind::None &&
-                !spectrum_source_switching) {
+                (!boot_stage_opened ||
+                 (tuner_popup == TunerPopupKind::None &&
+                  rtlsdr_ask_popup == RtlSdrAskPopupKind::None &&
+                  spectrum_source_popup == SpectrumSourcePopupKind::None &&
+                  !spectrum_source_switching))) {
             update_prompt_shown = true;
             update_popup = UpdatePopupKind::Available;
             qo100::log("[UPDATE] prompting user\n");
+        }
+        if(!boot_stage_opened && update_popup == UpdatePopupKind::None &&
+           !(update_checker.available() && !update_prompt_shown) &&
+           (update_checker.finished() || Clock::now() - run_started >= kUpdateCheckWait)) {
+            boot_stage_opened = true;
+            tuner_popup_started_at = Clock::now();
         }
 
         /* Ask once per run whether to calibrate the LNB, when nothing has been
@@ -6119,9 +6143,12 @@ int main(int argc, char ** argv)
         draw_update_popup(renderer, text, display.width, display.height,
                           update_popup, touch);
         draw_rtlsdr_ask_popup(renderer, text, display.width, display.height,
-                              rtlsdr_ask_popup, touch);
+                              boot_stage_opened && tuner_popup == TunerPopupKind::None
+                                  ? rtlsdr_ask_popup : RtlSdrAskPopupKind::None,
+                              touch);
         draw_tuner_popup(renderer, text, display.width, display.height,
-                         tuner_popup, tuner_product, touch);
+                         boot_stage_opened ? tuner_popup : TunerPopupKind::None,
+                         tuner_product, touch);
         SDL_RenderPresent(renderer);
 
         const auto now = Clock::now();
