@@ -442,7 +442,13 @@ struct VideoDecoder::Impl {
                         break;
                     }
                     AudioChunk converted;
+                    const int64_t audio_timestamp = frame->best_effort_timestamp != AV_NOPTS_VALUE
+                        ? frame->best_effort_timestamp : frame->pts;
                     if(convert_audio(frame, resampler, converted)) {
+                        if(audio_timestamp != AV_NOPTS_VALUE)
+                            converted.pts_us = av_rescale_q(
+                                audio_timestamp, format->streams[audio_stream]->time_base,
+                                kMicrosecondTimeBase);
                         audio_callback(std::move(converted));
                         ++audio_chunk_count;
                     }
