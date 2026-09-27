@@ -10,6 +10,14 @@
  * page's big panels, a card filling what is left) stay as formulas and are
  * not listed here.
  *
+ * Everything else - popups, chat, keyboard, the status panel, most offsets
+ * and font sizes - is shared: written once as the 1024x600 design's number
+ * and multiplied by the row's `scale` (see px() in main.cpp). scale is 1 for
+ * the two original rows, whose shared numbers are exactly the design's, and
+ * the screen's size relative to 1024x600 for a larger row - the smaller of
+ * the width and height ratios, so the design fits both ways; a proportional
+ * layout then takes up the rest of the other direction.
+ *
  * Adding a screen size means adding a row to kUiProfiles, and checking every
  * page at that size with the screenshot mode (QO100_SCREENSHOT_PAGE, see
  * main()). The two original rows must keep their values: those screens are
@@ -26,6 +34,7 @@ struct UiProfile {
     const char * name;      /* "1024x600" - also the SET page's label */
     int width;              /* the screen size this row is designed for */
     int height;
+    double scale;           /* shared measurements: 1024x600 design x scale */
 
     /* ---- main page ---- */
     struct Main {
@@ -105,7 +114,7 @@ struct UiProfile {
 
 inline constexpr UiProfile kUiProfiles[] = {
     {
-        "800x480", 800, 480,
+        "800x480", 800, 480, 1.0,
         /* main */ {22, false, 14},
         /* settings */ {
             16, 56, 16, 12, 16, 188, 102, false,
@@ -119,7 +128,7 @@ inline constexpr UiProfile kUiProfiles[] = {
         /* tune */ {20, 38, 92, 46, 58, 48, 36, 8, 72, 11, 14},
     },
     {
-        "1024x600", 1024, 600,
+        "1024x600", 1024, 600, 1.0,
         /* main */ {36, true, 16},
         /* settings */ {
             40, 60, 24, 14, 24, 230, 124, true,
@@ -131,6 +140,21 @@ inline constexpr UiProfile kUiProfiles[] = {
         },
         /* lnb_cal */ {16, 18, 20, 290},
         /* tune */ {22, 46, 128, 70, 90, 76, 56, 24, 100, 14, 20},
+    },
+    {
+        /* The 1024x600 row, x1.2 (720 / 600; the width has room for x1.25). */
+        "1280x720", 1280, 720, 1.2,
+        /* main */ {43, true, 19},
+        /* settings */ {
+            48, 72, 29, 17, 29, 276, 149, true,
+            19, 19, 17,
+            60, 94, 58, 24, 13, 158, 197, 125, 139, 60,
+            58, 240, 259, 48,
+            240, 48,
+            19, {66, 91, 131, 156, 196, 221, 241},
+        },
+        /* lnb_cal */ {19, 22, 24, 348},
+        /* tune */ {26, 55, 154, 84, 108, 91, 67, 29, 120, 17, 24},
     },
 };
 

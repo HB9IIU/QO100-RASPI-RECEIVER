@@ -61,6 +61,10 @@ constexpr int kReferenceHeight = 600;
 const qo100::UiProfile * g_ui_profile = &qo100::kUiProfiles[0];
 const qo100::UiProfile & ui() { return *g_ui_profile; }
 
+/* A shared measurement - a size or offset in the 1024x600 design - on this
+ * screen (see ui_profile.h). Exactly `value` on 800x480 and 1024x600. */
+int px(int value) { return static_cast<int>(std::lround(value * ui().scale)); }
+
 struct Colour {
     uint8_t r;
     uint8_t g;
@@ -718,20 +722,21 @@ struct Layout {
 
     explicit Layout(int w, int h)
         : width(w), height(h), spectrum_height(h * 230 / 480),
-          bottom_y(4 + spectrum_height + 4), bottom_height(h - bottom_y - 4),
+          bottom_y(px(4) + spectrum_height + px(4)), bottom_height(h - bottom_y - px(4)),
           video_width(w * 420 / 800),
-          spectrum_max_db(ui().main.spectrum_plot_bottom != kSpectrumAxisStripH
+          spectrum_max_db(ui().main.spectrum_plot_bottom != px(kSpectrumAxisStripH)
               ? kDisplayMaxDb *
                     static_cast<float>(spectrum_height - ui().main.spectrum_plot_bottom - 1) /
-                    static_cast<float>(spectrum_height - kSpectrumAxisStripH - 1)
+                    static_cast<float>(spectrum_height - px(kSpectrumAxisStripH) - 1)
               : kDisplayMaxDb),
-          spectrum_panel{4, 4, w - 8, spectrum_height},
-          spectrum_plot{18, 18, w - 36,
+          spectrum_panel{px(4), px(4), w - 2 * px(4), spectrum_height},
+          spectrum_plot{px(18), px(18), w - 2 * px(18),
                        spectrum_height - ui().main.spectrum_plot_bottom},
-          video_panel{4, bottom_y, video_width, bottom_height},
-          video_content{18, bottom_y + 14, video_width - 28, bottom_height - 28},
-          status_panel{4 + video_width + 4, bottom_y,
-                       w - (4 + video_width + 4) - 4, bottom_height}
+          video_panel{px(4), bottom_y, video_width, bottom_height},
+          video_content{px(18), bottom_y + px(14), video_width - px(28),
+                        bottom_height - px(28)},
+          status_panel{px(4) + video_width + px(4), bottom_y,
+                       w - (px(4) + video_width + px(4)) - px(4), bottom_height}
     {}
 };
 
@@ -1305,7 +1310,7 @@ struct SpectrumMarker {
 
 SDL_Rect spectrum_source_button_rect(const Layout & layout)
 {
-    return {layout.spectrum_plot.x + 4, layout.spectrum_plot.y + 4, 32, 22};
+    return {layout.spectrum_plot.x + px(4), layout.spectrum_plot.y + px(4), px(32), px(22)};
 }
 
 void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & layout,
@@ -1327,7 +1332,7 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
     SDL_RenderDrawRect(renderer, &source_button);
     text.draw(spectrum_source_local ? "L" : "R",
               source_button.x + source_button.w / 2,
-              source_button.y + source_button.h / 2, source_colour, 16, true);
+              source_button.y + source_button.h / 2, source_colour, px(16), true);
 
     float beacon_strength = 0.0F;
     for(const auto & signal : texture.signals()) {
@@ -1337,8 +1342,9 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         }
     }
     struct LabelArea { int x; int y; int width; int height; };
+    const int label_font = px(14);
     const auto overlaps = [](const LabelArea & first, const LabelArea & second) {
-        constexpr int gap = 4;
+        const int gap = px(4);
         return first.x < second.x + second.width + gap &&
                first.x + first.width + gap > second.x &&
                first.y < second.y + second.height + gap &&
@@ -1376,21 +1382,22 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         const int trace_y = layout.spectrum_plot.y + layout.spectrum_plot.h - 1 -
             static_cast<int>(std::clamp(displayed_db, 0.0F, kDisplayMaxDb) /
                              layout.spectrum_max_db * (layout.spectrum_plot.h - 1));
-        const auto [first_width, line_height] = text.measure(first_line);
-        const auto [second_width, ignored_height] = text.measure(second_line);
+        const auto [first_width, line_height] = text.measure(first_line, label_font);
+        const auto [second_width, ignored_height] = text.measure(second_line, label_font);
         (void)ignored_height;
-        const int service_width = tuned_signal ? text.measure(tuned_service).first : 0;
+        const int service_width =
+            tuned_signal ? text.measure(tuned_service, label_font).first : 0;
         const int label_width = std::max({first_width, second_width, service_width});
         const int label_height = line_height * (tuned_signal ? 3 : 2);
         const int natural_x = std::clamp(centre_x - label_width / 2,
-            layout.spectrum_plot.x + 2,
-            layout.spectrum_plot.x + layout.spectrum_plot.w - label_width - 2);
-        const int natural_y = std::clamp(trace_y - label_height - 5,
-            layout.spectrum_plot.y + 4,
-            layout.spectrum_plot.y + layout.spectrum_plot.h - label_height - 3);
+            layout.spectrum_plot.x + px(2),
+            layout.spectrum_plot.x + layout.spectrum_plot.w - label_width - px(2));
+        const int natural_y = std::clamp(trace_y - label_height - px(5),
+            layout.spectrum_plot.y + px(4),
+            layout.spectrum_plot.y + layout.spectrum_plot.h - label_height - px(3));
 
         LabelArea chosen{natural_x, natural_y, label_width, label_height};
-        const int row = label_height + 5;
+        const int row = label_height + px(5);
         const int y_offsets[] = {0, -row, row, -2 * row, 2 * row};
         const int x_offsets[] = {0, -label_width / 2, label_width / 2,
                                   -label_width, label_width};
@@ -1399,11 +1406,11 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
             for(int y_offset : y_offsets) {
                 LabelArea candidate{
                     std::clamp(natural_x + x_offset,
-                        layout.spectrum_plot.x + 2,
-                        layout.spectrum_plot.x + layout.spectrum_plot.w - label_width - 2),
+                        layout.spectrum_plot.x + px(2),
+                        layout.spectrum_plot.x + layout.spectrum_plot.w - label_width - px(2)),
                     std::clamp(natural_y + y_offset,
-                        layout.spectrum_plot.y + 4,
-                        layout.spectrum_plot.y + layout.spectrum_plot.h - label_height - 3),
+                        layout.spectrum_plot.y + px(4),
+                        layout.spectrum_plot.y + layout.spectrum_plot.h - label_height - px(3)),
                     label_width, label_height
                 };
                 bool collision = false;
@@ -1425,13 +1432,13 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         int text_y = chosen.y;
         if(tuned_signal) {
             text.draw(tuned_service, chosen.x + (label_width - service_width) / 2,
-                      text_y, kGreen);
+                      text_y, kGreen, label_font);
             text_y += line_height;
         }
         text.draw(first_line, chosen.x + (label_width - first_width) / 2,
-                  text_y, kText);
+                  text_y, kText, label_font);
         text.draw(second_line, chosen.x + (label_width - second_width) / 2,
-                  text_y + line_height, kText);
+                  text_y + line_height, kText, label_font);
     }
 
     if(marker.kind != SpectrumMarkerKind::None &&
@@ -1446,7 +1453,7 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
                     ? kGreen : (marker.kind == SpectrumMarkerKind::SpectrumNotReady
                         ? kYellow : kTextDim)));
         set_colour(renderer, marker_colour);
-        SDL_RenderDrawLine(renderer, marker_x, layout.spectrum_plot.y + 18,
+        SDL_RenderDrawLine(renderer, marker_x, layout.spectrum_plot.y + px(18),
                            marker_x, layout.spectrum_plot.y + layout.spectrum_plot.h - 1);
         char marker_text[32];
         if(marker.kind == SpectrumMarkerKind::Tune)
@@ -1459,26 +1466,26 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
             std::snprintf(marker_text, sizeof(marker_text), "NO SIGNAL");
         else
             std::snprintf(marker_text, sizeof(marker_text), "SPECTRUM NOT READY");
-        const auto [marker_width, marker_height] = text.measure(marker_text);
+        const auto [marker_width, marker_height] = text.measure(marker_text, label_font);
         (void)marker_height;
         const int marker_label_x = std::clamp(marker_x - marker_width / 2,
-            layout.spectrum_plot.x + 2,
-            layout.spectrum_plot.x + layout.spectrum_plot.w - marker_width - 2);
-        text.draw(marker_text, marker_label_x, layout.spectrum_plot.y - 3,
-                  marker_colour);
+            layout.spectrum_plot.x + px(2),
+            layout.spectrum_plot.x + layout.spectrum_plot.w - marker_width - px(2));
+        text.draw(marker_text, marker_label_x, layout.spectrum_plot.y - px(3),
+                  marker_colour, label_font);
     }
 
     if(status != SpectrumStatus::Live) {
         const Colour status_colour = status == SpectrumStatus::ConnectionError ? kRed : kYellow;
-        text.draw(spectrum_status_text(status), source_button.x + source_button.w + 8,
-                  layout.spectrum_plot.y + 8, status_colour);
+        text.draw(spectrum_status_text(status), source_button.x + source_button.w + px(8),
+                  layout.spectrum_plot.y + px(8), status_colour, label_font);
     }
     if(ui().main.spectrum_axis_labels) {
         for(int number = 1; number <= 8; ++number) {
             const int x = layout.spectrum_plot.x + number * layout.spectrum_plot.w / 9;
             text.draw(std::to_string(10490 + number), x,
-                      layout.spectrum_plot.y + layout.spectrum_plot.h + 12,
-                      kTextDim, 14, true);
+                      layout.spectrum_plot.y + layout.spectrum_plot.h + px(12),
+                      kTextDim, px(14), true);
         }
     }
 }
@@ -1544,7 +1551,7 @@ void draw_button(SDL_Renderer * renderer, TextCache & text, SDL_Rect rect,
                  const std::string & label, Colour colour, int font_size = 16,
                  bool active = false, bool pressed = false)
 {
-    constexpr int kButtonRadius = 10;
+    const int kButtonRadius = px(10);
     fill_rounded_rect(renderer, rect, kButtonRadius, active ? colour : kPanel);
     draw_rounded_rect(renderer, rect, kButtonRadius, colour);
     text.draw(label, rect.x + rect.w / 2, rect.y + rect.h / 2,
@@ -1560,8 +1567,8 @@ enum class TunerPopupKind { None, Detected, NotFound };
 SDL_Rect tuner_popup_rect(int screen_width, int screen_height,
                           TunerPopupKind kind)
 {
-    const int width = std::min(600, screen_width - 80);
-    const int height = kind == TunerPopupKind::NotFound ? 230 : 170;
+    const int width = std::min(px(600), screen_width - px(80));
+    const int height = px(kind == TunerPopupKind::NotFound ? 230 : 170);
     return {(screen_width - width) / 2, (screen_height - height) / 2,
             width, height};
 }
@@ -1570,7 +1577,7 @@ SDL_Rect tuner_popup_close_rect(int screen_width, int screen_height)
 {
     const SDL_Rect popup = tuner_popup_rect(
         screen_width, screen_height, TunerPopupKind::NotFound);
-    return {popup.x + (popup.w - 150) / 2, popup.y + popup.h - 62, 150, 44};
+    return {popup.x + (popup.w - px(150)) / 2, popup.y + popup.h - px(62), px(150), px(44)};
 }
 
 void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
@@ -1585,24 +1592,24 @@ void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &screen);
 
     const SDL_Rect popup = tuner_popup_rect(screen_width, screen_height, kind);
-    constexpr int kPopupRadius = 16;
+    const int kPopupRadius = px(16);
     fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
     draw_rounded_rect(renderer, popup, kPopupRadius,
                       kind == TunerPopupKind::Detected ? kGreen : kRed);
 
     const int centre_x = popup.x + popup.w / 2;
     if(kind == TunerPopupKind::Detected) {
-        text.draw("DETECTED TUNER", centre_x, popup.y + 45, kText, 32, true);
-        text.draw(product, centre_x, popup.y + 105, kGreen, 32, true);
+        text.draw("DETECTED TUNER", centre_x, popup.y + px(45), kText, px(32), true);
+        text.draw(product, centre_x, popup.y + px(105), kGreen, px(32), true);
     }
     else {
-        text.draw("NO TUNER FOUND", centre_x, popup.y + 40, kRed, 32, true);
+        text.draw("NO TUNER FOUND", centre_x, popup.y + px(40), kRed, px(32), true);
         text.draw("No MiniTiouner detected on USB.", centre_x,
-                  popup.y + 92, kText, 20, true);
+                  popup.y + px(92), kText, px(20), true);
         text.draw("Check the cable and power, then restart the app.", centre_x,
-                  popup.y + 122, kText, 20, true);
+                  popup.y + px(122), kText, px(20), true);
         const SDL_Rect close_button = tuner_popup_close_rect(screen_width, screen_height);
-        draw_button(renderer, text, close_button, "CLOSE", kRed, 16,
+        draw_button(renderer, text, close_button, "CLOSE", kRed, px(16),
                     false, is_pressed(touch, close_button));
     }
 }
@@ -1611,8 +1618,8 @@ enum class UpdatePopupKind { None, Available, Installing, Failed };
 
 SDL_Rect update_popup_rect(int screen_width, int screen_height, UpdatePopupKind kind)
 {
-    const int width = std::min(600, screen_width - 80);
-    const int height = kind == UpdatePopupKind::Available ? 240 : 190;
+    const int width = std::min(px(600), screen_width - px(80));
+    const int height = px(kind == UpdatePopupKind::Available ? 240 : 190);
     return {(screen_width - width) / 2, (screen_height - height) / 2,
             width, height};
 }
@@ -1622,13 +1629,13 @@ SDL_Rect update_popup_button_rect(int screen_width, int screen_height,
 {
     const SDL_Rect popup = update_popup_rect(screen_width, screen_height, kind);
     if(kind != UpdatePopupKind::Available)
-        return {popup.x + (popup.w - 150) / 2, popup.y + popup.h - 62, 150, 44};
-    constexpr int button_width = 150;
-    constexpr int gap = 20;
+        return {popup.x + (popup.w - px(150)) / 2, popup.y + popup.h - px(62), px(150), px(44)};
+    const int button_width = px(150);
+    const int gap = px(20);
     const int total = button_width * 2 + gap;
     const int left = popup.x + (popup.w - total) / 2;
-    return {yes ? left : left + button_width + gap, popup.y + popup.h - 62,
-            button_width, 44};
+    return {yes ? left : left + button_width + gap, popup.y + popup.h - px(62),
+            button_width, px(44)};
 }
 
 void draw_update_popup(SDL_Renderer * renderer, TextCache & text,
@@ -1642,39 +1649,39 @@ void draw_update_popup(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &screen);
 
     const SDL_Rect popup = update_popup_rect(screen_width, screen_height, kind);
-    constexpr int kPopupRadius = 16;
+    const int kPopupRadius = px(16);
     fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
     draw_rounded_rect(renderer, popup, kPopupRadius,
                       kind == UpdatePopupKind::Failed ? kRed : kCyan);
 
     const int centre_x = popup.x + popup.w / 2;
     if(kind == UpdatePopupKind::Available) {
-        text.draw("UPDATE AVAILABLE", centre_x, popup.y + 40, kCyan, 32, true);
+        text.draw("UPDATE AVAILABLE", centre_x, popup.y + px(40), kCyan, px(32), true);
         text.draw("A new version of this app is ready to install.",
-                  centre_x, popup.y + 92, kText, 20, true);
+                  centre_x, popup.y + px(92), kText, px(20), true);
         text.draw("See github.com/HB9IIU/QO100-RASPI-RECEIVER for what's new.",
-                  centre_x, popup.y + 122, kTextDim, 16, true);
+                  centre_x, popup.y + px(122), kTextDim, px(16), true);
         const SDL_Rect yes_button =
             update_popup_button_rect(screen_width, screen_height, kind, true);
         const SDL_Rect no_button =
             update_popup_button_rect(screen_width, screen_height, kind, false);
-        draw_button(renderer, text, yes_button, "YES", kGreen, 16,
+        draw_button(renderer, text, yes_button, "YES", kGreen, px(16),
                     false, is_pressed(touch, yes_button));
-        draw_button(renderer, text, no_button, "NO", kText, 16,
+        draw_button(renderer, text, no_button, "NO", kText, px(16),
                     false, is_pressed(touch, no_button));
     }
     else if(kind == UpdatePopupKind::Installing) {
-        text.draw("UPDATING...", centre_x, popup.y + 55, kCyan, 32, true);
+        text.draw("UPDATING...", centre_x, popup.y + px(55), kCyan, px(32), true);
         text.draw("This takes a minute or two, then the app restarts on its own.",
-                  centre_x, popup.y + 112, kText, 16, true);
+                  centre_x, popup.y + px(112), kText, px(16), true);
     }
     else {
-        text.draw("UPDATE FAILED", centre_x, popup.y + 45, kRed, 32, true);
+        text.draw("UPDATE FAILED", centre_x, popup.y + px(45), kRed, px(32), true);
         text.draw("Check the internet connection and try again later.",
-                  centre_x, popup.y + 100, kText, 16, true);
+                  centre_x, popup.y + px(100), kText, px(16), true);
         const SDL_Rect close_button =
             update_popup_button_rect(screen_width, screen_height, kind, true);
-        draw_button(renderer, text, close_button, "CLOSE", kRed, 16,
+        draw_button(renderer, text, close_button, "CLOSE", kRed, px(16),
                     false, is_pressed(touch, close_button));
     }
 }
@@ -1683,8 +1690,8 @@ enum class RtlSdrAskPopupKind { None, Ask };
 
 SDL_Rect rtlsdr_ask_popup_rect(int screen_width, int screen_height)
 {
-    const int width = std::min(600, screen_width - 80);
-    constexpr int height = 240;
+    const int width = std::min(px(600), screen_width - px(80));
+    const int height = px(240);
     return {(screen_width - width) / 2, (screen_height - height) / 2,
             width, height};
 }
@@ -1692,12 +1699,12 @@ SDL_Rect rtlsdr_ask_popup_rect(int screen_width, int screen_height)
 SDL_Rect rtlsdr_ask_popup_button_rect(int screen_width, int screen_height, bool yes)
 {
     const SDL_Rect popup = rtlsdr_ask_popup_rect(screen_width, screen_height);
-    constexpr int button_width = 150;
-    constexpr int gap = 20;
+    const int button_width = px(150);
+    const int gap = px(20);
     const int total = button_width * 2 + gap;
     const int left = popup.x + (popup.w - total) / 2;
-    return {yes ? left : left + button_width + gap, popup.y + popup.h - 62,
-            button_width, 44};
+    return {yes ? left : left + button_width + gap, popup.y + popup.h - px(62),
+            button_width, px(44)};
 }
 
 void draw_rtlsdr_ask_popup(SDL_Renderer * renderer, TextCache & text,
@@ -1711,24 +1718,24 @@ void draw_rtlsdr_ask_popup(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &screen);
 
     const SDL_Rect popup = rtlsdr_ask_popup_rect(screen_width, screen_height);
-    constexpr int kPopupRadius = 16;
+    const int kPopupRadius = px(16);
     fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
     draw_rounded_rect(renderer, popup, kPopupRadius, kCyan);
 
     const int centre_x = popup.x + popup.w / 2;
-    text.draw("LOCAL RTL-SDR DETECTED", centre_x, popup.y + 40, kCyan, 32, true);
+    text.draw("LOCAL RTL-SDR DETECTED", centre_x, popup.y + px(40), kCyan, px(32), true);
     text.draw("Use it for the spectrum display instead of the remote feed?",
-              centre_x, popup.y + 92, kText, 18, true);
+              centre_x, popup.y + px(92), kText, px(18), true);
     text.draw("YES = field use WITHOUT internet. Remote VLC will not work.",
-              centre_x, popup.y + 124, kYellow, 16, true);
+              centre_x, popup.y + px(124), kYellow, px(16), true);
     text.draw("(You can always unplug it and restart the app to use remote.)",
-              centre_x, popup.y + 152, kTextDim, 15, true);
+              centre_x, popup.y + px(152), kTextDim, px(15), true);
 
     const SDL_Rect yes_button = rtlsdr_ask_popup_button_rect(screen_width, screen_height, true);
     const SDL_Rect no_button = rtlsdr_ask_popup_button_rect(screen_width, screen_height, false);
-    draw_button(renderer, text, yes_button, "YES", kGreen, 16,
+    draw_button(renderer, text, yes_button, "YES", kGreen, px(16),
                 false, is_pressed(touch, yes_button));
-    draw_button(renderer, text, no_button, "NO", kText, 16,
+    draw_button(renderer, text, no_button, "NO", kText, px(16),
                 false, is_pressed(touch, no_button));
 }
 
@@ -1736,8 +1743,8 @@ enum class SpectrumSourcePopupKind { None, Success, Failed };
 
 SDL_Rect spectrum_source_popup_rect(int screen_width, int screen_height)
 {
-    const int width = std::min(600, screen_width - 80);
-    constexpr int height = 170;
+    const int width = std::min(px(600), screen_width - px(80));
+    const int height = px(170);
     return {(screen_width - width) / 2, (screen_height - height) / 2,
             width, height};
 }
@@ -1753,23 +1760,23 @@ void draw_spectrum_source_popup(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &screen);
 
     const SDL_Rect popup = spectrum_source_popup_rect(screen_width, screen_height);
-    constexpr int kPopupRadius = 16;
+    const int kPopupRadius = px(16);
     fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
     draw_rounded_rect(renderer, popup, kPopupRadius,
                       kind == SpectrumSourcePopupKind::Success ? kGreen : kRed);
 
     const int centre_x = popup.x + popup.w / 2;
     if(kind == SpectrumSourcePopupKind::Success) {
-        text.draw("LOCAL SPECTRUM SOURCE", centre_x, popup.y + 45, kGreen, 32, true);
+        text.draw("LOCAL SPECTRUM SOURCE", centre_x, popup.y + px(45), kGreen, px(32), true);
         text.draw("Spectrum is now generated from the local RTL-SDR receiver.",
-                  centre_x, popup.y + 100, kText, 18, true);
+                  centre_x, popup.y + px(100), kText, px(18), true);
     }
     else {
-        text.draw("LOCAL SPECTRUM UNAVAILABLE", centre_x, popup.y + 40, kRed, 32, true);
+        text.draw("LOCAL SPECTRUM UNAVAILABLE", centre_x, popup.y + px(40), kRed, px(32), true);
         text.draw("Could not get a spectrum from the local RTL-SDR receiver.",
-                  centre_x, popup.y + 90, kText, 18, true);
+                  centre_x, popup.y + px(90), kText, px(18), true);
         text.draw("Check it is plugged in. Reverted to the remote feed.",
-                  centre_x, popup.y + 118, kText, 18, true);
+                  centre_x, popup.y + px(118), kText, px(18), true);
     }
 }
 
@@ -1778,7 +1785,7 @@ enum class ChatInput { None, Nick, Message };
 
 SDL_Rect page_back_rect(int width)
 {
-    return {width - 114, 6, 106, 40};
+    return {width - px(114), px(6), px(106), px(40)};
 }
 
 /* The Settings page: two columns of cards, with SAVE & APPLY / EXIT beside
@@ -1897,8 +1904,8 @@ SDL_Rect settings_autostart_rect(int width, int index)
 SDL_Rect settings_lnb_cal_rect(int width)
 {
     const SDL_Rect card = settings_receiver_card_rect(width);
-    constexpr int button_width = 132;
-    return {card.x + card.w - button_width - 12, card.y + 6, button_width, 28};
+    const int button_width = px(132);
+    return {card.x + card.w - button_width - px(12), card.y + px(6), button_width, px(28)};
 }
 
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
@@ -1908,8 +1915,8 @@ void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &card);
     const int margin = ui().settings.card_pad;
-    text.draw(title, card.x + margin, card.y + 16, kCyan, 14);
-    const SDL_Rect rule{card.x + margin, card.y + 40, card.w - margin * 2, 1};
+    text.draw(title, card.x + margin, card.y + px(16), kCyan, px(14));
+    const SDL_Rect rule{card.x + margin, card.y + px(40), card.w - margin * 2, 1};
     set_colour(renderer, kBorder);
     SDL_RenderFillRect(renderer, &rule);
 }
@@ -1941,7 +1948,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
     SDL_RenderFillRect(renderer, &screen);
-    text.draw("SETTINGS", 12, 12, kCyan, 20);
+    text.draw("SETTINGS", px(12), px(12), kCyan, px(20));
 
     const SDL_Rect receiver_card = settings_receiver_card_rect(width);
     draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING");
@@ -1964,13 +1971,14 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderDrawRect(renderer, &lo_value);
     char lo_text[24];
     std::snprintf(lo_text, sizeof(lo_text), "%.4f", lo_display_mhz);
-    text.draw(lo_text, lo_value.x + 14, lo_value.y + lo_value.h / 2 - p.lo_value_rise,
+    text.draw(lo_text, lo_value.x + px(14), lo_value.y + lo_value.h / 2 - p.lo_value_rise,
               kText, p.lo_value_font, false, true);
     {
         const std::string caption = lnb_cal_done ? "calibrated" : "nominal - not calibrated";
-        const int caption_width = text.measure(caption, 14).first;
-        text.draw(caption, lo_value.x + lo_value.w - 12 - caption_width,
-                  lo_value.y + lo_value.h / 2 - 8, lnb_cal_done ? kGreen : kYellow, 14, false);
+        const int caption_width = text.measure(caption, px(14)).first;
+        text.draw(caption, lo_value.x + lo_value.w - px(12) - caption_width,
+                  lo_value.y + lo_value.h / 2 - px(8), lnb_cal_done ? kGreen : kYellow,
+                  px(14), false);
     }
     text.draw("LNB Bias Voltage", receiver_card.x + p.card_pad,
               receiver_card.y + p.voltage_label_y, kText, p.label_font);
@@ -1998,14 +2006,14 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     if(!can_use_1024x600 && !p.card_hints)
         text.draw("1024x600 too big for this screen",
                   display_card.x + display_card.w / 2,
-                  display_card.y + display_card.h - 14, kTextDim, 14, true);
+                  display_card.y + display_card.h - px(14), kTextDim, px(14), true);
     else if(!can_use_1024x600)
         text.draw("1024x600 doesn't fit this screen",
                   display_card.x + p.card_pad,
-                  display_card.y + display_card.h - 20, kTextDim, 14);
+                  display_card.y + display_card.h - px(20), kTextDim, px(14));
     else if(p.card_hints)
         text.draw("Restarts the app to apply", display_card.x + p.card_pad,
-                  display_card.y + display_card.h - 20, kTextDim, 14);
+                  display_card.y + display_card.h - px(20), kTextDim, px(14));
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan,
                 p.button_font, false, is_pressed(touch, settings_save_rect(width)));
@@ -2025,7 +2033,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                   x, y + p.diag_y[3], longmynd_connected ? kGreen : kRed, p.diag_font);
         text.draw("Watch in VLC (same network)", x, y + p.diag_y[4], kText, p.diag_font);
         if(p.diag_y[5] != 0)
-            text.draw("Media > Open Network Stream:", x, y + p.diag_y[5], kTextDim, 14);
+            text.draw("Media > Open Network Stream:", x, y + p.diag_y[5], kTextDim, px(14));
         text.draw(qo100::ts_stream_vlc_url(), x, y + p.diag_y[6], kCyan, p.diag_font);
     }
 
@@ -2042,7 +2050,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         text.draw(exit_behaviour_choice == 1
                       ? "EXIT stops the app - restart via desktop icon"
                       : "EXIT restarts the app automatically",
-                  exit_card.x + p.card_pad, exit_card.y + exit_card.h - 20, kTextDim, 14);
+                  exit_card.x + p.card_pad, exit_card.y + exit_card.h - px(20), kTextDim, px(14));
 
     const SDL_Rect autostart_card = settings_autostart_card_rect(width);
     draw_settings_card(renderer, text, autostart_card, "AUTO START AT BOOT");
@@ -2056,8 +2064,8 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     }
     if(p.card_hints)
         text.draw("Launches automatically at power-on (kiosk mode)",
-                  autostart_card.x + p.card_pad, autostart_card.y + autostart_card.h - 20,
-                  kTextDim, 14);
+                  autostart_card.x + p.card_pad, autostart_card.y + autostart_card.h - px(20),
+                  kTextDim, px(14));
 }
 
 /* ------------------------------------------------------------------------
@@ -2141,19 +2149,19 @@ enum class LnbCalPromptKind { None, Ask };
 
 SDL_Rect lnb_cal_prompt_rect(int screen_width, int screen_height)
 {
-    const int width = std::min(640, screen_width - 60);
-    constexpr int height = 300;
+    const int width = std::min(px(640), screen_width - px(60));
+    const int height = px(300);
     return {(screen_width - width) / 2, (screen_height - height) / 2, width, height};
 }
 
 SDL_Rect lnb_cal_prompt_button_rect(int screen_width, int screen_height, bool calibrate)
 {
     const SDL_Rect popup = lnb_cal_prompt_rect(screen_width, screen_height);
-    constexpr int button_width = 200;
-    constexpr int gap = 20;
+    const int button_width = px(200);
+    const int gap = px(20);
     const int left = popup.x + (popup.w - (button_width * 2 + gap)) / 2;
-    return {calibrate ? left : left + button_width + gap, popup.y + popup.h - 62,
-            button_width, 44};
+    return {calibrate ? left : left + button_width + gap, popup.y + popup.h - px(62),
+            button_width, px(44)};
 }
 
 void draw_lnb_cal_prompt(SDL_Renderer * renderer, TextCache & text,
@@ -2168,34 +2176,34 @@ void draw_lnb_cal_prompt(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &screen);
 
     const SDL_Rect popup = lnb_cal_prompt_rect(screen_width, screen_height);
-    constexpr int kPopupRadius = 16;
+    const int kPopupRadius = px(16);
     fill_rounded_rect(renderer, popup, kPopupRadius, kPanel);
     draw_rounded_rect(renderer, popup, kPopupRadius, kYellow);
 
     const int centre_x = popup.x + popup.w / 2;
-    text.draw("CALIBRATION NEEDED", centre_x, popup.y + 36, kYellow, 32, true);
+    text.draw("CALIBRATION NEEDED", centre_x, popup.y + px(36), kYellow, px(32), true);
     text.draw(two_steps ? "Measure the LNB and the RTL-SDR frequency using the beacon?"
                         : "Measure your LNB's real frequency using the beacon?",
-              centre_x, popup.y + 80, kText, 18, true);
+              centre_x, popup.y + px(80), kText, px(18), true);
     text.draw(two_steps ? "Two steps, about 2 minutes. Video and spectrum pause."
                         : "Takes about 1.5 minutes. Video stops while it runs.",
-              centre_x, popup.y + 106, kTextDim, 15, true);
+              centre_x, popup.y + px(106), kTextDim, px(15), true);
 
     /* The warm-up remark, wrapped to fit inside the popup. */
     bool warning = false;
     const std::string warmup = lnb_warmup_text(uptime_minutes, warning);
-    int y = popup.y + 142;
+    int y = popup.y + px(142);
     for(const std::string & line : wrap_words(warmup, 62)) {
-        text.draw(line, centre_x, y, warning ? kYellow : kTextDim, 15, true);
-        y += 22;
+        text.draw(line, centre_x, y, warning ? kYellow : kTextDim, px(15), true);
+        y += px(22);
     }
 
     /* If the system is young, make the button say what is being decided. */
     const SDL_Rect yes_button = lnb_cal_prompt_button_rect(screen_width, screen_height, true);
     const SDL_Rect no_button = lnb_cal_prompt_button_rect(screen_width, screen_height, false);
     draw_button(renderer, text, yes_button, warning ? "CALIBRATE ANYWAY" : "CALIBRATE",
-                kGreen, 15, false, is_pressed(touch, yes_button));
-    draw_button(renderer, text, no_button, warning ? "WAIT" : "LATER", kText, 16,
+                kGreen, px(15), false, is_pressed(touch, yes_button));
+    draw_button(renderer, text, no_button, warning ? "WAIT" : "LATER", kText, px(16),
                 false, is_pressed(touch, no_button));
 }
 
@@ -2229,12 +2237,12 @@ std::vector<LnbCalAction> lnb_cal_actions(const qo100::LnbCalibration & cal,
 
 SDL_Rect lnb_cal_button_rect(int width, int height, size_t index, size_t count)
 {
-    constexpr int button_width = 210;
-    constexpr int gap = 24;
+    const int button_width = px(210);
+    const int gap = px(24);
     const int total = static_cast<int>(count) * button_width +
                       static_cast<int>(count - 1) * gap;
     return {(width - total) / 2 + static_cast<int>(index) * (button_width + gap),
-            height - 68, button_width, 46};
+            height - px(68), button_width, px(46)};
 }
 
 const char * lnb_cal_action_label(LnbCalAction action, bool has_calibration)
@@ -2266,37 +2274,39 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
 {
     using Outcome = qo100::LnbCalibration::Outcome;
     /* The sizes that differ between screens come from ui_profile.h. */
-    const int title_size = 20;
+    const int title_size = px(20);
     const int body_size = ui().lnb_cal.body_font;
     const int emph_size = ui().lnb_cal.emph_font;         /* status/step line */
-    const int small_size = 14;
-    const int mono_size = 16;                             /* the numbers of the report */
+    const int small_size = px(14);
+    const int mono_size = px(16);                         /* the numbers of the report */
     const int mono_big_size = ui().lnb_cal.mono_big_font; /* the headline LO value */
 
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
     SDL_RenderFillRect(renderer, &screen);
-    text.draw("FREQUENCY OFFSET CALIBRATION", 12, 12, kCyan, 20);
+    text.draw("FREQUENCY OFFSET CALIBRATION", px(12), px(12), kCyan, px(20));
 
-    const SDL_Rect card{24, 52, width - 48, height - 52 - 84};
+    const SDL_Rect card{px(24), px(52), width - px(48), height - px(52) - px(84)};
     fill_panel(renderer, card);
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &card);
 
-    const int left = card.x + 24;
-    int y = card.y + 16;
-    /* One line of text, advancing the cursor. */
+    /* Text runs from `left` to the same distance from the card's right edge. */
+    const int left = card.x + px(24);
+    const int text_w = card.w - px(48);
+    int y = card.y + px(16);
+    /* One line of text, advancing the cursor; `gap` is in design pixels. */
     const auto line = [&](const std::string & value, Colour colour, int size, int gap = 8,
                           bool mono = false) {
         text.draw(value, left, y, colour, size, false, mono);
-        y += size + gap;
+        y += size + px(gap);
     };
     /* Wrapped paragraph; characters per line estimated from the font size. */
     const auto paragraph = [&](const std::string & value, Colour colour, int size) {
         const size_t max_chars = static_cast<size_t>(
-            std::max(20, static_cast<int>((card.w - 48) / (size * 0.56))));
+            std::max(20, static_cast<int>(text_w / (size * 0.56))));
         for(const std::string & wrapped : wrap_words(value, max_chars)) line(wrapped, colour, size, 4);
-        y += 6;
+        y += px(6);
     };
     /* The list of measurements so far (accepted IF and the LO it implies), in
      * the monospace font so the digits line up, in two columns (1-5 left,
@@ -2305,8 +2315,8 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         line("Measurements", kTextDim, small_size, 6);
         const auto & attempts = cal.attempts();
         const int rows_per_column = (qo100::LnbCalibration::kAttempts + 1) / 2;
-        const int column_width = (card.w - 48) / 2;
-        const int row_height = mono_size + 5;
+        const int column_width = text_w / 2;
+        const int row_height = mono_size + px(5);
         for(size_t i = 0; i < attempts.size(); ++i) {
             char row[96];
             if(attempts[i].valid)
@@ -2321,18 +2331,19 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
             text.draw(row, left + column * column_width, y + row_in_column * row_height,
                       attempts[i].valid ? kText : kYellow, mono_size, false, true);
         }
-        y += rows_per_column * row_height + 6;
+        y += rows_per_column * row_height + px(6);
     };
     bool warmup_warning = false;
     const std::string warmup = lnb_warmup_text(uptime_minutes, warmup_warning);
     /* The warm-up remark sits at the bottom of the card in every state. */
     const auto warmup_footer = [&] {
-        const size_t max_chars = static_cast<size_t>((card.w - 48) / (small_size * 0.56));
+        const size_t max_chars = static_cast<size_t>(text_w / (small_size * 0.56));
         const auto lines = wrap_words(warmup, max_chars);
-        int footer_y = card.y + card.h - 12 - static_cast<int>(lines.size()) * (small_size + 4);
+        int footer_y = card.y + card.h - px(12) -
+                       static_cast<int>(lines.size()) * (small_size + px(4));
         for(const std::string & wrapped : lines) {
             text.draw(wrapped, left, footer_y, warmup_warning ? kYellow : kTextDim, small_size);
-            footer_y += small_size + 4;
+            footer_y += small_size + px(4);
         }
     };
 
@@ -2350,24 +2361,24 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         /* Small dim text flush with the card's right edge (the dates). */
         const auto right_text = [&](const std::string & value, int at_y) {
             const int value_width = text.measure(value, small_size).first;
-            text.draw(value, card.x + card.w - 24 - value_width, at_y, kTextDim, small_size);
+            text.draw(value, card.x + card.w - px(24) - value_width, at_y, kTextDim, small_size);
         };
-        y += 8;
+        y += px(8);
         text.draw("CORRECTIONS FOUND", left, y, kCyan, small_size);
-        y += small_size + 6;
-        const SDL_Rect rule{left, y, card.w - 48, 1};
+        y += small_size + px(6);
+        const SDL_Rect rule{left, y, text_w, 1};
         set_colour(renderer, kBorder);
         SDL_RenderFillRect(renderer, &rule);
-        y += 8;
+        y += px(8);
 
         /* Row 1: the LNB oscillator. */
         const double deviation_khz = (lo_mhz - settings.lnb_lo_mhz) * 1000.0;
         char value[96];
         text.draw("1   LNB oscillator", left, y, kText, emph_size);
         std::snprintf(value, sizeof(value), "%.4f MHz  %+.1f kHz", lo_mhz, deviation_khz);
-        text.draw(value, value_x, y - 1, kGreen, mono_big_size, false, true);
-        right_text("measured " + lnb_when, y + 2);
-        y += mono_big_size + 8;
+        text.draw(value, value_x, y - px(1), kGreen, mono_big_size, false, true);
+        right_text("measured " + lnb_when, y + px(2));
+        y += mono_big_size + px(8);
         char sentence[200];
         if(std::fabs(deviation_khz) < 0.05)
             std::snprintf(sentence, sizeof(sentence),
@@ -2380,16 +2391,16 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
                           std::fabs(deviation_khz), deviation_khz > 0 ? "above" : "below",
                           settings.lnb_lo_mhz);
         paragraph(sentence, kTextDim, body_size);
-        y += 8;
+        y += px(8);
 
         /* Row 2: the RTL-SDR display shift (only when the stick draws the spectrum). */
         if(rtl_state == 0) return;
         text.draw("2   RTL-SDR display shift", left, y, kText, emph_size);
         if(rtl_state == 1) {
             std::snprintf(value, sizeof(value), "%+.1f kHz", rtl_khz);
-            text.draw(value, value_x, y - 1, kGreen, mono_big_size, false, true);
-            right_text("measured " + rtl_when, y + 2);
-            y += mono_big_size + 8;
+            text.draw(value, value_x, y - px(1), kGreen, mono_big_size, false, true);
+            right_text("measured " + rtl_when, y + px(2));
+            y += mono_big_size + px(8);
             std::snprintf(sentence, sizeof(sentence),
                           "The RTL spectrum showed the beacon %.1f kHz too %s. It is now shifted "
                           "back onto the true frequency axis.",
@@ -2403,8 +2414,8 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
             line(sentence, kTextDim, body_size, 6);
         }
         else {
-            text.draw("not measured yet", value_x, y - 1, kYellow, mono_big_size, false, true);
-            y += mono_big_size + 8;
+            text.draw("not measured yet", value_x, y - px(1), kYellow, mono_big_size, false, true);
+            y += mono_big_size + px(8);
             paragraph("The RTL spectrum still uses the nominal LO until this has been measured" +
                           std::string(rtl_note.empty() ? "." : " (" + rtl_note + ").") +
                           " Redo the calibration to measure it.", kYellow, body_size);
@@ -2414,8 +2425,8 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
      * screen it is left out when the corrections block has used the room. */
     const auto readings_if_room = [&] {
         const int rows = (qo100::LnbCalibration::kAttempts + 1) / 2;
-        const int needed = small_size + 6 + rows * (mono_size + 5) + 6;
-        const int footer = 2 * (small_size + 4) + 16;
+        const int needed = small_size + px(6) + rows * (mono_size + px(5)) + px(6);
+        const int footer = 2 * (small_size + px(4)) + px(16);
         if(y + needed <= card.y + card.h - footer) {
             readings();
             return;
@@ -2430,7 +2441,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         /* --- step 2: the RTL-SDR stick measures the beacon --- */
         const qo100::RtlOffsetReport & report = *rtl.report;
         line("STEP 2 OF 2 - RTL-SDR", kCyan, title_size, 10);
-        const SDL_Rect bar{left, y, card.w - 48, 14};
+        const SDL_Rect bar{left, y, text_w, px(14)};
         set_colour(renderer, kBackground);
         SDL_RenderFillRect(renderer, &bar);
         SDL_Rect filled = bar;
@@ -2439,7 +2450,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         SDL_RenderFillRect(renderer, &filled);
         set_colour(renderer, kBorder);
         SDL_RenderDrawRect(renderer, &bar);
-        y += 26;
+        y += px(26);
         line(report.done() == 0 ? "Starting the RTL-SDR..."
                                 : "Measuring the beacon with the RTL-SDR stick...",
              kText, emph_size, 12);
@@ -2463,7 +2474,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
                  std::to_string(cal.attempt_number()) + " OF " +
                  std::to_string(qo100::LnbCalibration::kAttempts),
              kCyan, title_size, 10);
-        const SDL_Rect bar{left, y, card.w - 48, 14};
+        const SDL_Rect bar{left, y, text_w, px(14)};
         set_colour(renderer, kBackground);
         SDL_RenderFillRect(renderer, &bar);
         SDL_Rect filled = bar;
@@ -2473,7 +2484,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
         SDL_RenderFillRect(renderer, &filled);
         set_colour(renderer, kBorder);
         SDL_RenderDrawRect(renderer, &bar);
-        y += 26;
+        y += px(26);
         line(cal.step_text(), kText, emph_size, 12);
         readings();
         const double running_lo = cal.running_lo_mhz();
@@ -2511,7 +2522,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
             corrections(settings.lnb_lo_calibrated_mhz, settings.lnb_lo_calibrated_at,
                         !spectrum_local ? 0 : (qo100::rtl_calibrated(settings) ? 1 : 2),
                         settings.rtl_correction_khz, settings.rtl_correction_at, "");
-            y += 4;
+            y += px(4);
         }
         else {
             line("NOT CALIBRATED YET", kYellow, title_size, 10);
@@ -2544,7 +2555,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
                   actions[index] == LnbCalAction::Done ? kGreen : kCyan));
         draw_button(renderer, text, button,
                     lnb_cal_action_label(actions[index], qo100::lnb_calibrated(settings)),
-                    colour, 16, false, !disabled && is_pressed(touch, button));
+                    colour, px(16), false, !disabled && is_pressed(touch, button));
     }
 }
 
@@ -2556,9 +2567,9 @@ struct KeyboardKey {
 void add_keyboard_row(std::vector<KeyboardKey> & keys,
                       const std::vector<std::string> & labels,
                       int y, int screen_width, int key_height,
-                      int side_margin = 8)
+                      int side_margin)
 {
-    constexpr int gap = 5;
+    const int gap = px(5);
     const int available = screen_width - side_margin * 2 -
                           gap * static_cast<int>(labels.size() - 1);
     const int key_width = available / static_cast<int>(labels.size());
@@ -2574,9 +2585,11 @@ void add_keyboard_row(std::vector<KeyboardKey> & keys,
 std::vector<KeyboardKey> keyboard_keys(int screen_width, int screen_height,
                                        bool symbols, bool shifted)
 {
-    const int top = screen_height - 250;
-    constexpr int height = 54;
-    constexpr int row_gap = 6;
+    const int top = screen_height - px(250);
+    const int height = px(54);
+    const int row_gap = px(6);
+    const int margin = px(8);
+    const int indent = px(38);  /* the second row, offset like a real keyboard */
     std::vector<KeyboardKey> keys;
     if(!symbols) {
         std::vector<std::string> row1{"q","w","e","r","t","y","u","i","o","p"};
@@ -2590,20 +2603,20 @@ std::vector<KeyboardKey> keyboard_keys(int screen_width, int screen_height,
                 }
             }
         }
-        add_keyboard_row(keys, row1, top, screen_width, height);
-        add_keyboard_row(keys, row2, top + height + row_gap, screen_width, height, 38);
-        add_keyboard_row(keys, row3, top + 2 * (height + row_gap), screen_width, height);
+        add_keyboard_row(keys, row1, top, screen_width, height, margin);
+        add_keyboard_row(keys, row2, top + height + row_gap, screen_width, height, indent);
+        add_keyboard_row(keys, row3, top + 2 * (height + row_gap), screen_width, height, margin);
     }
     else {
         add_keyboard_row(keys, {"1","2","3","4","5","6","7","8","9","0"},
-                         top, screen_width, height);
+                         top, screen_width, height, margin);
         add_keyboard_row(keys, {"!","@","#","$","%","&","*","(",")"},
-                         top + height + row_gap, screen_width, height, 38);
+                         top + height + row_gap, screen_width, height, indent);
         add_keyboard_row(keys, {"ABC",".",",","?","!","'","\"","/","BACK"},
-                         top + 2 * (height + row_gap), screen_width, height);
+                         top + 2 * (height + row_gap), screen_width, height, margin);
     }
     add_keyboard_row(keys, {symbols ? "ABC" : "SYM", "SPACE", "-", "CANCEL", "ENTER"},
-                     top + 3 * (height + row_gap), screen_width, height);
+                     top + 3 * (height + row_gap), screen_width, height, margin);
     return keys;
 }
 
@@ -2611,7 +2624,7 @@ void draw_keyboard(SDL_Renderer * renderer, TextCache & text,
                    int width, int height, bool symbols, bool shifted,
                    const TouchState & touch)
 {
-    const SDL_Rect background{0, height - 258, width, 258};
+    const SDL_Rect background{0, height - px(258), width, px(258)};
     set_colour(renderer, kPanel);
     SDL_RenderFillRect(renderer, &background);
     set_colour(renderer, kBorder);
@@ -2622,16 +2635,16 @@ void draw_keyboard(SDL_Renderer * renderer, TextCache & text,
         else if(key.label == "CANCEL" || key.label == "BACK") colour = kRed;
         else if(key.label == "SYM" || key.label == "ABC" || key.label == "SHIFT")
             colour = kYellow;
-        draw_button(renderer, text, key.rect, key.label, colour, 16,
+        draw_button(renderer, text, key.rect, key.label, colour, px(16),
                     false, is_pressed(touch, key.rect));
     }
 }
 
 std::string tail_that_fits(TextCache & text, const std::string & value, int width)
 {
-    if(text.measure(value, 16).first <= width) return value;
+    if(text.measure(value, px(16)).first <= width) return value;
     size_t start = 0;
-    while(start < value.size() && text.measure(value.substr(start), 16).first > width) {
+    while(start < value.size() && text.measure(value.substr(start), px(16)).first > width) {
         ++start;
         while(start < value.size() &&
               (static_cast<unsigned char>(value[start]) & 0xc0U) == 0x80U) ++start;
@@ -2648,11 +2661,11 @@ void draw_text_input(SDL_Renderer * renderer, TextCache & text,
     set_colour(renderer, active ? kCyan : kBorder);
     SDL_RenderDrawRect(renderer, &rect);
     const std::string shown = value.empty()
-        ? std::string(placeholder) : tail_that_fits(text, value, rect.w - 16);
-    const SDL_Rect clip{rect.x + 6, rect.y + 2, rect.w - 12, rect.h - 4};
+        ? std::string(placeholder) : tail_that_fits(text, value, rect.w - px(16));
+    const SDL_Rect clip{rect.x + px(6), rect.y + px(2), rect.w - px(12), rect.h - px(4)};
     SDL_RenderSetClipRect(renderer, &clip);
-    text.draw(shown, rect.x + 8, rect.y + (rect.h - 16) / 2,
-              value.empty() ? kTextDim : kText, 16, false);
+    text.draw(shown, rect.x + px(8), rect.y + (rect.h - px(16)) / 2,
+              value.empty() ? kTextDim : kText, px(16), false);
     SDL_RenderSetClipRect(renderer, nullptr);
 }
 
@@ -2690,19 +2703,20 @@ void draw_chat_history(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &box);
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &box);
-    constexpr int kChatFontSize = 16;
+    const int kChatFontSize = px(16);
     if(state.lines.empty()) {
-        text.draw("Waiting for chat history...", box.x + 10, box.y + 10, kText, kChatFontSize);
+        text.draw("Waiting for chat history...", box.x + px(10), box.y + px(10), kText,
+                  kChatFontSize);
         first_visible = 0;
         last_visible = 0;
         follow_latest = true;
         return;
     }
 
-    constexpr int line_height = 22;
-    const int message_x = box.x + 245;
-    const int message_width = box.x + box.w - message_x - 10;
-    const int available_height = box.h - 16;
+    const int line_height = px(22);
+    const int message_x = box.x + px(245);
+    const int message_width = box.x + box.w - message_x - px(10);
+    const int available_height = box.h - px(16);
     struct Visible {
         size_t index;
         std::vector<std::string> lines;
@@ -2715,7 +2729,7 @@ void draw_chat_history(SDL_Renderer * renderer, TextCache & text,
         for(size_t index = state.lines.size(); index > 0; --index) {
             auto wrapped = wrap_chat_text(
                 text, state.lines[index - 1].message, message_width, kChatFontSize);
-            const int needed = static_cast<int>(wrapped.size()) * line_height + 3;
+            const int needed = static_cast<int>(wrapped.size()) * line_height + px(3);
             if(!visible.empty() && used_height + needed > available_height) break;
             visible.insert(visible.begin(),
                            {index - 1, std::move(wrapped), needed});
@@ -2727,7 +2741,7 @@ void draw_chat_history(SDL_Renderer * renderer, TextCache & text,
         for(size_t index = first_visible; index < state.lines.size(); ++index) {
             auto wrapped = wrap_chat_text(
                 text, state.lines[index].message, message_width, kChatFontSize);
-            const int needed = static_cast<int>(wrapped.size()) * line_height + 3;
+            const int needed = static_cast<int>(wrapped.size()) * line_height + px(3);
             if(!visible.empty() && used_height + needed > available_height) break;
             visible.push_back({index, std::move(wrapped), needed});
             used_height += needed;
@@ -2738,13 +2752,13 @@ void draw_chat_history(SDL_Renderer * renderer, TextCache & text,
     first_visible = visible.front().index;
     last_visible = visible.back().index;
     if(!follow_latest && last_visible + 1 >= state.lines.size()) follow_latest = true;
-    int y = follow_latest ? box.y + box.h - 8 - used_height : box.y + 8;
+    int y = follow_latest ? box.y + box.h - px(8) - used_height : box.y + px(8);
     const SDL_Rect clip{box.x + 1, box.y + 1, box.w - 2, box.h - 2};
     SDL_RenderSetClipRect(renderer, &clip);
     for(const Visible & item : visible) {
         const qo100::ChatLine & source = state.lines[item.index];
-        text.draw(source.time, box.x + 10, y, {0x9a, 0xa0, 0xa6}, kChatFontSize);
-        text.draw(source.name, box.x + 68, y, kYellow, kChatFontSize);
+        text.draw(source.time, box.x + px(10), y, {0x9a, 0xa0, 0xa6}, kChatFontSize);
+        text.draw(source.name, box.x + px(68), y, kYellow, kChatFontSize);
         for(size_t line = 0; line < item.lines.size(); ++line)
             text.draw(item.lines[line], message_x,
                       y + static_cast<int>(line) * line_height, kText, kChatFontSize);
@@ -2752,33 +2766,45 @@ void draw_chat_history(SDL_Renderer * renderer, TextCache & text,
     }
     SDL_RenderSetClipRect(renderer, nullptr);
     if(!follow_latest)
-        text.draw("SCROLLED", box.x + box.w - 82, box.y + 7, kYellow, kChatFontSize);
+        text.draw("SCROLLED", box.x + box.w - px(82), box.y + px(7), kYellow, kChatFontSize);
+}
+
+/* Bottom of the history and user list: above the input row, and above the
+ * keyboard too while that is open. */
+int chat_content_bottom(int height, bool keyboard_open)
+{
+    return height - px(keyboard_open ? 316 : 68);
+}
+
+/* Top of the input row (callsign, SET, message, SEND). */
+int chat_input_y(int height, bool keyboard_open)
+{
+    return height - px(keyboard_open ? 306 : 58);
 }
 
 SDL_Rect chat_history_rect(int width, int height, bool keyboard_open)
 {
-    const int content_bottom = keyboard_open ? height - 316 : height - 68;
-    return {8, 48, width - 234, content_bottom - 48};
+    return {px(8), px(48), width - px(234), chat_content_bottom(height, keyboard_open) - px(48)};
 }
 
 SDL_Rect chat_nick_rect(int height, bool keyboard_open)
 {
-    return {8, keyboard_open ? height - 306 : height - 58, 150, 48};
+    return {px(8), chat_input_y(height, keyboard_open), px(150), px(48)};
 }
 
 SDL_Rect chat_set_rect(int height, bool keyboard_open)
 {
-    return {164, keyboard_open ? height - 306 : height - 58, 76, 48};
+    return {px(164), chat_input_y(height, keyboard_open), px(76), px(48)};
 }
 
 SDL_Rect chat_message_rect(int width, int height, bool keyboard_open)
 {
-    return {248, keyboard_open ? height - 306 : height - 58, width - 370, 48};
+    return {px(248), chat_input_y(height, keyboard_open), width - px(370), px(48)};
 }
 
 SDL_Rect chat_send_rect(int width, int height, bool keyboard_open)
 {
-    return {width - 114, keyboard_open ? height - 306 : height - 58, 106, 48};
+    return {width - px(114), chat_input_y(height, keyboard_open), px(106), px(48)};
 }
 
 void draw_chat_page(SDL_Renderer * renderer, TextCache & text,
@@ -2791,42 +2817,43 @@ void draw_chat_page(SDL_Renderer * renderer, TextCache & text,
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
     SDL_RenderFillRect(renderer, &screen);
-    text.draw("QO-100 WIDEBAND CHAT", 12, 12, kCyan, 20);
+    text.draw("QO-100 WIDEBAND CHAT", px(12), px(12), kCyan, px(20));
     const char * status = state.connection == qo100::ChatState::Connection::Connected
         ? "CONNECTED" : (state.connection == qo100::ChatState::Connection::Reconnecting
             ? "RECONNECTING..." : "CONNECTING...");
     const Colour status_colour = state.connection == qo100::ChatState::Connection::Connected
         ? kGreen : kYellow;
-    text.draw(status, 330, 17, status_colour, 14);
-    text.draw("VIEWERS: " + state.viewers, width - 260, 17, kTextDim, 14);
-    draw_button(renderer, text, page_back_rect(width), "BACK", kCyan, 16,
+    text.draw(status, px(330), px(17), status_colour, px(14));
+    text.draw("VIEWERS: " + state.viewers, width - px(260), px(17), kTextDim, px(14));
+    draw_button(renderer, text, page_back_rect(width), "BACK", kCyan, px(16),
                 false, is_pressed(touch, page_back_rect(width)));
 
     const bool keyboard_open = active_input != ChatInput::None;
-    const int content_bottom = keyboard_open ? height - 316 : height - 68;
+    const int content_bottom = chat_content_bottom(height, keyboard_open);
     const SDL_Rect history = chat_history_rect(width, height, keyboard_open);
-    const SDL_Rect users{width - 218, 48, 210, content_bottom - 48};
+    const SDL_Rect users{width - px(218), px(48), px(210), content_bottom - px(48)};
     draw_chat_history(renderer, text, history, state,
                       first_visible, last_visible, follow_latest);
     set_colour(renderer, {0x3f, 0x46, 0x4c});
     SDL_RenderFillRect(renderer, &users);
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &users);
-    text.draw("ONLINE", users.x + 10, users.y + 8, kYellow, 16);
-    const size_t max_users = users.h > 40 ? static_cast<size_t>((users.h - 40) / 22) : 0U;
+    text.draw("ONLINE", users.x + px(10), users.y + px(8), kYellow, px(16));
+    const size_t max_users =
+        users.h > px(40) ? static_cast<size_t>((users.h - px(40)) / px(22)) : 0U;
     for(size_t index = 0; index < std::min(max_users, state.users.size()); ++index)
-        text.draw(state.users[index], users.x + 10, users.y + 34 +
-                  static_cast<int>(index) * 22, kText, 16);
+        text.draw(state.users[index], users.x + px(10), users.y + px(34) +
+                  static_cast<int>(index) * px(22), kText, px(16));
 
     draw_text_input(renderer, text, chat_nick_rect(height, keyboard_open),
                     nick, "CALLSIGN", active_input == ChatInput::Nick);
     const SDL_Rect set_button = chat_set_rect(height, keyboard_open);
-    draw_button(renderer, text, set_button, "SET", kYellow, 16,
+    draw_button(renderer, text, set_button, "SET", kYellow, px(16),
                 false, is_pressed(touch, set_button));
     draw_text_input(renderer, text, chat_message_rect(width, height, keyboard_open),
                     message, "Type a message...", active_input == ChatInput::Message);
     const SDL_Rect send_button = chat_send_rect(width, height, keyboard_open);
-    draw_button(renderer, text, send_button, "SEND", kCyan, 16,
+    draw_button(renderer, text, send_button, "SEND", kCyan, px(16),
                 false, is_pressed(touch, send_button));
     if(keyboard_open)
         draw_keyboard(renderer, text, width, height, symbols, shifted, touch);
@@ -2870,20 +2897,21 @@ void draw_video_notice(TextCache & text, const SDL_Rect & bounds, VideoNotice no
     const float pulse = 0.5F + 0.5F * static_cast<float>(
         std::sin(elapsed_seconds * 2.0));
     const Colour pulsing_colour = mix_colour(colour, kTextDim, pulse * 0.5F);
-    text.draw(message, centre_x + 2, centre_y + 2, {0, 0, 0}, 20, true);
-    text.draw(message, centre_x, centre_y, pulsing_colour, 20, true);
+    text.draw(message, centre_x + px(2), centre_y + px(2), {0, 0, 0}, px(20), true);
+    text.draw(message, centre_x, centre_y, pulsing_colour, px(20), true);
 
     const int elapsed_total = static_cast<int>(elapsed_seconds);
     char elapsed_text[16];
     std::snprintf(elapsed_text, sizeof(elapsed_text), "%d:%02d",
                   elapsed_total / 60, elapsed_total % 60);
-    text.draw(elapsed_text, centre_x + 1, centre_y + 27, {0, 0, 0}, 14, true);
-    text.draw(elapsed_text, centre_x, centre_y + 26, kTextDim, 14, true);
+    text.draw(elapsed_text, centre_x + px(1), centre_y + px(27), {0, 0, 0}, px(14), true);
+    text.draw(elapsed_text, centre_x, centre_y + px(26), kTextDim, px(14), true);
 }
 
 /* Shared by status_button_rect and status_row_height so they can't drift
  * apart - kStatusButtonBlockH is the button height plus the margin above
- * it. Shrunk from 54/65 to free up room for a less-squeezed VU meter. */
+ * it. Shrunk from 54/65 to free up room for a less-squeezed VU meter. All
+ * four are 1024x600 design sizes, used through px(). */
 constexpr int kStatusButtonHeight = 46;
 constexpr int kStatusButtonBlockH = 57;
 constexpr int kVolRowH = 20;
@@ -2895,12 +2923,12 @@ constexpr int kStatusButtonCount = 5;
 
 SDL_Rect status_button_rect(const Layout & layout, int index)
 {
-    constexpr int gap = 8;
-    constexpr int margin = 8;
+    const int gap = px(8);
+    const int margin = px(8);
     const int button_width = (layout.status_panel.w - 2 * margin - (kStatusButtonCount - 1) * gap) / kStatusButtonCount;
-    const int button_y = layout.status_panel.y + layout.status_panel.h - kStatusButtonBlockH;
+    const int button_y = layout.status_panel.y + layout.status_panel.h - px(kStatusButtonBlockH);
     return {layout.status_panel.x + margin + index * (button_width + gap),
-            button_y, button_width, kStatusButtonHeight};
+            button_y, button_width, px(kStatusButtonHeight)};
 }
 
 /* The volume slider track - shared by drawing (draw_status) and hit-testing
@@ -2913,18 +2941,19 @@ SDL_Rect status_button_rect(const Layout & layout, int index)
 int status_row_height(const Layout & layout)
 {
     constexpr int kRowCount = 6;
-    constexpr int kTopPad = 8;
-    const int available = layout.status_panel.h - kTopPad - kVolRowH - kVuRowH - kStatusButtonBlockH;
-    return std::clamp(available / kRowCount, 16, 30);
+    const int top_pad = px(8);
+    const int available = layout.status_panel.h - top_pad - px(kVolRowH) - px(kVuRowH) -
+                          px(kStatusButtonBlockH);
+    return std::clamp(available / kRowCount, px(16), px(30));
 }
 
 SDL_Rect volume_track_rect(const Layout & layout)
 {
     constexpr int kRowCount = 6;
     const int row_height = status_row_height(layout);
-    const int grid_bottom = layout.status_panel.y + 8 + kRowCount * row_height;
-    return {layout.status_panel.x + 50, grid_bottom + 6,
-            layout.status_panel.w - 105, 7};
+    const int grid_bottom = layout.status_panel.y + px(8) + kRowCount * row_height;
+    return {layout.status_panel.x + px(50), grid_bottom + px(6),
+            layout.status_panel.w - px(105), px(7)};
 }
 
 int volume_from_x(const SDL_Rect & track, int x)
@@ -3075,7 +3104,7 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
         "Service", "Video", "Audio", "MOD/FEC", "Null", "BER"
     };
     const int row_height = status_row_height(layout);
-    const int left_x = layout.status_panel.x + 10;
+    const int left_x = layout.status_panel.x + px(10);
     /* Column x-positions and value-column widths scale with the panel's
      * actual width rather than a fixed pixel layout - at 1024x600 this
      * panel is ~475px wide (the reference these proportions were tuned
@@ -3089,7 +3118,7 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     constexpr int kRowCount = 6;
     const int kValueX = layout.status_panel.w * 95 / kReferencePanelW;
     const int kNumberColumnWidth = layout.status_panel.w * 82 / kReferencePanelW;
-    const int kUnitGap = std::max(4, layout.status_panel.w * 8 / kReferencePanelW);
+    const int kUnitGap = std::max(px(4), layout.status_panel.w * 8 / kReferencePanelW);
     const auto draw_value = [&](const StatusField & field, int column_x, int y) {
         if(field.unit.empty()) {
             if(field.right_align) {
@@ -3110,18 +3139,18 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
         text.draw(field.unit, number_right + kUnitGap, y, kTextDim, kFontSize);
     };
     for(int i = 0; i < kRowCount; ++i) {
-        const int y = layout.status_panel.y + 8 + i * row_height;
+        const int y = layout.status_panel.y + px(8) + i * row_height;
         text.draw(left_labels[i], left_x, y, kTextDim, kFontSize);
         draw_value(left[i], left_x, y);
         text.draw(right_labels[i], right_x, y, kTextDim, kFontSize);
         draw_value(right[i], right_x, y);
     }
 
-    const int grid_bottom = layout.status_panel.y + 8 + kRowCount * row_height;
-    text.draw("VOL", left_x, grid_bottom, kTextDim);
+    const int grid_bottom = layout.status_panel.y + px(8) + kRowCount * row_height;
+    text.draw("VOL", left_x, grid_bottom, kTextDim, px(14));
     text.draw(std::to_string(volume_percent) + "%",
-              layout.status_panel.x + layout.status_panel.w - 46,
-              grid_bottom, kText);
+              layout.status_panel.x + layout.status_panel.w - px(46),
+              grid_bottom, kText, px(14));
     const SDL_Rect track = volume_track_rect(layout);
     set_colour(renderer, kBorder);
     SDL_RenderFillRect(renderer, &track);
@@ -3130,13 +3159,13 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     set_colour(renderer, {0x2b, 0x8e, 0xa3});
     SDL_RenderFillRect(renderer, &filled);
     set_colour(renderer, {0x65, 0xb7, 0xc7});
-    constexpr int kVolumeKnobRadius = 7;
+    const int kVolumeKnobRadius = px(7);
     const int knob_x = track.x + filled.w;
     for(int y = -kVolumeKnobRadius; y <= kVolumeKnobRadius; ++y) {
         const int half = static_cast<int>(
             std::sqrt(kVolumeKnobRadius * kVolumeKnobRadius - y * y));
-        SDL_RenderDrawLine(renderer, knob_x - half, track.y + 3 + y,
-                           knob_x + half, track.y + 3 + y);
+        SDL_RenderDrawLine(renderer, knob_x - half, track.y + track.h / 2 + y,
+                           knob_x + half, track.y + track.h / 2 + y);
     }
 
     /* VU meter: fast attack (jumps straight to a new louder peak), slow
@@ -3147,12 +3176,12 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
      * of implying headroom past where the volume is actually set. */
     static int displayed_peak = 0;
     displayed_peak = std::max(audio_peak_percent, displayed_peak - 3);
-    const int vu_row_y = grid_bottom + kVolRowH;
+    const int vu_row_y = grid_bottom + px(kVolRowH);
     constexpr int kVuSegments = 20;
-    constexpr int kVuGap = 3;
+    const int kVuGap = px(3);
     const int vu_row_w = std::min(track.w, filled.w + kVolumeKnobRadius);
     const int vu_segment_w = (vu_row_w - (kVuSegments - 1) * kVuGap) / kVuSegments;
-    const SDL_Rect vu_row{track.x, vu_row_y, vu_row_w, 14};
+    const SDL_Rect vu_row{track.x, vu_row_y, vu_row_w, px(14)};
     const int lit_segments = (displayed_peak * kVuSegments + 99) / 100;
     for(int i = 0; i < kVuSegments; ++i) {
         const Colour segment_colour = i >= kVuSegments * 9 / 10 ? kRed
@@ -3167,7 +3196,7 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
     const Colour colours[] = {kCyan, kYellow, kPurple, kGreen, kRed};
     for(int i = 0; i < kStatusButtonCount; ++i) {
         const SDL_Rect button = status_button_rect(layout, i);
-        draw_button(renderer, text, button, labels[i], colours[i], 16,
+        draw_button(renderer, text, button, labels[i], colours[i], px(16),
                     i == 2 && scan_active, is_pressed(touch, button));
     }
 }
@@ -3247,19 +3276,19 @@ void draw_fullscreen_video(SDL_Renderer * renderer, TextCache & text,
  * tacked on at a different width. */
 SDL_Rect tune_back_button_rect(int width, int height)
 {
-    constexpr int kPad = 16;
-    constexpr int kRightColW = 190;
+    const int kPad = px(16);
+    const int kRightColW = px(190);
     const int right_col_x = width - kPad - kRightColW;
     /* Same inset as the preset buttons above it (tune_preset_button_rect). */
-    return {right_col_x + 8, height - kPad - kStatusButtonHeight,
-            kRightColW - 16, kStatusButtonHeight};
+    return {right_col_x + px(8), height - kPad - px(kStatusButtonHeight),
+            kRightColW - px(16), px(kStatusButtonHeight)};
 }
 
 /* Hard ceiling regardless of how much space is actually available (see
  * tune_preset_capacity) - just a sanity backstop, not expected to bind in
  * practice. */
 constexpr size_t kMaxTunePresets = 8;
-constexpr int kTunePresetGap = 8;
+constexpr int kTunePresetGap = 8;   /* design pixels, used through px() */
 
 /* How long the "SAVED ..." toast (see draw_tune_page) stays up after a
  * long-press overwrite, including its fade-out - shared between main()
@@ -3279,19 +3308,19 @@ constexpr int kTuneStatusRows = 5;
 int tune_status_row_height(int width) { (void)width; return ui().tune.status_row_h; }
 int tune_status_card_height(int width)
 {
-    return 30 + kTuneStatusRows * tune_status_row_height(width) + 10;
+    return px(30) + kTuneStatusRows * tune_status_row_height(width) + px(10);
 }
 
 SDL_Rect tune_presets_card_rect(int width, int height)
 {
-    constexpr int kPad = 16;
-    constexpr int kRightColW = 190;
+    const int kPad = px(16);
+    const int kRightColW = px(190);
     const int status_h = tune_status_card_height(width);
     const int right_col_x = width - kPad - kRightColW;
     const int status_card_y = kPad;
     const SDL_Rect back_button = tune_back_button_rect(width, height);
-    return {right_col_x, status_card_y + status_h + 10,
-            kRightColW, back_button.y - 10 - (status_card_y + status_h + 10)};
+    return {right_col_x, status_card_y + status_h + px(10),
+            kRightColW, back_button.y - px(10) - (status_card_y + status_h + px(10))};
 }
 
 /* The 800x480 presets card is much shorter than the 1024x600 one's (see
@@ -3318,7 +3347,7 @@ int tune_preset_capacity(int width, int height)
 {
     const SDL_Rect card = tune_presets_card_rect(width, height);
     const int button_h = tune_preset_button_height(width);
-    const int n = (card.h - kTunePresetGap) / (button_h + kTunePresetGap);
+    const int n = (card.h - px(kTunePresetGap)) / (button_h + px(kTunePresetGap));
     return std::clamp(n, 2, static_cast<int>(kMaxTunePresets));
 }
 
@@ -3336,7 +3365,7 @@ SDL_Rect tune_preset_button_rect(int width, int height, int index, int count)
     const int button_h = tune_preset_button_height(width);
     const int gap = (card.h - count * button_h) / (count + 1);
     const int y = card.y + gap * (index + 1) + button_h * index;
-    return {card.x + 8, y, card.w - 16, button_h};
+    return {card.x + px(8), y, card.w - px(16), button_h};
 }
 
 /* The MiniTiouner's tuner front end only goes up to ~2450MHz (longmynd
@@ -3449,9 +3478,9 @@ TuneFreqMetrics tune_freq_metrics(int width)
 void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card,
                            SDL_Rect & sr_card, SDL_Rect & rf_card)
 {
-    constexpr int kPad = 16;
-    constexpr int kGap = 12;
-    constexpr int kRightColW = 190;
+    const int kPad = px(16);
+    const int kGap = px(12);
+    const int kRightColW = px(190);
     const int content_y = kPad;
     const int content_h = height - content_y - kPad;
     const int main_col_w = width - kPad - kGap - kRightColW - kPad;
@@ -3465,7 +3494,7 @@ void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card,
      * tune_freq_metrics/tune_freq_wheel_centre_x); what's left is shared
      * between the symbol rate and the RF port A/B card. */
     const TuneFreqMetrics m = tune_freq_metrics(width);
-    const int freq_w = 7 * m.wheel_w + 10 + 8 + ui().tune.freq_card_extra_w;
+    const int freq_w = 7 * m.wheel_w + px(10) + px(8) + ui().tune.freq_card_extra_w;
     const int rf_w = ui().tune.rf_card_w;
     const int sr_w = main_col_w - 2 * kGap - freq_w - rf_w;
     freq_card = {kPad, lower_y, freq_w, lower_h};
@@ -3486,10 +3515,10 @@ SDL_Rect tune_rf_button_rect(int width, int height, int port)
 {
     SDL_Rect freq_card, sr_card, rf_card;
     tune_lower_cards_rect(width, height, freq_card, sr_card, rf_card);
-    constexpr int kTop = 30, kBottomPad = 8, kGap = 6;
+    const int kTop = px(30), kBottomPad = px(8), kGap = px(6);
     const int button_h = (rf_card.h - kTop - kBottomPad - kGap) / 2;
-    return {rf_card.x + 10, rf_card.y + kTop + port * (button_h + kGap),
-            rf_card.w - 20, button_h};
+    return {rf_card.x + px(10), rf_card.y + kTop + port * (button_h + kGap),
+            rf_card.w - px(20), button_h};
 }
 
 /* Shared by the drawing code and the tap-to-fullscreen hit-test below -
@@ -3498,9 +3527,9 @@ SDL_Rect tune_rf_button_rect(int width, int height, int port)
  * panel does above its own status row. */
 SDL_Rect tune_video_panel_rect(int width, int height)
 {
-    constexpr int kPad = 16;
-    constexpr int kGap = 12;
-    constexpr int kRightColW = 190;
+    const int kPad = px(16);
+    const int kGap = px(12);
+    const int kRightColW = px(190);
     const int content_y = kPad;
     const int main_col_w = width - kPad - kGap - kRightColW - kPad;
     SDL_Rect freq_card, sr_card;
@@ -3513,13 +3542,15 @@ SDL_Rect tune_video_panel_rect(int width, int height)
  * (dot inserted after digit index 3, i.e. before the 5th digit). */
 int tune_freq_wheel_centre_x(const SDL_Rect & freq_card, int wheel_w, int index)
 {
-    const int total_w = 7 * wheel_w + 10 /* dot */ + 4 * 2 /* small gaps */;
+    const int dot_w = px(10);
+    const int small_gap = px(2);
+    const int total_w = 7 * wheel_w + dot_w + 4 * small_gap;
     int cursor_x = freq_card.x + (freq_card.w - total_w) / 2;
     for(int i = 0; i < index; ++i) {
-        if(i == 4) cursor_x += 10;
-        cursor_x += wheel_w + 2;
+        if(i == 4) cursor_x += dot_w;
+        cursor_x += wheel_w + small_gap;
     }
-    if(index == 4) cursor_x += 10;
+    if(index == 4) cursor_x += dot_w;
     return cursor_x + wheel_w / 2;
 }
 
@@ -3528,7 +3559,7 @@ SDL_Rect tune_freq_wheel_rect(int width, int height, int index)
     SDL_Rect freq_card, sr_card;
     tune_lower_cards_rect(width, height, freq_card, sr_card);
     const TuneFreqMetrics m = tune_freq_metrics(width);
-    const int wheel_y = freq_card.y + 22 + (freq_card.h - 22 - m.wheel_h) / 2;
+    const int wheel_y = freq_card.y + px(22) + (freq_card.h - px(22) - m.wheel_h) / 2;
     const int cx = tune_freq_wheel_centre_x(freq_card, m.wheel_w, index);
     return {cx - m.wheel_w / 2, wheel_y, m.wheel_w, m.wheel_h};
 }
@@ -3537,7 +3568,7 @@ SDL_Rect tune_freq_wheel_rect(int width, int height, int index)
  * clipping - measured against DSEG7-Classic-Bold's actual glyph widths
  * (see tune_freq_metrics), not point size, same reasoning as there. Font
  * size must be in the preloaded seven-segment size list in main(). */
-int tune_sr_font_size(int width) { (void)width; return 36; }
+int tune_sr_font_size(int width) { (void)width; return px(36); }
 
 /* Manual Tune page. The frequency digit wheels (drag) and symbol rate
  * (tap/wheel) debounce into a real apply_tune - see kTuneApplyDebounce
@@ -3569,9 +3600,9 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderFillRect(renderer, &screen);
 
     /* ---- layout ---- */
-    constexpr int kPad = 16;
-    constexpr int kGap = 12;
-    constexpr int kRightColW = 190;
+    const int kPad = px(16);
+    const int kGap = px(12);
+    const int kRightColW = px(190);
     const int content_y = kPad;
     const int main_col_x = kPad;
     const int main_col_w = width - kPad - kGap - kRightColW - kPad;
@@ -3588,8 +3619,8 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     tune_lower_cards_rect(width, height, freq_card, sr_card, rf_card);
     const SDL_Rect video_panel = tune_video_panel_rect(width, height);
     fill_panel(renderer, video_panel);
-    const SDL_Rect video_inner{video_panel.x + 6, video_panel.y + 6,
-                               video_panel.w - 12, video_panel.h - 12};
+    const SDL_Rect video_inner{video_panel.x + px(6), video_panel.y + px(6),
+                               video_panel.w - px(12), video_panel.h - px(12)};
     set_colour(renderer, kPanel);
     SDL_RenderFillRect(renderer, &video_inner);
     /* Real decoded picture, same texture/notice plumbing as the main
@@ -3611,16 +3642,17 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
      * page's minor labels (e.g. "PRESETS"). The interaction hint that used
      * to run as its own row along the bottom of the card is folded into
      * the title instead, so the card can be that much shorter. */
-    text.draw("FREQUENCY (MHz, drag digits)", freq_card.x + 12, freq_card.y + 10, kText, 14);
+    text.draw("FREQUENCY (MHz, drag digits)", freq_card.x + px(12), freq_card.y + px(10), kText,
+              px(14));
     /* The SR card is much narrower than the freq one (see
      * tune_lower_cards_rect - it only ever holds a short number), and
      * this is the longer of the two titles - too wide for the 800-wide
      * card's title row at the same size as the other one. */
-    text.draw("SR (kS/s) (tap)", sr_card.x + 12, sr_card.y + 10, kText,
+    text.draw("SR (kS/s) (tap)", sr_card.x + px(12), sr_card.y + px(10), kText,
               ui().tune.small_title_font);
     /* RF port: A = TOP F-connector (default), B = BOTTOM. The filled one is
      * the port in use - see tune_rf_port in main(). */
-    text.draw("RF port", rf_card.x + 12, rf_card.y + 10, kText,
+    text.draw("RF port", rf_card.x + px(12), rf_card.y + px(10), kText,
               ui().tune.small_title_font);
     for(int port = 0; port < 2; ++port) {
         const SDL_Rect button = tune_rf_button_rect(width, height, port);
@@ -3640,11 +3672,11 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
      * allows - no ghost prev/next digits either, for the same reason. */
     {
         const TuneFreqMetrics m = tune_freq_metrics(width);
-        const int wheel_y = freq_card.y + 22 + (freq_card.h - 22 - m.wheel_h) / 2;
+        const int wheel_y = freq_card.y + px(22) + (freq_card.h - px(22) - m.wheel_h) / 2;
         int dot_cx = 0;
         for(int i = 0; i < 7; ++i) {
             const int cx = tune_freq_wheel_centre_x(freq_card, m.wheel_w, i);
-            if(i == 4) dot_cx = cx - m.wheel_w / 2 - 6;
+            if(i == 4) dot_cx = cx - m.wheel_w / 2 - px(6);
             const int d = tune_digits[i];
             /* Leading zero dimmed, like a real frequency counter's
              * unlit leading digit - only ever the very first digit (see
@@ -3667,14 +3699,14 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
      * above) rather than repeated next to the value, same reasoning as
      * the frequency digits. */
     text.draw(kTuneSrRates[tune_sr_index], sr_card.x + sr_card.w / 2,
-              sr_card.y + (sr_card.h + 22) / 2, kText, tune_sr_font_size(width),
+              sr_card.y + (sr_card.h + px(22)) / 2, kText, tune_sr_font_size(width),
               true, false, true);
 
     /* ---- right column: status + presets, full page height ----
      * Same 14px size as the main page's stream-info grid (draw_status's
      * kFontSize for its narrow/800-wide case) - this column is similarly
      * narrow, so no reason for it to run smaller text than that page. */
-    constexpr int kStatusFontSize = 14;
+    const int kStatusFontSize = px(14);
     const int status_row_h = tune_status_row_height(width);
     const int status_h = tune_status_card_height(width);
     const SDL_Rect status_card{right_col_x, content_y, kRightColW, status_h};
@@ -3683,10 +3715,10 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
      * draw_status (see ModcodEntry/kDvbsModcod/kDvbs2Modcod above) - only
      * presets below are still a placeholder. */
     const bool locked = receiver.locked();
-    text.draw(locked ? "LOCKED" : "NO LOCK", status_card.x + 22, status_card.y + 10,
+    text.draw(locked ? "LOCKED" : "NO LOCK", status_card.x + px(22), status_card.y + px(10),
               locked ? kGreen : kTextDim, kStatusFontSize);
     set_colour(renderer, locked ? kGreen : kTextDim);
-    const SDL_Rect lock_dot{status_card.x + 10, status_card.y + 15, 7, 7};
+    const SDL_Rect lock_dot{status_card.x + px(10), status_card.y + px(15), px(7), px(7)};
     SDL_RenderFillRect(renderer, &lock_dot);
     const ModcodEntry * modcod = nullptr;
     if(locked && receiver.modcod >= 0) {
@@ -3708,7 +3740,7 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     }
     if(modcod != nullptr)
         std::snprintf(modfec_text, sizeof(modfec_text), "%s %s", modcod->modulation, modcod->fec);
-    const int row_y = status_card.y + 34;
+    const int row_y = status_card.y + px(34);
     /* Names come from the transmitting station and can be long: shrink to
      * font 12 and cut with ".." to whatever width is left after the label. */
     const auto fit_to_width = [&](std::string value, int font_size, int max_width) {
@@ -3721,10 +3753,10 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
         }
         return value + "..";
     };
-    constexpr int kNameFontSize = 12;
+    const int kNameFontSize = px(12);
     /* Width left for a value: the card minus its margins, the label, and a gap. */
     const auto value_room = [&](const char * label) {
-        return status_card.w - 20 - text.measure(label, kStatusFontSize).first - 8;
+        return status_card.w - px(20) - text.measure(label, kStatusFontSize).first - px(8);
     };
     const std::string service_text = locked
         ? fit_to_width(receiver.service_name, kNameFontSize, value_room("SERVICE")) : std::string("---");
@@ -3735,12 +3767,12 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     for(int i = 0; i < kTuneStatusRows; ++i) {
         const int y = row_y + i * status_row_h;
         const int value_font = i >= 3 ? kNameFontSize : kStatusFontSize;
-        text.draw(labels[i], status_card.x + 10, y, kTextDim, kStatusFontSize);
+        text.draw(labels[i], status_card.x + px(10), y, kTextDim, kStatusFontSize);
         const auto [value_w, value_h] = text.measure(values[i], value_font);
         (void)value_h;
         /* The smaller name font sits a little lower: line its baseline up. */
-        text.draw(values[i], status_card.x + status_card.w - 10 - value_w,
-                  y + (i >= 3 ? 1 : 0), kText, value_font);
+        text.draw(values[i], status_card.x + status_card.w - px(10) - value_w,
+                  y + (i >= 3 ? px(1) : 0), kText, value_font);
     }
 
     /* Leaves room below for the back button (tune_back_button_rect),
@@ -3771,14 +3803,14 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
         const bool is_current = preset.if_khz == current_if_khz &&
                                 preset.symbol_rate_ksps == current_sr_ksps &&
                                 preset.rf_port == tune_rf_port;
-        draw_button(renderer, text, button, tune_format_if_khz(preset.if_khz), kCyan, 20,
+        draw_button(renderer, text, button, tune_format_if_khz(preset.if_khz), kCyan, px(20),
                    is_current, is_pressed(touch, button));
     }
 
     /* Back to the main dashboard - same look as that page's own CHAT/SET/
      * SCAN/TUNE/EXIT row (see draw_button/draw_status), styled green to
      * match the TUNE button that opens this page. */
-    draw_button(renderer, text, back_button, "QO-100", kGreen, 16,
+    draw_button(renderer, text, back_button, "QO-100", kGreen, px(16),
                false, is_pressed(touch, back_button));
 
     /* "SAVED ..." toast after a long-press preset overwrite (see
@@ -3798,13 +3830,13 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
         /* Centred on the whole screen rather than pinned near the top -
          * unmissable rather than a subtle corner notice, but no longer as big as
          * it was (font 48): 32 is the next size down that's preloaded. */
-        constexpr int kToastFontSize = 32;
+        const int kToastFontSize = px(32);
         const auto [text_w, text_h] = text.measure(toast_text, kToastFontSize);
         (void)text_h;
-        const SDL_Rect toast{(width - text_w - 90) / 2, (height - 76) / 2,
-                             text_w + 90, 76};
-        fill_rounded_rect(renderer, toast, 24, {0x14, 0x2a, 0x1c, alpha});
-        draw_rounded_rect(renderer, toast, 24, {kGreen.r, kGreen.g, kGreen.b, alpha});
+        const SDL_Rect toast{(width - text_w - px(90)) / 2, (height - px(76)) / 2,
+                             text_w + px(90), px(76)};
+        fill_rounded_rect(renderer, toast, px(24), {0x14, 0x2a, 0x1c, alpha});
+        draw_rounded_rect(renderer, toast, px(24), {kGreen.r, kGreen.g, kGreen.b, alpha});
         text.draw(toast_text, toast.x + toast.w / 2, toast.y + toast.h / 2,
                  {kGreen.r, kGreen.g, kGreen.b, alpha}, kToastFontSize, true);
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
@@ -4984,7 +5016,7 @@ int main(int argc, char ** argv)
                      * ~2450MHz, so a leading 3-9 could never be a real
                      * frequency anyway. */
                     const int digit_span = tune_digit_max(tune_drag_index) + 1;
-                    const int steps = (tune_drag_start_y - touch.y) / 36;
+                    const int steps = (tune_drag_start_y - touch.y) / px(36);
                     const int new_value =
                         ((tune_drag_start_value + steps) % digit_span + digit_span) % digit_span;
                     if(new_value != tune_digits[tune_drag_index]) {
@@ -5080,8 +5112,8 @@ int main(int argc, char ** argv)
             if(event.type == SDL_MOUSEMOTION && chat_history_dragging &&
                !chat_client.state().lines.empty()) {
                 const int delta_y = event.motion.y - chat_drag_start_y;
-                if(std::abs(delta_y) >= 8) chat_history_drag_moved = true;
-                const int message_steps = delta_y / 28;
+                if(std::abs(delta_y) >= px(8)) chat_history_drag_moved = true;
+                const int message_steps = delta_y / px(28);
                 const int64_t requested = static_cast<int64_t>(chat_drag_start_first) -
                                           message_steps;
                 chat_first_visible = static_cast<size_t>(std::clamp<int64_t>(
@@ -5412,8 +5444,8 @@ int main(int argc, char ** argv)
                            display.width, display.height, tune_preset_press_row,
                            std::min(static_cast<int>(tune_presets.size()),
                                    tune_preset_capacity(display.width, display.height)))) &&
-                       std::abs(x - tune_preset_press_start_x) < 12 &&
-                       std::abs(y - tune_preset_press_start_y) < 12) {
+                       std::abs(x - tune_preset_press_start_x) < px(12) &&
+                       std::abs(y - tune_preset_press_start_y) < px(12)) {
                         const int row = tune_preset_press_row;
                         const bool held_long = Clock::now() - tune_preset_press_started_at >=
                                                kLongPressThreshold;
@@ -6041,8 +6073,8 @@ int main(int argc, char ** argv)
         if(app_page == AppPage::Tune && tune_preset_press_row >= 0 &&
            !tune_preset_long_press_fired &&
            Clock::now() - tune_preset_press_started_at >= kLongPressThreshold &&
-           std::abs(touch.x - tune_preset_press_start_x) < 12 &&
-           std::abs(touch.y - tune_preset_press_start_y) < 12) {
+           std::abs(touch.x - tune_preset_press_start_x) < px(12) &&
+           std::abs(touch.y - tune_preset_press_start_y) < px(12)) {
             tune_preset_long_press_fired = true;
             const int row = tune_preset_press_row;
             tune_presets[row].if_khz = tune_digits_to_if_khz(tune_digits);

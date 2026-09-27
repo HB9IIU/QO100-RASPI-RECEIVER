@@ -31,8 +31,11 @@ int main()
     std::printf("profile selection\n");
     check(picks(800, 480, "800x480"), "800x480 screen gets its own row");
     check(picks(1024, 600, "1024x600"), "1024x600 screen gets its own row");
-    check(picks(1280, 720, "1024x600"), "bigger screen gets the largest row that fits");
+    check(picks(1280, 720, "1280x720"), "1280x720 screen gets its own row");
+    check(picks(1920, 1080, "1280x720"), "bigger screen gets the largest row that fits");
     check(picks(1024, 768, "1024x600"), "taller screen gets the row that fits");
+    check(picks(1280, 800, "1280x720"), "16:10 screen gets the row that fits");
+    check(picks(1366, 700, "1024x600"), "too short for 1280x720 falls back a row");
     check(picks(1023, 600, "800x480"), "one pixel too narrow falls back a row");
     check(picks(640, 480, "800x480"), "smaller than every row gets the smallest");
 
