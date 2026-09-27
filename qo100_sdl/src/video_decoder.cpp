@@ -1,5 +1,6 @@
 #include "video_decoder.h"
 #include "app_log.h"
+#include "ts_address.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -46,16 +47,12 @@ bool hardware_decode_allowed()
     return value == nullptr || std::strcmp(value, "0") != 0;
 }
 
-/* Must match receiver.cpp's ts_destination_address()/ts_destination_port()
- * defaults - this is the receiving end of the same UDP feed Longmynd sends
- * to. Overridable via the same QO100_TS_ADDR/QO100_TS_PORT env vars in case
- * the multicast group needs to change (e.g. to avoid a clash on the LAN). */
+/* The receiving end of the UDP feed longmynd sends to - the same address
+ * and port (see ts_address.h). */
 std::string input_url()
 {
-    const char * address = std::getenv("QO100_TS_ADDR");
-    const char * port = std::getenv("QO100_TS_PORT");
-    return "udp://" + std::string(address != nullptr ? address : "239.1.1.1") +
-        ":" + std::string(port != nullptr ? port : "5600") +
+    return "udp://" + qo100::ts_stream_address() + ":" +
+        std::to_string(qo100::ts_stream_port()) +
         "?fifo_size=65536&overrun_nonfatal=1&buffer_size=4194304&timeout=1000000";
 }
 constexpr AVRational kMicrosecondTimeBase{1, 1000000};

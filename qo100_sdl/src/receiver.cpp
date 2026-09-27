@@ -1,5 +1,6 @@
 #include "receiver.h"
 #include "app_log.h"
+#include "ts_address.h"
 
 #include <json-c/json.h>
 #include <libwebsockets.h>
@@ -36,23 +37,6 @@ namespace {
 constexpr int kWebsocketPort = 8765;
 constexpr auto kReconnectInterval = std::chrono::milliseconds(250);
 constexpr size_t kMaxPendingCommands = 16;
-
-/* Destination the transport stream is sent to. Defaults to a multicast
- * group so a second device on the LAN can watch the same feed in VLC
- * (udp://@<addr>:<port>); override via env if that clashes with something
- * else on the network, or set back to 127.0.0.1 for loopback-only. Must
- * match video_decoder.cpp's kInputUrl on the receiving end. */
-std::string ts_destination_address()
-{
-    const char * value = std::getenv("QO100_TS_ADDR");
-    return value != nullptr ? value : "239.1.1.1";
-}
-
-int ts_destination_port()
-{
-    const char * value = std::getenv("QO100_TS_PORT");
-    return value != nullptr ? std::atoi(value) : 5600;
-}
 
 bool websocket_server_ready()
 {
@@ -161,8 +145,7 @@ bool pid_matches_binary(int pid, const std::string & expected_binary)
 
 std::string ts_stream_vlc_url()
 {
-    return "udp://@" + ts_destination_address() + ":" +
-        std::to_string(ts_destination_port());
+    return "udp://@" + ts_stream_address() + ":" + std::to_string(ts_stream_port());
 }
 
 ReceiverSettings load_receiver_settings(const std::string & repository_root)
@@ -368,8 +351,9 @@ bool LongmyndProcess::start(long frequency_khz, long symbol_rate_ksps)
         std::remove(pid_path_.c_str());
     }
 
-    const std::string ts_address = ts_destination_address();
-    const int ts_port = ts_destination_port();
+    /* Where the stream goes - see ts_address.h. */
+    const std::string ts_address = ts_stream_address();
+    const int ts_port = ts_stream_port();
 
     const pid_t child = fork();
     if(child < 0) {

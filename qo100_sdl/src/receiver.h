@@ -114,8 +114,8 @@ bool save_tune_presets(const std::string & repository_root,
                        const std::vector<TunePreset> & presets);
 
 /* Network stream URL to paste into VLC (Media > Open Network Stream) to
- * watch the same feed the app is decoding, e.g. "udp://@239.1.1.1:5600".
- * Reflects QO100_TS_ADDR/QO100_TS_PORT if set, otherwise the defaults. */
+ * watch the same feed the app is decoding, e.g. "udp://@239.1.37.142:5600" -
+ * this Pi's own multicast group (see ts_address.h). */
 std::string ts_stream_vlc_url();
 
 struct ReceiverStatus {

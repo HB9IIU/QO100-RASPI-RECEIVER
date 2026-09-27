@@ -4188,6 +4188,7 @@ int main(int argc, char ** argv)
     g_ui_profile = &qo100::ui_profile_for(display.width, display.height);
     qo100::log("[DISPLAY] %dx%d, layout profile %s\n",
                display.width, display.height, ui().name);
+    qo100::log("[TS] stream %s\n", qo100::ts_stream_vlc_url().c_str());
     /* The SET page greys out the resolutions that don't fit the real screen
      * (display.native_width/height), so a too-big layout can't be picked in
      * the first place. Under QO100_DISPLAY "native" is whatever was pinned;
