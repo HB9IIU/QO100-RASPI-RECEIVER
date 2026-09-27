@@ -26,6 +26,7 @@ rtl-sdr-server-source/reports/
 # Vendored third-party deps (large, fetch separately if needed)
 qo100_lvgl/lvgl/
 longmynd_ws/web/libwebsockets/
+PicoTuner/
 
 # Compiled binaries from longmynd_ws
 longmynd_ws/longmynd
