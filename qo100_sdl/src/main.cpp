@@ -4416,17 +4416,36 @@ int main(int argc, char ** argv)
 
     bool running = true;
     AppPage app_page = AppPage::Main;
-    /* DEVELOPMENT AID, screenshot mode only (--screenshot): QO100_SCREENSHOT_PAGE=lnbcal
-     * (or tune) opens the LNB calibration (or Manual Tune) page and QO100_SCREENSHOT_LOCAL=1 pretends the
-     * local RTL-SDR is the spectrum source, so the page's layout can be
-     * checked at both screen sizes without a receiver. Ignored in normal use. */
-    if(!options.screenshot.empty()) {
-        const char * page = std::getenv("QO100_SCREENSHOT_PAGE");
-        if(page != nullptr && std::strcmp(page, "lnbcal") == 0) app_page = AppPage::LnbCal;
-        else if(page != nullptr && std::strcmp(page, "tune") == 0) app_page = AppPage::Tune;
-        const char * local = std::getenv("QO100_SCREENSHOT_LOCAL");
-        if(local != nullptr && local[0] == '1') spectrum_source_local = true;
-    }
+    /* DEVELOPMENT AID, screenshot mode only (--screenshot), so every page's
+     * layout can be checked at every screen size without a receiver.
+     * Ignored in normal use.
+     *   QO100_SCREENSHOT_PAGE   main (default), settings, chat, chatkbd
+     *                           (keyboard open), chatsym (symbol keys), tune,
+     *                           lnbcal, lnbcalrun (a run in progress),
+     *                           fullscreen
+     *   QO100_SCREENSHOT_POPUP  a popup on top of the page: tuner, notuner,
+     *                           update, updating, updatefail, rtlask,
+     *                           lnbprompt, sourceok, sourcefail
+     *   QO100_SCREENSHOT_LOCAL=1  pretend the local RTL-SDR is the spectrum
+     *                           source
+     *   QO100_SCREENSHOT_STATIC=1 fixed sample data (spectrum, receiver
+     *                           status, chat) instead of the live feeds, and
+     *                           no waiting for them - two runs then render
+     *                           identically, so a layout change can be
+     *                           checked pixel for pixel against the old one
+     *                           (see screenshot_static below). */
+    const auto screenshot_env = [&](const char * name) {
+        const char * value = options.screenshot.empty() ? nullptr : std::getenv(name);
+        return std::string(value != nullptr ? value : "");
+    };
+    const std::string screenshot_page = screenshot_env("QO100_SCREENSHOT_PAGE");
+    const std::string screenshot_popup = screenshot_env("QO100_SCREENSHOT_POPUP");
+    const bool screenshot_static = screenshot_env("QO100_SCREENSHOT_STATIC") == "1";
+    if(screenshot_page == "lnbcal" || screenshot_page == "lnbcalrun") app_page = AppPage::LnbCal;
+    else if(screenshot_page == "tune") app_page = AppPage::Tune;
+    else if(screenshot_page == "settings") app_page = AppPage::Settings;
+    else if(screenshot_page.rfind("chat", 0) == 0) app_page = AppPage::Chat;
+    if(screenshot_env("QO100_SCREENSHOT_LOCAL") == "1") spectrum_source_local = true;
     bool fullscreen_video = false;
     bool have_video_frame = false;
     int settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
@@ -6306,7 +6325,8 @@ int main(int argc, char ** argv)
         if(options.seconds > 0 && now - run_started >= std::chrono::seconds(options.seconds))
             running = false;
         if(!options.screenshot.empty() && options.seconds == 0 &&
-           ((spectrum_ready && (!options.demo || have_video_frame)) ||
+           (screenshot_static ||
+            (spectrum_ready && (!options.demo || have_video_frame)) ||
             now - run_started >= std::chrono::seconds(5)))
             running = false;
         if((renderer_info.flags & SDL_RENDERER_PRESENTVSYNC) == 0) SDL_Delay(2);
@@ -6322,14 +6342,93 @@ int main(int argc, char ** argv)
     longmynd->stop();
 
     if(!options.screenshot.empty()) {
+        /* Development aid (see QO100_SCREENSHOT_PAGE above). */
+        qo100::ChatState screenshot_chat = chat_client.state();
+        double screenshot_notice_seconds = 0.0;
+        int screenshot_peak = audio_output.peak_percent();
+        std::string video_codec = options.demo ? "DEMO" : video_decoder.codec_name();
+        std::string audio_codec = video_decoder.audio_codec_name();
+        std::string screenshot_tuner = tuner_product;
+        bool screenshot_monitor = receiver_client.monitor_connected();
+        if(screenshot_static) {
+            /* A flat noise floor with the wide beacon and three narrower
+             * carriers on it, in the feed's own units (see draw_spectrum). */
+            std::vector<uint16_t> bins(922);
+            for(size_t i = 0; i < bins.size(); ++i) {
+                const double mhz = kSpectrumStartMhz + kSpectrumSpanMhz * i / bins.size();
+                double db = 1.0 + 0.3 * std::sin(static_cast<double>(i) * 0.7);
+                const auto carrier = [&](double centre, double half_width, double level) {
+                    if(std::fabs(mhz - centre) < half_width) db = std::max(db, level);
+                };
+                carrier(10491.500, 0.75, 7.5);
+                carrier(10494.750, 0.17, 5.0);
+                carrier(10496.000, 0.06, 3.5);
+                carrier(10497.750, 0.25, 6.0);
+                bins[i] = static_cast<uint16_t>((db + kDisplayZeroOffsetDb) * kServerUnitsPerDb);
+            }
+            spectrum_texture->update(bins);
+            spectrum_status = SpectrumStatus::Live;
+            spectrum_marker = {SpectrumMarkerKind::Tune, 10494.750, Clock::now()};
+            selected_frequency_mhz = 10494.750;
+            current_tune_if_khz = 744750;
+            current_tune_symbol_rate_ksps = 333;
+            receiver_status.demod_state = 4;
+            receiver_status.carrier_khz = 744752;
+            receiver_status.mer_x10 = 77;
+            receiver_status.modcod = 5;
+            receiver_status.ber_x100 = 12;
+            receiver_status.null_packet_percent = 3;
+            receiver_status.service_name = "QO-100 DATV";
+            receiver_status.service_provider = "Test card";
+            video_notice = VideoNotice::WaitingForTuner;
+            have_video_frame = false;
+            screenshot_peak = 0;
+            video_codec = "H.264";
+            audio_codec = "MP2";
+            screenshot_tuner = "MiniTiouner-Pro TS2";
+            screenshot_monitor = true;
+            screenshot_chat = qo100::ChatState{};
+            screenshot_chat.connection = qo100::ChatState::Connection::Connected;
+            screenshot_chat.viewers = "42";
+            screenshot_chat.users = {"HB9IIU", "PA3FBX", "G4XYZ", "DL1ABC"};
+            screenshot_chat.lines = {
+                {"12:01", "HB9IIU", "Good morning from Switzerland, the beacon is strong today."},
+                {"12:03", "PA3FBX", "Testing the receiver on a bigger screen - a long message "
+                                    "so the chat wraps over more than one line, as it would for real."},
+                {"12:04", "G4XYZ", "73"}};
+        }
+        if(screenshot_page == "lnbcalrun")
+            lnb_cal.start(Clock::now(), beacon_frequency_khz, beacon_symbol_rate_ksps,
+                          receiver_settings.lnb_lo_mhz);
         set_colour(renderer, kBackground);
         SDL_RenderClear(renderer);
-        /* Development aid (see QO100_SCREENSHOT_PAGE above): the page itself
-         * instead of the main layout. */
         if(app_page == AppPage::LnbCal)
             draw_lnb_cal_page(renderer, text, display.width, display.height, lnb_cal,
                               receiver_settings, rtl_page, true, spectrum_source_local,
-                              system_uptime_minutes(), TouchState{});
+                              screenshot_static ? 600 : system_uptime_minutes(), TouchState{});
+        else if(app_page == AppPage::Settings)
+            draw_settings_page(renderer, text, display.width, display.height,
+                               qo100::lnb_calibrated(receiver_settings)
+                                   ? receiver_settings.lnb_lo_calibrated_mhz
+                                   : receiver_settings.lnb_lo_mhz,
+                               settings_voltage_choice,
+                               settings_display_choice, settings_exit_behaviour_choice,
+                               screenshot_tuner, screenshot_monitor,
+                               can_use_1024x600, qo100::lnb_calibrated(receiver_settings),
+                               TouchState{});
+        else if(app_page == AppPage::Chat) {
+            const ChatInput input = screenshot_page == "chat" ? ChatInput::None : ChatInput::Message;
+            draw_chat_page(renderer, text, display.width, display.height,
+                           screenshot_chat, "HB9IIU", "Hello from the screenshot",
+                           input, screenshot_page == "chatsym", false,
+                           chat_first_visible, chat_last_visible,
+                           chat_follow_latest, TouchState{});
+        }
+        else if(screenshot_page == "fullscreen")
+            draw_fullscreen_video(renderer, text, display.width, display.height,
+                                  video_texture, have_video_frame,
+                                  video_source_width, video_source_height, video_notice,
+                                  screenshot_notice_seconds);
         else if(app_page == AppPage::Tune) {
             /* QO100_SCREENSHOT_SAMPLE=1: fill the status card with sample values
              * (long names included) so its layout can be checked without a signal. */
@@ -6349,7 +6448,8 @@ int main(int argc, char ** argv)
             draw_tune_page(renderer, text, display.width, display.height, TouchState{},
                            tune_digits, tune_sr_index, tune_rf_port,
                            video_texture, have_video_frame,
-                           video_source_width, video_source_height, video_notice, 0.0,
+                           video_source_width, video_source_height, video_notice,
+                           screenshot_notice_seconds,
                            receiver_status, tune_presets,
                            sample_long ? "Pre-set Saved" : std::string(),
                            0.2);
@@ -6366,9 +6466,10 @@ int main(int argc, char ** argv)
                 video_source_width, video_source_height, layout.video_content);
             SDL_RenderCopy(renderer, video_texture, nullptr, &destination);
         }
-        const std::string video_codec = options.demo ? "DEMO" : video_decoder.codec_name();
-        const std::string audio_codec = video_decoder.audio_codec_name();
-        draw_status(renderer, text, layout, volume_percent, audio_output.peak_percent(),
+        if(screenshot_static)
+            draw_video_notice(text, layout.video_content, video_notice,
+                              screenshot_notice_seconds);
+        draw_status(renderer, text, layout, volume_percent, screenshot_peak,
                     receiver_status,
                     receiver_client.monitor_connected(),
                     receiver_client.received_updates() != 0,
@@ -6376,6 +6477,29 @@ int main(int argc, char ** argv)
                     current_tune_symbol_rate_ksps,
                     video_codec, audio_codec, scan_active, TouchState{});
         }
+        /* The popups, same order as the main loop draws them. */
+        const std::string & popup = screenshot_popup;
+        draw_spectrum_source_popup(renderer, text, display.width, display.height,
+            popup == "sourceok" ? SpectrumSourcePopupKind::Success
+            : popup == "sourcefail" ? SpectrumSourcePopupKind::Failed
+            : SpectrumSourcePopupKind::None);
+        draw_lnb_cal_prompt(renderer, text, display.width, display.height,
+                            popup == "lnbprompt" ? LnbCalPromptKind::Ask : LnbCalPromptKind::None,
+                            screenshot_static ? 600 : system_uptime_minutes(),
+                            spectrum_source_local, TouchState{});
+        draw_update_popup(renderer, text, display.width, display.height,
+            popup == "update" ? UpdatePopupKind::Available
+            : popup == "updating" ? UpdatePopupKind::Installing
+            : popup == "updatefail" ? UpdatePopupKind::Failed
+            : UpdatePopupKind::None, TouchState{});
+        draw_rtlsdr_ask_popup(renderer, text, display.width, display.height,
+                              popup == "rtlask" ? RtlSdrAskPopupKind::Ask : RtlSdrAskPopupKind::None,
+                              TouchState{});
+        draw_tuner_popup(renderer, text, display.width, display.height,
+                         popup == "tuner" ? TunerPopupKind::Detected
+                         : popup == "notuner" ? TunerPopupKind::NotFound
+                         : TunerPopupKind::None,
+                         screenshot_tuner, TouchState{});
         SDL_RenderPresent(renderer);
         if(!save_screenshot(renderer, display.width, display.height, options.screenshot))
             qo100::log( "[SCREENSHOT] failed to save %s\n", options.screenshot.c_str());
