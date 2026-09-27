@@ -171,8 +171,11 @@ scripts/initialSetup.sh
   cannot power an LNB, so local reception also requires a suitable external
   bias tee/power injector (normally 18 V for the QO-100 wideband transponder)
   unless the LNB is already powered elsewhere.
-- A touchscreen — either the official 800x480 Raspberry Pi touchscreen or
-  a 1024x600 DSI panel (switchable any time from **SET** in the app).
+- A touchscreen or HDMI screen: 800x480 (the official Raspberry Pi 7"
+  touchscreen), 1024x600 (common 7" DSI/HDMI panels) or 1280x720 (e.g. the
+  Raspberry Pi Touch Display 2, rotated to landscape). The app picks the
+  largest layout that fits on first start; it can be switched any time from
+  **SET**. A bigger screen shows the 1280x720 layout centred.
 - Something to play audio through. The Pi 5 has no 3.5mm audio jack (the
   Pi 4 does); either way, a DSI touchscreen has no speaker of its own, so
   there's no built-in audio output for a Pi 5 kiosk setup like this one —

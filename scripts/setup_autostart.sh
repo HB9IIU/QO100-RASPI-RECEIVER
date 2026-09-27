@@ -27,9 +27,10 @@
 #
 # Usage: scripts/setup_autostart.sh [WxH]
 #   No argument (the normal case): resolution comes from settings.json's
-#   display_800x480 (defaults to 1024x600), read fresh on every launch by
-#   qo100_sdl/service_launch.sh - this is what lets the SET page's resolution
-#   choice take effect on its own restart, no need to re-run this script.
+#   "display" (the SET page's choice; the largest layout that fits the
+#   screen on a first run), read fresh on every launch by the app itself -
+#   this is what lets the SET page's resolution choice take effect on its
+#   own restart, no need to re-run this script.
 #   e.g. "800x480": pins the unit to that resolution regardless of what's
 #   saved in settings.json - for a genuinely different physical panel, not
 #   the normal way to switch resolution. See main.cpp's QO100_DISPLAY

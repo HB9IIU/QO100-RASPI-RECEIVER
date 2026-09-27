@@ -197,8 +197,14 @@ ReceiverSettings load_receiver_settings(const std::string & repository_root)
         settings.lnb_voltage_horizontal = json_object_get_boolean(value);
     if(json_object_object_get_ex(root, "audio_volume_percent", &value))
         settings.audio_volume_percent = json_object_get_int(value);
-    if(json_object_object_get_ex(root, "display_800x480", &value))
-        settings.display_800x480 = json_object_get_boolean(value);
+    /* "display" replaced the display_800x480 flag (false meant 1024x600),
+     * which is still read from a settings.json saved before 1280x720. */
+    if(json_object_object_get_ex(root, "display", &value)) {
+        const char * display = json_object_get_string(value);
+        if(display != nullptr) settings.display = display;
+    }
+    else if(json_object_object_get_ex(root, "display_800x480", &value))
+        settings.display = json_object_get_boolean(value) ? "800x480" : "1024x600";
     if(json_object_object_get_ex(root, "exit_full_stop", &value))
         settings.exit_full_stop = json_object_get_boolean(value);
     json_object_put(root);
@@ -210,7 +216,7 @@ ReceiverSettings load_receiver_settings(const std::string & repository_root)
             : "no",
         settings.lnb_voltage_enabled ? "on" : "off",
         settings.lnb_voltage_horizontal ? "18V" : "13V", settings.audio_volume_percent,
-        settings.display_800x480 ? "800x480" : "1024x600",
+        settings.display.c_str(),
         settings.exit_full_stop ? "full-stop" : "restart");
     return settings;
 }
@@ -243,8 +249,10 @@ bool save_receiver_settings(const std::string & repository_root,
                            json_object_new_boolean(settings.lnb_voltage_horizontal));
     json_object_object_add(root, "audio_volume_percent",
                            json_object_new_int(settings.audio_volume_percent));
+    json_object_object_add(root, "display",
+                           json_object_new_string(settings.display.c_str()));
     json_object_object_add(root, "display_800x480",
-                           json_object_new_boolean(settings.display_800x480));
+                           json_object_new_boolean(settings.display == "800x480"));
     json_object_object_add(root, "exit_full_stop",
                            json_object_new_boolean(settings.exit_full_stop));
     /* Write to a temp file and rename() it over the real path, rather than

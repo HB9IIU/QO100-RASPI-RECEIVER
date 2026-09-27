@@ -43,7 +43,11 @@ struct ReceiverSettings {
     bool lnb_voltage_enabled = false;
     bool lnb_voltage_horizontal = false;
     int audio_volume_percent = 50;
-    bool display_800x480 = false;
+    /* The screen layout chosen on SET, as "WIDTHxHEIGHT" - one of the
+     * screen-size profiles (ui_profile.h). Stored as "display"; also
+     * written as the older display_800x480 flag, which service_launch.sh
+     * and earlier versions of the app read. */
+    std::string display = "1024x600";
     /* false (default): EXIT just exits cleanly, which Restart=always picks
      * back up a few seconds later - a quick restart, the more useful
      * default since novices are unlikely to know they need the desktop

@@ -254,20 +254,24 @@ struct DisplayConfig {
  *      hand); relying on service_launch.sh alone to set QO100_DISPLAY left
  *      the other launch paths silently ignoring the saved choice and
  *      falling back to auto-detect, which could render a layout too big
- *      for the real screen. Clamped to the smaller preset (800x480) if the
+ *      for the real screen. Replaced by the largest layout that fits if the
  *      saved choice doesn't actually fit the real screen - e.g. a stale or
  *      hand-edited settings.json requesting 1024x600 on a genuine 800x480
  *      panel, which otherwise renders the SET button itself off-screen and
- *      unreachable (this happened in practice). The SET page also disables
- *      picking a size that doesn't fit in the first place; this is the
- *      backstop for however a bad value ends up saved anyway.
- *   3. Auto-detected physical screen size, when settings.json doesn't exist
- *      yet (genuine first run) - otherwise a Pi with the smaller 800x480
- *      panel would open a too-big window before the user ever gets a
- *      chance to fix it from SET. Falls back to the 1024x600 reference
- *      size only if SDL can't report a desktop mode at all. */
+ *      unreachable (this happened in practice) - or isn't one of the
+ *      layouts at all. The SET page also disables picking a size that
+ *      doesn't fit in the first place; this is the backstop for however a
+ *      bad value ends up saved anyway.
+ *   3. The largest layout that fits the auto-detected physical screen, when
+ *      settings.json doesn't exist yet (genuine first run) - otherwise a Pi
+ *      with the smaller 800x480 panel would open a too-big window before the
+ *      user ever gets a chance to fix it from SET. Falls back to the
+ *      1024x600 reference size only if SDL can't report a desktop mode at
+ *      all.
+ * The layouts are the screen-size profiles (ui_profile.h). A screen bigger
+ * than the chosen one shows it centred (see main()). */
 DisplayConfig resolve_display_config(bool screenshot_mode, bool settings_file_exists,
-                                      bool saved_800x480)
+                                      const std::string & saved_display)
 {
     DisplayConfig config;
     if(const char * value = std::getenv("QO100_DISPLAY")) {
@@ -288,17 +292,20 @@ DisplayConfig resolve_display_config(bool screenshot_mode, bool settings_file_ex
             config.native_width = mode.w;
             config.native_height = mode.h;
         }
+        const qo100::UiProfile * chosen = nullptr;
         if(settings_file_exists) {
-            const int desired_width = saved_800x480 ? 800 : kReferenceWidth;
-            const int desired_height = saved_800x480 ? 480 : kReferenceHeight;
-            const bool fits = desired_width <= config.native_width &&
-                              desired_height <= config.native_height;
-            config.width = fits ? desired_width : 800;
-            config.height = fits ? desired_height : 480;
+            for(const qo100::UiProfile & profile : qo100::kUiProfiles) {
+                if(saved_display == profile.name &&
+                   profile.width <= config.native_width &&
+                   profile.height <= config.native_height)
+                    chosen = &profile;
+            }
         }
-        else if(detected) {
-            config.width = mode.w;
-            config.height = mode.h;
+        if(chosen == nullptr && (settings_file_exists || detected))
+            chosen = &qo100::ui_profile_for(config.native_width, config.native_height);
+        if(chosen != nullptr) {
+            config.width = chosen->width;
+            config.height = chosen->height;
         }
     }
     if(std::getenv("QO100_WINDOWED") != nullptr || screenshot_mode) config.fullscreen = false;
@@ -1862,9 +1869,43 @@ SDL_Rect settings_choice_rect(const SDL_Rect & card, int index)
             p.choice_w, p.choice_h};
 }
 
+/* The DISPLAY RESOLUTION choices: one per screen-size profile, largest
+ * first. */
+constexpr int kDisplayOptionCount = static_cast<int>(qo100::kUiProfileCount);
+
+const qo100::UiProfile & display_option(int index)
+{
+    return qo100::kUiProfiles[qo100::kUiProfileCount - 1 - static_cast<size_t>(index)];
+}
+
+/* Whether choice `index` fits a screen of this real size - a layout bigger
+ * than the screen would put SET itself partly off-screen. */
+bool display_option_fits(int index, int native_width, int native_height)
+{
+    const qo100::UiProfile & option = display_option(index);
+    return option.width <= native_width && option.height <= native_height;
+}
+
+/* The choice for the layout in use; -1 if it is none of them (a size pinned
+ * with QO100_DISPLAY). */
+int display_option_index(int width, int height)
+{
+    for(int index = 0; index < kDisplayOptionCount; ++index)
+        if(display_option(index).width == width && display_option(index).height == height)
+            return index;
+    return -1;
+}
+
+/* All the choices share the card's width, with the two-choice rows' gap. */
 SDL_Rect settings_display_res_rect(int width, int index)
 {
-    return settings_choice_rect(settings_display_card_rect(width), index);
+    const auto & p = ui().settings;
+    const SDL_Rect card = settings_display_card_rect(width);
+    const int gap = p.choice_step - p.choice_w;
+    const int button_w =
+        (card.w - 2 * p.card_pad - (kDisplayOptionCount - 1) * gap) / kDisplayOptionCount;
+    return {card.x + p.card_pad + index * (button_w + gap), card.y + p.choice_y,
+            button_w, p.choice_h};
 }
 
 SDL_Rect settings_save_rect(int width)
@@ -1940,7 +1981,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                         int voltage_choice, int display_choice,
                         int exit_behaviour_choice,
                         const std::string & tuner_product,
-                        bool longmynd_connected, bool can_use_1024x600,
+                        bool longmynd_connected, int native_width, int native_height,
                         bool lnb_cal_done, const TouchState & touch)
 {
     const auto & p = ui().settings;
@@ -1992,23 +2033,26 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
 
     const SDL_Rect display_card = settings_display_card_rect(width);
     draw_settings_card(renderer, text, display_card, "DISPLAY RESOLUTION");
-    const char * display_labels[] = {"1024 x 600", "800 x 480"};
-    for(int index = 0; index < 2; ++index) {
+    bool some_too_big = false;
+    for(int index = 0; index < kDisplayOptionCount; ++index) {
         const SDL_Rect button = settings_display_res_rect(width, index);
-        const bool disabled = index == 0 && !can_use_1024x600;
+        const bool disabled = !display_option_fits(index, native_width, native_height);
         const bool selected = !disabled && index == display_choice;
-        draw_choice_button(renderer, text, button, display_labels[index],
-                           selected, disabled,
+        some_too_big = some_too_big || disabled;
+        char label[24];
+        std::snprintf(label, sizeof(label), "%d x %d",
+                      display_option(index).width, display_option(index).height);
+        draw_choice_button(renderer, text, button, label, selected, disabled,
                            !disabled && is_pressed(touch, button), p.button_font);
     }
     /* Without room for the hints, only the "too big" one is shown -
      * centred, in the space the hints would use. */
-    if(!can_use_1024x600 && !p.card_hints)
-        text.draw("1024x600 too big for this screen",
+    if(some_too_big && !p.card_hints)
+        text.draw("Greyed out: too big for this screen",
                   display_card.x + display_card.w / 2,
                   display_card.y + display_card.h - px(14), kTextDim, px(14), true);
-    else if(!can_use_1024x600)
-        text.draw("1024x600 doesn't fit this screen",
+    else if(some_too_big)
+        text.draw("Greyed out: too big for this screen",
                   display_card.x + p.card_pad,
                   display_card.y + display_card.h - px(20), kTextDim, px(14));
     else if(p.card_hints)
@@ -4140,17 +4184,15 @@ int main(int argc, char ** argv)
         return 1;
     }
     DisplayConfig display = resolve_display_config(
-        !options.screenshot.empty(), settings_file_exists, receiver_settings.display_800x480);
+        !options.screenshot.empty(), settings_file_exists, receiver_settings.display);
     g_ui_profile = &qo100::ui_profile_for(display.width, display.height);
     qo100::log("[DISPLAY] %dx%d, layout profile %s\n",
                display.width, display.height, ui().name);
-    /* Whether the "1024 x 600" choice on SET even fits the real screen -
-     * used to grey it out there so a too-big layout can't be picked in the
-     * first place. Doesn't apply under QO100_DISPLAY (native == whatever
-     * was pinned, so this is trivially true there; that's fine, the SET
-     * page is a secondary concern next to an explicit installer override). */
-    const bool can_use_1024x600 =
-        display.native_width >= kReferenceWidth && display.native_height >= kReferenceHeight;
+    /* The SET page greys out the resolutions that don't fit the real screen
+     * (display.native_width/height), so a too-big layout can't be picked in
+     * the first place. Under QO100_DISPLAY "native" is whatever was pinned;
+     * that's fine, the SET page is a secondary concern next to an explicit
+     * installer override. */
     if(TTF_Init() != 0) {
         qo100::log("[TTF] init failed: %s\n", TTF_GetError());
         SDL_Quit();
@@ -4490,7 +4532,7 @@ int main(int argc, char ** argv)
      * (display.width), not the raw saved preference - so a stale
      * settings.json that no longer fits the real screen shows the toggle
      * matching what's really on screen instead of an impossible choice. */
-    int settings_display_choice = display.width == 800 ? 1 : 0;
+    int settings_display_choice = display_option_index(display.width, display.height);
     int settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
     std::string chat_nick;
     std::string chat_message;
@@ -5274,10 +5316,12 @@ int main(int argc, char ** argv)
                         receiver_settings.lnb_voltage_horizontal =
                             settings_voltage_choice == 2;
                         receiver_settings.audio_volume_percent = volume_percent;
-                        receiver_settings.display_800x480 = settings_display_choice == 1;
+                        if(settings_display_choice >= 0)
+                            receiver_settings.display = display_option(settings_display_choice).name;
                         receiver_settings.exit_full_stop = settings_exit_behaviour_choice == 1;
-                        const bool display_change_pending =
-                            receiver_settings.display_800x480 != (display.width == 800);
+                        const bool display_change_pending = settings_display_choice >= 0 &&
+                            settings_display_choice !=
+                                display_option_index(display.width, display.height);
                         const bool applied = qo100::save_receiver_settings(
                             repository_root, receiver_settings);
                         if(applied) {
@@ -5291,7 +5335,7 @@ int main(int argc, char ** argv)
                                 receiver_settings.lnb_lo_mhz,
                                 settings_voltage_choice == 0 ? "OFF" :
                                     (settings_voltage_choice == 1 ? "13V" : "18V"),
-                                settings_display_choice == 1 ? "800x480" : "1024x600",
+                                receiver_settings.display.c_str(),
                                 settings_exit_behaviour_choice == 1 ? "full-stop" : "restart");
                             /* Resolution is only picked up at process start
                              * (qo100_sdl/service_launch.sh reads settings.json
@@ -5324,8 +5368,9 @@ int main(int argc, char ** argv)
                                 break;
                             }
                         }
-                        for(int index = 0; !matched && index < 2; ++index) {
-                            if(index == 0 && !can_use_1024x600) continue;
+                        for(int index = 0; !matched && index < kDisplayOptionCount; ++index) {
+                            if(!display_option_fits(index, display.native_width,
+                                                    display.native_height)) continue;
                             if(point_in_rect(x, y,
                                              settings_display_res_rect(display.width, index))) {
                                 settings_display_choice = index;
@@ -5553,7 +5598,7 @@ int main(int argc, char ** argv)
                 if(point_in_rect(x, y, settings_button)) {
                     settings_voltage_choice = !receiver_settings.lnb_voltage_enabled
                         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
-                    settings_display_choice = display.width == 800 ? 1 : 0;
+                    settings_display_choice = display_option_index(display.width, display.height);
                     settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
                     tuner_product = detect_tuner_product_string();
                     app_page = AppPage::Settings;
@@ -6205,7 +6250,8 @@ int main(int argc, char ** argv)
                                settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
                                tuner_product, receiver_client.monitor_connected(),
-                               can_use_1024x600, qo100::lnb_calibrated(receiver_settings),
+                               display.native_width, display.native_height,
+                               qo100::lnb_calibrated(receiver_settings),
                                touch);
         }
         else if(app_page == AppPage::LnbCal) {
@@ -6450,7 +6496,8 @@ int main(int argc, char ** argv)
                                settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
                                screenshot_tuner, screenshot_monitor,
-                               can_use_1024x600, qo100::lnb_calibrated(receiver_settings),
+                               display.native_width, display.native_height,
+                               qo100::lnb_calibrated(receiver_settings),
                                TouchState{});
         else if(app_page == AppPage::Chat) {
             const ChatInput input = screenshot_page == "chat" ? ChatInput::None : ChatInput::Message;
