@@ -40,6 +40,7 @@
 
 #include "receiver.h"
 #include "lnb_calibration.h"
+#include "ui_profile.h"
 #include "app_log.h"
 #include "chat_client.h"
 #include "video_decoder.h"
@@ -52,6 +53,13 @@ using Microseconds = std::chrono::microseconds;
 
 constexpr int kReferenceWidth = 1024;
 constexpr int kReferenceHeight = 600;
+
+/* The screen-size profile in use (see ui_profile.h): every layout value that
+ * differs between screen sizes is read from here. The screen size is fixed
+ * for the life of the process, so main() picks the profile once, before
+ * anything is drawn. */
+const qo100::UiProfile * g_ui_profile = &qo100::kUiProfiles[0];
+const qo100::UiProfile & ui() { return *g_ui_profile; }
 
 struct Colour {
     uint8_t r;
@@ -533,7 +541,8 @@ public:
     void clear()
     {
         for(auto & entry : textures_) SDL_DestroyTexture(entry.second.texture);
-        for(auto & entry : fonts_) TTF_CloseFont(entry.second);
+        for(auto & entry : fonts_)
+            if(entry.second != nullptr) TTF_CloseFont(entry.second);
         textures_.clear();
         lru_.clear();
         fonts_.clear();
@@ -546,20 +555,17 @@ public:
     static constexpr int kMonoKeyOffset = 1000;
     static constexpr int kSevenSegKeyOffset = 2000;
 
+    /* Opens a font family at one size, and remembers the family's file:
+     * any other size of it is then opened the first time it is drawn or
+     * measured (see font()), so a layout can use whatever size it needs.
+     * main() still opens the common sizes up front, so a missing or broken
+     * font file stops the app at startup rather than leaving text out. */
     bool load_font(const std::string & path, int size, bool mono = false,
                    bool seven_seg = false)
     {
-        const int key = seven_seg ? size + kSevenSegKeyOffset
-                                  : mono ? size + kMonoKeyOffset : size;
-        if(fonts_.count(key) != 0) return true;
-        TTF_Font * font = TTF_OpenFont(path.c_str(), size);
-        if(font == nullptr) {
-            qo100::log( "[FONT] cannot open %s at %dpx: %s\n",
-                         path.c_str(), size, TTF_GetError());
-            return false;
-        }
-        fonts_[key] = font;
-        return true;
+        const int family = seven_seg ? kSevenSegKeyOffset : mono ? kMonoKeyOffset : 0;
+        family_paths_[family] = path;
+        return font(family + size) != nullptr;
     }
 
     void draw(const std::string & text, int x, int y, Colour colour, int size = 14,
@@ -572,10 +578,10 @@ public:
             std::to_string(colour.b) + ":" + text;
         auto found = textures_.find(key);
         if(found == textures_.end()) {
-            auto font = fonts_.find(font_key);
-            if(font == fonts_.end()) return;
+            TTF_Font * ttf = font(font_key);
+            if(ttf == nullptr) return;
             const SDL_Color sdl_colour{colour.r, colour.g, colour.b, colour.a};
-            SDL_Surface * surface = TTF_RenderUTF8_Blended(font->second, text.c_str(), sdl_colour);
+            SDL_Surface * surface = TTF_RenderUTF8_Blended(ttf, text.c_str(), sdl_colour);
             if(surface == nullptr) return;
             SDL_Texture * texture = SDL_CreateTextureFromSurface(renderer_, surface);
             const int width = surface->w;
@@ -610,17 +616,36 @@ public:
 
     std::pair<int, int> measure(const std::string & text, int size = 14) const
     {
-        const auto font = fonts_.find(size);
-        if(font == fonts_.end()) return {0, 0};
+        TTF_Font * ttf = font(size);
+        if(ttf == nullptr) return {0, 0};
         int width = 0;
         int height = 0;
-        if(TTF_SizeUTF8(font->second, text.c_str(), &width, &height) != 0) return {0, 0};
+        if(TTF_SizeUTF8(ttf, text.c_str(), &width, &height) != 0) return {0, 0};
         return {width, height};
     }
 
     size_t texture_count() const { return textures_.size(); }
 
 private:
+    /* The font for a key (size plus family offset, see load_font), opened
+     * on first use; nullptr if its family was never loaded or it can't be
+     * opened (reported once - later calls just draw nothing, as before). */
+    TTF_Font * font(int key) const
+    {
+        const auto found = fonts_.find(key);
+        if(found != fonts_.end()) return found->second;
+        const int family = key >= kSevenSegKeyOffset ? kSevenSegKeyOffset
+                         : key >= kMonoKeyOffset ? kMonoKeyOffset : 0;
+        const auto path = family_paths_.find(family);
+        if(path == family_paths_.end()) return nullptr;
+        TTF_Font * opened = TTF_OpenFont(path->second.c_str(), key - family);
+        if(opened == nullptr)
+            qo100::log( "[FONT] cannot open %s at %dpx: %s\n",
+                         path->second.c_str(), key - family, TTF_GetError());
+        fonts_[key] = opened;
+        return opened;
+    }
+
     struct CachedText {
         SDL_Texture * texture = nullptr;
         int width = 0;
@@ -648,7 +673,10 @@ private:
     }
 
     SDL_Renderer * renderer_ = nullptr;
-    std::unordered_map<int, TTF_Font *> fonts_;
+    /* Mutable: opening a font on first use is a cache fill, also from the
+     * const measure(). A failed open is stored as nullptr, not retried. */
+    mutable std::unordered_map<int, TTF_Font *> fonts_;
+    std::unordered_map<int, std::string> family_paths_;
     std::unordered_map<std::string, CachedText> textures_;
     std::list<std::string> lru_;
 };
@@ -660,6 +688,9 @@ using qo100::VideoScheduler;
  * is tuned against - referenced by Layout below to compute extra headroom
  * for the compact (800x480) plot without changing this base scale. */
 constexpr float kDisplayMaxDb = 10.0F;
+/* The strip below the spectrum plot that holds the frequency axis labels -
+ * the plot height kDisplayMaxDb's dB-per-pixel density is defined against. */
+constexpr int kSpectrumAxisStripH = 36;
 
 struct Layout {
     int width;
@@ -670,14 +701,14 @@ struct Layout {
     int video_width;
     /* 800x480 has much less spare vertical space than 1024x600 - the
      * frequency axis labels below the spectrum plot (see draw_spectrum())
-     * are skipped at this size and their reserved strip handed to the plot
-     * itself instead. spectrum_max_db raises the ceiling by exactly enough
-     * to keep the existing dB-per-pixel density unchanged (so today's
+     * are skipped at this size and most of their reserved strip handed to
+     * the plot itself instead (see the profile's spectrum_plot_bottom).
+     * spectrum_max_db raises the ceiling by exactly enough to keep the
+     * dB-per-pixel density of a plot with the full axis strip unchanged (so
      * signals render pixel-identical, not stretched) - the extra pixel rows
      * become new headroom above the old 0..kDisplayMaxDb ceiling, mainly so
      * a strong signal's label has somewhere to sit without being clipped
      * or shoved aside. */
-    bool compact;
     float spectrum_max_db;
     SDL_Rect spectrum_panel;
     SDL_Rect spectrum_plot;
@@ -689,14 +720,14 @@ struct Layout {
         : width(w), height(h), spectrum_height(h * 230 / 480),
           bottom_y(4 + spectrum_height + 4), bottom_height(h - bottom_y - 4),
           video_width(w * 420 / 800),
-          compact(w <= 800),
-          spectrum_max_db(compact
-              ? kDisplayMaxDb * static_cast<float>(spectrum_height - 22 - 1) /
-                    static_cast<float>(spectrum_height - 36 - 1)
+          spectrum_max_db(ui().main.spectrum_plot_bottom != kSpectrumAxisStripH
+              ? kDisplayMaxDb *
+                    static_cast<float>(spectrum_height - ui().main.spectrum_plot_bottom - 1) /
+                    static_cast<float>(spectrum_height - kSpectrumAxisStripH - 1)
               : kDisplayMaxDb),
           spectrum_panel{4, 4, w - 8, spectrum_height},
           spectrum_plot{18, 18, w - 36,
-                       spectrum_height - (compact ? 22 : 36)},
+                       spectrum_height - ui().main.spectrum_plot_bottom},
           video_panel{4, bottom_y, video_width, bottom_height},
           video_content{18, bottom_y + 14, video_width - 28, bottom_height - 28},
           status_panel{4 + video_width + 4, bottom_y,
@@ -1442,7 +1473,7 @@ void draw_spectrum(SDL_Renderer * renderer, TextCache & text, const Layout & lay
         text.draw(spectrum_status_text(status), source_button.x + source_button.w + 8,
                   layout.spectrum_plot.y + 8, status_colour);
     }
-    if(!layout.compact) {
+    if(ui().main.spectrum_axis_labels) {
         for(int number = 1; number <= 8; ++number) {
             const int x = layout.spectrum_plot.x + number * layout.spectrum_plot.w / 9;
             text.draw(std::to_string(10490 + number), x,
@@ -1750,33 +1781,28 @@ SDL_Rect page_back_rect(int width)
     return {width - 114, 6, 106, 40};
 }
 
-/* The Settings page has two size classes, chosen the same way Layout picks
- * its own compact mode (width <= 800): the 800x480 panel has only 480px of
- * height to work with, vs 600px on the 1024x600 panel, so its cards, rows,
- * and the SAVE & APPLY button all need tighter, smaller measurements to
- * actually fit - the original fixed layout below was sized for 1024x600
- * only and ran ~100px past the bottom of an 800x480 screen, hiding SAVE &
- * APPLY entirely and clipping the Exit Behaviour card. */
-bool settings_compact(int width)
-{
-    return width <= 800;
-}
-
+/* The Settings page: two columns of cards, with SAVE & APPLY / EXIT beside
+ * the last card on the left. Every measurement comes from the screen-size
+ * profile (ui_profile.h) - the 800x480 panel has only 480px of height to work
+ * with, vs 600px on the 1024x600 panel, so its cards, rows, and the SAVE &
+ * APPLY button all need tighter, smaller measurements to actually fit (a
+ * single layout sized for 1024x600 ran ~100px past the bottom of an 800x480
+ * screen, hiding SAVE & APPLY entirely and clipping the Exit Behaviour card).
+ * The two columns share the width left between the margins equally. */
 SDL_Rect settings_receiver_card_rect(int width)
 {
-    /* Non-compact height/y are squeezed (was 70/260) so the AUTO START AT
-     * BOOT card and SAVE & APPLY/EXIT row below no longer run past the
-     * bottom of a 1024x600 screen - compact (800x480) is untouched. */
-    return settings_compact(width) ? SDL_Rect{16, 56, (width - 48) / 2, 188}
-                                    : SDL_Rect{40, 60, 460, 230};
+    /* The 1024x600 card heights are squeezed (the tall card was 260 high at
+     * y 70) so the AUTO START AT BOOT card and SAVE & APPLY/EXIT row below
+     * don't run past the bottom of that screen. */
+    const auto & p = ui().settings;
+    return {p.margin, p.top, (width - 2 * p.margin - p.column_gap) / 2, p.tall_card_h};
 }
 
 SDL_Rect settings_display_card_rect(int width)
 {
+    const auto & p = ui().settings;
     const SDL_Rect receiver = settings_receiver_card_rect(width);
-    const int gap = settings_compact(width) ? 12 : 14;
-    const int height = settings_compact(width) ? 102 : 124;
-    return {receiver.x, receiver.y + receiver.h + gap, receiver.w, height};
+    return {receiver.x, receiver.y + receiver.h + p.card_gap, receiver.w, p.short_card_h};
 }
 
 SDL_Rect settings_diagnostics_card_rect(int width)
@@ -1784,66 +1810,67 @@ SDL_Rect settings_diagnostics_card_rect(int width)
     /* Same height as settings_receiver_card_rect, so the two right-column
      * cards below this one (Display Resolution / Exit Behaviour) line up
      * exactly with their left-column counterparts instead of trailing lower. */
+    const auto & p = ui().settings;
     const SDL_Rect receiver = settings_receiver_card_rect(width);
-    const int gap = settings_compact(width) ? 16 : 24;
-    const int margin = settings_compact(width) ? 16 : 40;
-    const int x = receiver.x + receiver.w + gap;
-    return {x, receiver.y, width - x - margin, receiver.h};
+    const int x = receiver.x + receiver.w + p.column_gap;
+    return {x, receiver.y, width - x - p.margin, receiver.h};
 }
 
 SDL_Rect settings_exit_card_rect(int width)
 {
+    const auto & p = ui().settings;
     const SDL_Rect diagnostics = settings_diagnostics_card_rect(width);
-    const int gap = settings_compact(width) ? 12 : 14;
-    const int height = settings_compact(width) ? 102 : 124;
-    return {diagnostics.x, diagnostics.y + diagnostics.h + gap, diagnostics.w, height};
+    return {diagnostics.x, diagnostics.y + diagnostics.h + p.card_gap, diagnostics.w,
+            p.short_card_h};
 }
 
 SDL_Rect settings_autostart_card_rect(int width)
 {
+    const auto & p = ui().settings;
     const SDL_Rect exit_card = settings_exit_card_rect(width);
-    const int gap = settings_compact(width) ? 12 : 14;
-    const int height = settings_compact(width) ? 102 : 124;
-    return {exit_card.x, exit_card.y + exit_card.h + gap, exit_card.w, height};
+    return {exit_card.x, exit_card.y + exit_card.h + p.card_gap, exit_card.w, p.short_card_h};
 }
 
 /* The read-only LNB LO box (it takes the place of the old -/+ editor). */
 SDL_Rect settings_lo_value_rect(int width)
 {
+    const auto & p = ui().settings;
     const SDL_Rect card = settings_receiver_card_rect(width);
-    if(settings_compact(width))
-        return {card.x + 16, card.y + 70, card.w - 32, 38};
-    return {card.x + 24, card.y + 78, card.w - 48, 48};
+    return {card.x + p.card_pad, card.y + p.lo_box_y, card.w - 2 * p.card_pad, p.lo_box_h};
 }
 
 SDL_Rect settings_voltage_rect(int width, int index)
 {
+    const auto & p = ui().settings;
     const SDL_Rect card = settings_receiver_card_rect(width);
-    if(settings_compact(width))
-        return {card.x + 16 + index * 118, card.y + 144, 106, 38};
-    return {card.x + 24 + index * 116, card.y + 164, 104, 50};
+    return {card.x + p.card_pad + index * p.voltage_step, card.y + p.voltage_y,
+            p.voltage_w, p.voltage_h};
+}
+
+/* Button `index` of a short card's two-choice row. */
+SDL_Rect settings_choice_rect(const SDL_Rect & card, int index)
+{
+    const auto & p = ui().settings;
+    return {card.x + p.card_pad + index * p.choice_step, card.y + p.choice_y,
+            p.choice_w, p.choice_h};
 }
 
 SDL_Rect settings_display_res_rect(int width, int index)
 {
-    const SDL_Rect card = settings_display_card_rect(width);
-    if(settings_compact(width))
-        return {card.x + 16 + index * 178, card.y + 40, 166, 34};
-    return {card.x + 24 + index * 216, card.y + 48, 200, 40};
+    return settings_choice_rect(settings_display_card_rect(width), index);
 }
 
 SDL_Rect settings_save_rect(int width)
 {
+    const auto & p = ui().settings;
     const SDL_Rect card = settings_display_card_rect(width);
     const SDL_Rect autostart_card = settings_autostart_card_rect(width);
-    const int button_width = settings_compact(width) ? 150 : 200;
-    const int height = settings_compact(width) ? 38 : 40;
     /* Left-aligned with the DISPLAY RESOLUTION card above it, and vertically
      * centred on AUTO START AT BOOT - the card it ends up sitting beside now
      * that EXIT (right-aligned with that same card, see settings_exit_page_
      * rect) shares this row. */
-    return {card.x, autostart_card.y + (autostart_card.h - height) / 2,
-            button_width, height};
+    return {card.x, autostart_card.y + (autostart_card.h - p.save_h) / 2,
+            p.save_w, p.save_h};
 }
 
 SDL_Rect settings_exit_page_rect(int width)
@@ -1855,18 +1882,12 @@ SDL_Rect settings_exit_page_rect(int width)
 
 SDL_Rect settings_exit_behaviour_rect(int width, int index)
 {
-    const SDL_Rect card = settings_exit_card_rect(width);
-    if(settings_compact(width))
-        return {card.x + 16 + index * 178, card.y + 40, 166, 34};
-    return {card.x + 24 + index * 216, card.y + 48, 200, 40};
+    return settings_choice_rect(settings_exit_card_rect(width), index);
 }
 
 SDL_Rect settings_autostart_rect(int width, int index)
 {
-    const SDL_Rect card = settings_autostart_card_rect(width);
-    if(settings_compact(width))
-        return {card.x + 16 + index * 178, card.y + 40, 166, 34};
-    return {card.x + 24 + index * 216, card.y + 48, 200, 40};
+    return settings_choice_rect(settings_autostart_card_rect(width), index);
 }
 
 /* The small "LNB CAL" button in the header of the RECEIVER TUNING card. It
@@ -1881,12 +1902,12 @@ SDL_Rect settings_lnb_cal_rect(int width)
 }
 
 void draw_settings_card(SDL_Renderer * renderer, TextCache & text,
-                        const SDL_Rect & card, const std::string & title, bool compact)
+                        const SDL_Rect & card, const std::string & title)
 {
     fill_panel(renderer, card);
     set_colour(renderer, kBorder);
     SDL_RenderDrawRect(renderer, &card);
-    const int margin = compact ? 16 : 24;
+    const int margin = ui().settings.card_pad;
     text.draw(title, card.x + margin, card.y + 16, kCyan, 14);
     const SDL_Rect rule{card.x + margin, card.y + 40, card.w - margin * 2, 1};
     set_colour(renderer, kBorder);
@@ -1915,9 +1936,7 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                         bool longmynd_connected, bool can_use_1024x600,
                         bool lnb_cal_done, const TouchState & touch)
 {
-    const bool compact = settings_compact(width);
-    const int label_size = compact ? 14 : 16;
-    const int button_label_size = compact ? 14 : 16;
+    const auto & p = ui().settings;
 
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
@@ -1925,20 +1944,19 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     text.draw("SETTINGS", 12, 12, kCyan, 20);
 
     const SDL_Rect receiver_card = settings_receiver_card_rect(width);
-    draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING", compact);
+    draw_settings_card(renderer, text, receiver_card, "RECEIVER TUNING");
     /* Green once an LNB calibration is stored, yellow while it is still to be
      * done - the same at-a-glance status as the startup prompt. */
     const SDL_Rect cal_button = settings_lnb_cal_rect(width);
     draw_button(renderer, text, cal_button, lnb_cal_done ? "LNB CAL OK" : "LNB CAL",
-                lnb_cal_done ? kGreen : kYellow, compact ? 12 : 14, false,
+                lnb_cal_done ? kGreen : kYellow, p.lnb_cal_font, false,
                 is_pressed(touch, cal_button));
-    const int lo_label_y = compact ? receiver_card.y + 46 : receiver_card.y + 50;
     /* The LO is no longer edited by hand: it is what the automatic LNB
      * calibration measured, or the nominal 9750 MHz until that has been done.
      * Shown, not editable - the LNB CAL button in the card header is the way
      * to (re)measure it. */
-    text.draw("LNB LO (MHz)", receiver_card.x + (compact ? 16 : 24), lo_label_y,
-              kText, label_size);
+    text.draw("LNB LO (MHz)", receiver_card.x + p.card_pad, receiver_card.y + p.lo_label_y,
+              kText, p.label_font);
     const SDL_Rect lo_value = settings_lo_value_rect(width);
     set_colour(renderer, kBackground);
     SDL_RenderFillRect(renderer, &lo_value);
@@ -1946,27 +1964,26 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
     SDL_RenderDrawRect(renderer, &lo_value);
     char lo_text[24];
     std::snprintf(lo_text, sizeof(lo_text), "%.4f", lo_display_mhz);
-    text.draw(lo_text, lo_value.x + 14, lo_value.y + lo_value.h / 2 - (compact ? 9 : 11),
-              kText, compact ? 16 : 20, false, true);
+    text.draw(lo_text, lo_value.x + 14, lo_value.y + lo_value.h / 2 - p.lo_value_rise,
+              kText, p.lo_value_font, false, true);
     {
         const std::string caption = lnb_cal_done ? "calibrated" : "nominal - not calibrated";
         const int caption_width = text.measure(caption, 14).first;
         text.draw(caption, lo_value.x + lo_value.w - 12 - caption_width,
                   lo_value.y + lo_value.h / 2 - 8, lnb_cal_done ? kGreen : kYellow, 14, false);
     }
-    const int voltage_label_y = compact ? receiver_card.y + 122 : receiver_card.y + 132;
-    text.draw("LNB Bias Voltage", receiver_card.x + (compact ? 16 : 24), voltage_label_y,
-              kText, label_size);
+    text.draw("LNB Bias Voltage", receiver_card.x + p.card_pad,
+              receiver_card.y + p.voltage_label_y, kText, p.label_font);
     const char * voltage_labels[] = {"OFF", "13V", "18V"};
     for(int index = 0; index < 3; ++index) {
         const SDL_Rect button = settings_voltage_rect(width, index);
         draw_choice_button(renderer, text, button, voltage_labels[index],
                            index == voltage_choice, false,
-                           is_pressed(touch, button), button_label_size);
+                           is_pressed(touch, button), p.button_font);
     }
 
     const SDL_Rect display_card = settings_display_card_rect(width);
-    draw_settings_card(renderer, text, display_card, "DISPLAY RESOLUTION", compact);
+    draw_settings_card(renderer, text, display_card, "DISPLAY RESOLUTION");
     const char * display_labels[] = {"1024 x 600", "800 x 480"};
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_display_res_rect(width, index);
@@ -1974,85 +1991,72 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         const bool selected = !disabled && index == display_choice;
         draw_choice_button(renderer, text, button, display_labels[index],
                            selected, disabled,
-                           !disabled && is_pressed(touch, button), button_label_size);
+                           !disabled && is_pressed(touch, button), p.button_font);
     }
-    if(!can_use_1024x600 && compact)
+    /* Without room for the hints, only the "too big" one is shown -
+     * centred, in the space the hints would use. */
+    if(!can_use_1024x600 && !p.card_hints)
         text.draw("1024x600 too big for this screen",
                   display_card.x + display_card.w / 2,
                   display_card.y + display_card.h - 14, kTextDim, 14, true);
     else if(!can_use_1024x600)
         text.draw("1024x600 doesn't fit this screen",
-                  display_card.x + 24,
+                  display_card.x + p.card_pad,
                   display_card.y + display_card.h - 20, kTextDim, 14);
-    else if(!compact)
-        text.draw("Restarts the app to apply", display_card.x + 24,
+    else if(p.card_hints)
+        text.draw("Restarts the app to apply", display_card.x + p.card_pad,
                   display_card.y + display_card.h - 20, kTextDim, 14);
 
     draw_button(renderer, text, settings_save_rect(width), "SAVE & APPLY", kCyan,
-                compact ? 14 : 16, false, is_pressed(touch, settings_save_rect(width)));
+                p.button_font, false, is_pressed(touch, settings_save_rect(width)));
     draw_button(renderer, text, settings_exit_page_rect(width), "EXIT", kCyan,
-                compact ? 14 : 16, false, is_pressed(touch, settings_exit_page_rect(width)));
+                p.button_font, false, is_pressed(touch, settings_exit_page_rect(width)));
 
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
-    draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS", compact);
-    const int diagnostic_x = diagnostics_card.x + (compact ? 16 : 24);
-    if(compact) {
-        text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 46, kText, 14);
+    draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS");
+    {
+        const int x = diagnostics_card.x + p.card_pad;
+        const int y = diagnostics_card.y;
+        text.draw("Tuner (USB)", x, y + p.diag_y[0], kText, p.diag_font);
         text.draw(tuner_product.empty() ? "Not detected" : tuner_product,
-                  diagnostic_x, diagnostics_card.y + 64,
-                  tuner_product.empty() ? kRed : kText, 14);
-        text.draw("Longmynd Link", diagnostic_x, diagnostics_card.y + 88, kText, 14);
+                  x, y + p.diag_y[1], tuner_product.empty() ? kRed : kText, p.diag_font);
+        text.draw("Longmynd Link", x, y + p.diag_y[2], kText, p.diag_font);
         text.draw(longmynd_connected ? "Connected" : "Not connected",
-                  diagnostic_x, diagnostics_card.y + 106,
-                  longmynd_connected ? kGreen : kRed, 14);
-        text.draw("Watch in VLC (same network)", diagnostic_x,
-                  diagnostics_card.y + 130, kText, 14);
-        text.draw(qo100::ts_stream_vlc_url(), diagnostic_x,
-                  diagnostics_card.y + 150, kCyan, 14);
-    }
-    else {
-        text.draw("Tuner (USB)", diagnostic_x, diagnostics_card.y + 55, kText, 16);
-        text.draw(tuner_product.empty() ? "Not detected" : tuner_product,
-                  diagnostic_x, diagnostics_card.y + 76,
-                  tuner_product.empty() ? kRed : kText, 16);
-        text.draw("Longmynd Link", diagnostic_x, diagnostics_card.y + 109, kText, 16);
-        text.draw(longmynd_connected ? "Connected" : "Not connected",
-                  diagnostic_x, diagnostics_card.y + 130,
-                  longmynd_connected ? kGreen : kRed, 16);
-        text.draw("Watch in VLC (same network)", diagnostic_x, diagnostics_card.y + 163, kText, 16);
-        text.draw("Media > Open Network Stream:", diagnostic_x, diagnostics_card.y + 184, kTextDim, 14);
-        text.draw(qo100::ts_stream_vlc_url(), diagnostic_x, diagnostics_card.y + 201, kCyan, 16);
+                  x, y + p.diag_y[3], longmynd_connected ? kGreen : kRed, p.diag_font);
+        text.draw("Watch in VLC (same network)", x, y + p.diag_y[4], kText, p.diag_font);
+        if(p.diag_y[5] != 0)
+            text.draw("Media > Open Network Stream:", x, y + p.diag_y[5], kTextDim, 14);
+        text.draw(qo100::ts_stream_vlc_url(), x, y + p.diag_y[6], kCyan, p.diag_font);
     }
 
     const SDL_Rect exit_card = settings_exit_card_rect(width);
-    draw_settings_card(renderer, text, exit_card, "EXIT BUTTON BEHAVIOUR", compact);
+    draw_settings_card(renderer, text, exit_card, "EXIT BUTTON BEHAVIOUR");
     const char * exit_labels[] = {"Restart", "FULL STOP"};
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_exit_behaviour_rect(width, index);
         draw_choice_button(renderer, text, button, exit_labels[index],
                            index == exit_behaviour_choice, false,
-                           is_pressed(touch, button), button_label_size);
+                           is_pressed(touch, button), p.button_font);
     }
-    if(!compact)
+    if(p.card_hints)
         text.draw(exit_behaviour_choice == 1
                       ? "EXIT stops the app - restart via desktop icon"
                       : "EXIT restarts the app automatically",
-                  exit_card.x + 24, exit_card.y + exit_card.h - 20, kTextDim, 14);
+                  exit_card.x + p.card_pad, exit_card.y + exit_card.h - 20, kTextDim, 14);
 
     const SDL_Rect autostart_card = settings_autostart_card_rect(width);
-    draw_settings_card(renderer, text, autostart_card, "AUTO START AT BOOT", compact);
+    draw_settings_card(renderer, text, autostart_card, "AUTO START AT BOOT");
     const bool autostart_on = autostart_enabled();
     const char * autostart_labels[] = {"On", "Off"};
     for(int index = 0; index < 2; ++index) {
         const SDL_Rect button = settings_autostart_rect(width, index);
         const bool selected = (index == 0) == autostart_on;
         draw_choice_button(renderer, text, button, autostart_labels[index],
-                           selected, false, is_pressed(touch, button),
-                           button_label_size);
+                           selected, false, is_pressed(touch, button), p.button_font);
     }
-    if(!compact)
+    if(p.card_hints)
         text.draw("Launches automatically at power-on (kiosk mode)",
-                  autostart_card.x + 24, autostart_card.y + autostart_card.h - 20,
+                  autostart_card.x + p.card_pad, autostart_card.y + autostart_card.h - 20,
                   kTextDim, 14);
 }
 
@@ -2261,16 +2265,13 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
                        const TouchState & touch)
 {
     using Outcome = qo100::LnbCalibration::Outcome;
-    const bool compact = width <= 800;
-    /* Text is only drawn at font sizes preloaded in main() (proportional:
-     * 9 10 11 12 14 15 16 18 20 32 48; monospace: 9 10 11 16 20 26) - any
-     * other size silently draws nothing - so every size below is one of those. */
+    /* The sizes that differ between screens come from ui_profile.h. */
     const int title_size = 20;
-    const int body_size = compact ? 15 : 16;
-    const int emph_size = compact ? 16 : 18;     /* status/step line */
+    const int body_size = ui().lnb_cal.body_font;
+    const int emph_size = ui().lnb_cal.emph_font;         /* status/step line */
     const int small_size = 14;
-    const int mono_size = 16;                    /* the numbers of the report */
-    const int mono_big_size = compact ? 16 : 20; /* the headline LO value */
+    const int mono_size = 16;                             /* the numbers of the report */
+    const int mono_big_size = ui().lnb_cal.mono_big_font; /* the headline LO value */
 
     set_colour(renderer, kBackground);
     const SDL_Rect screen{0, 0, width, height};
@@ -2345,7 +2346,7 @@ void draw_lnb_cal_page(SDL_Renderer * renderer, TextCache & text, int width, int
     const auto corrections = [&](double lo_mhz, const std::string & lnb_when, int rtl_state,
                                  double rtl_khz, const std::string & rtl_when,
                                  const std::string & rtl_note) {
-        const int value_x = left + (compact ? 236 : 290);
+        const int value_x = left + ui().lnb_cal.value_x;
         /* Small dim text flush with the card's right edge (the dates). */
         const auto right_text = [&](const std::string & value, int at_y) {
             const int value_width = text.measure(value, small_size).first;
@@ -3079,13 +3080,10 @@ void draw_status(SDL_Renderer * renderer, TextCache & text, const Layout & layou
      * actual width rather than a fixed pixel layout - at 1024x600 this
      * panel is ~475px wide (the reference these proportions were tuned
      * against); at 800x480 it's only ~368px, and the old fixed offsets put
-     * the right column's labels on top of the left column's values. Only
-     * 14/16/20/32 are preloaded fonts (see TextCache::load_font calls), so
-     * the narrower size below has to be one of those, not something
-     * in-between. */
+     * the right column's labels on top of the left column's values. The
+     * font size comes with the screen size (see ui_profile.h). */
     constexpr int kReferencePanelW = 475;
-    const bool narrow = layout.status_panel.w < 420;
-    const int kFontSize = narrow ? 14 : 16;
+    const int kFontSize = ui().main.status_font;
     const int right_x = layout.status_panel.x +
         layout.status_panel.w * 261 / kReferencePanelW;
     constexpr int kRowCount = 6;
@@ -3278,7 +3276,7 @@ constexpr auto kTuneToastDuration = std::chrono::milliseconds(1500);
  * SERVICE and PROVIDER under the lock line. Shared with the drawing code so
  * the presets card below it always starts where the status card ends. */
 constexpr int kTuneStatusRows = 5;
-int tune_status_row_height(int width) { return settings_compact(width) ? 20 : 22; }
+int tune_status_row_height(int width) { (void)width; return ui().tune.status_row_h; }
 int tune_status_card_height(int width)
 {
     return 30 + kTuneStatusRows * tune_status_row_height(width) + 10;
@@ -3296,11 +3294,11 @@ SDL_Rect tune_presets_card_rect(int width, int height)
             kRightColW, back_button.y - 10 - (status_card_y + status_h + 10)};
 }
 
-/* The compact (800-wide) presets card is much shorter than the wide
- * one's (see tune_presets_card_rect) - a button height tuned for wide
- * left almost no room for gaps once squeezed in, which is what made
- * compact look cramped. */
-int tune_preset_button_height(int width) { return settings_compact(width) ? 38 : kStatusButtonHeight; }
+/* The 800x480 presets card is much shorter than the 1024x600 one's (see
+ * tune_presets_card_rect) - the larger screen's button height left almost
+ * no room for gaps once squeezed in, which is what made the small one look
+ * cramped; so the height is per screen size (ui_profile.h). */
+int tune_preset_button_height(int width) { (void)width; return ui().tune.preset_button_h; }
 
 /* However many preset buttons actually fit the card at this display's
  * size (see tune_presets_card_rect) - the point of "fill available
@@ -3423,8 +3421,8 @@ std::string tune_format_if_khz(long if_khz)
 /* Digit size scales with the display this is built for - the 800-wide
  * panel's freq_card is noticeably shorter than the 1024-wide one's (see
  * tune_lower_cards_rect), so one fixed size would either clip on the
- * small panel or leave the big one looking sparse. Font sizes here must
- * be in the preloaded seven-segment size list set up in main(). */
+ * small panel or leave the big one looking sparse. The sizes are per
+ * screen size (ui_profile.h). */
 struct TuneFreqMetrics { int wheel_w; int wheel_h; int digit_font; int dot_font; };
 
 TuneFreqMetrics tune_freq_metrics(int width)
@@ -3436,15 +3434,16 @@ TuneFreqMetrics tune_freq_metrics(int width)
      * the card edges (as they did before this was measured). wheel_h is
      * just tall enough for the glyph itself (~1.15x its point size, for
      * ascent/descent). */
-    if(settings_compact(width)) return {46, 58, 48, 36};
-    return {70, 90, 76, 56};
+    (void)width;
+    const auto & p = ui().tune;
+    return {p.wheel_w, p.wheel_h, p.digit_font, p.dot_font};
 }
 
 /* Shared by the drawing code and the scroll hit-test below, so the two
  * can't drift apart. Symbol rate only ever shows one short number plus
  * its scale, so it gets less width than the seven-digit frequency wheel.
  * The freq/SR row is a fixed height (matching what tune_freq_metrics'
- * digit sizes were tuned for, per compact/wide) rather than a percentage
+ * digit sizes were tuned for, per screen size) rather than a percentage
  * of whatever's left, so the video panel above it is the one that grows
  * or shrinks as the page's available height changes. */
 void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card,
@@ -3460,14 +3459,14 @@ void tune_lower_cards_rect(int width, int height, SDL_Rect & freq_card,
      * tune_freq_metrics/tune_sr_font_size for the sizes this has to fit) -
      * trimmed down from the original mockup's much taller cards so the
      * video panel above gets the freed-up height instead. */
-    const int lower_h = settings_compact(width) ? 92 : 128;
+    const int lower_h = ui().tune.lower_cards_h;
     const int lower_y = content_y + content_h - lower_h;
     /* The frequency card is only as wide as its seven wheels need (see
      * tune_freq_metrics/tune_freq_wheel_centre_x); what's left is shared
      * between the symbol rate and the RF port A/B card. */
     const TuneFreqMetrics m = tune_freq_metrics(width);
-    const int freq_w = 7 * m.wheel_w + 10 + 8 + (settings_compact(width) ? 8 : 24);
-    const int rf_w = settings_compact(width) ? 72 : 100;
+    const int freq_w = 7 * m.wheel_w + 10 + 8 + ui().tune.freq_card_extra_w;
+    const int rf_w = ui().tune.rf_card_w;
     const int sr_w = main_col_w - 2 * kGap - freq_w - rf_w;
     freq_card = {kPad, lower_y, freq_w, lower_h};
     sr_card = {freq_card.x + freq_card.w + kGap, lower_y, sr_w, lower_h};
@@ -3615,18 +3614,18 @@ void draw_tune_page(SDL_Renderer * renderer, TextCache & text,
     text.draw("FREQUENCY (MHz, drag digits)", freq_card.x + 12, freq_card.y + 10, kText, 14);
     /* The SR card is much narrower than the freq one (see
      * tune_lower_cards_rect - it only ever holds a short number), and
-     * this is the longer of the two titles - too wide for the compact/
-     * 800-wide card's title row at the same size as the other one. */
+     * this is the longer of the two titles - too wide for the 800-wide
+     * card's title row at the same size as the other one. */
     text.draw("SR (kS/s) (tap)", sr_card.x + 12, sr_card.y + 10, kText,
-              settings_compact(width) ? 11 : 14);
+              ui().tune.small_title_font);
     /* RF port: A = TOP F-connector (default), B = BOTTOM. The filled one is
      * the port in use - see tune_rf_port in main(). */
     text.draw("RF port", rf_card.x + 12, rf_card.y + 10, kText,
-              settings_compact(width) ? 11 : 14);
+              ui().tune.small_title_font);
     for(int port = 0; port < 2; ++port) {
         const SDL_Rect button = tune_rf_button_rect(width, height, port);
         draw_button(renderer, text, button, port == 0 ? "A" : "B", kCyan,
-                    settings_compact(width) ? 14 : 20, tune_rf_port == port,
+                    ui().tune.rf_button_font, tune_rf_port == port,
                     is_pressed(touch, button));
     }
 
@@ -4110,6 +4109,9 @@ int main(int argc, char ** argv)
     }
     DisplayConfig display = resolve_display_config(
         !options.screenshot.empty(), settings_file_exists, receiver_settings.display_800x480);
+    g_ui_profile = &qo100::ui_profile_for(display.width, display.height);
+    qo100::log("[DISPLAY] %dx%d, layout profile %s\n",
+               display.width, display.height, ui().name);
     /* Whether the "1024 x 600" choice on SET even fits the real screen -
      * used to grey it out there so a too-big layout can't be picked in the
      * first place. Doesn't apply under QO100_DISPLAY (native == whatever
@@ -4198,9 +4200,11 @@ int main(int argc, char ** argv)
 
     TextCache text(renderer);
     const std::string font_path = executable_directory() + "/Montserrat-Medium.ttf";
-    /* 9/10/11/12/15/18 added for the Manual Tune page's tighter typographic
-     * hierarchy (status/preset rows, digit-wheel labels); 48 for its
-     * "SAVED ..." toast - the other pages only ever needed 14/16/20/32. */
+    /* Opened up front so a missing font file stops the app here; any other
+     * size opens on first use (see TextCache::load_font). 9/10/11/12/15/18
+     * added for the Manual Tune page's tighter typographic hierarchy
+     * (status/preset rows, digit-wheel labels); 48 for its "SAVED ..."
+     * toast - the other pages only ever needed 14/16/20/32. */
     for(int size : {9, 10, 11, 12, 14, 15, 16, 18, 20, 32, 48}) {
         if(!text.load_font(font_path, size)) {
             SDL_DestroyRenderer(renderer);
@@ -4214,7 +4218,7 @@ int main(int argc, char ** argv)
      * mean the display doesn't visibly shift as it changes (holding
      * -/+ repeats the step; a proportional font like Montserrat noticeably
      * jitters left/right as digit widths vary). Sizes match where it's
-     * actually drawn (16 compact, 20 wide), plus 9/10/11/26 for the Manual
+     * actually drawn (16 on 800x480, 20 on 1024x600), plus 9/10/11/26 for the Manual
      * Tune page's status/preset values - not preloaded at every size like
      * Montserrat, since nothing else uses it. */
     const std::string mono_font_path = executable_directory() + "/DejaVuSansMono.ttf";
@@ -4229,7 +4233,7 @@ int main(int argc, char ** argv)
     }
     /* Seven-segment/LCD-style digits, for the Manual Tune page's frequency
      * wheel and symbol-rate readout only (see tune_freq_metrics/
-     * tune_sr_font_size for where 36/40/48/56/60/76 - compact vs wide -
+     * tune_sr_font_size for where 36/40/48/56/60/76 - per screen size -
      * come from: sizes picked from this font's measured glyph width, not
      * point size, since DSEG7 runs much wider per character than the
      * DejaVu Sans Mono digits it replaced). DSEG7-Classic-Bold, SIL OFL
