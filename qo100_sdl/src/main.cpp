@@ -1938,6 +1938,16 @@ SDL_Rect settings_autostart_rect(int width, int index)
     return settings_choice_rect(settings_autostart_card_rect(width), index);
 }
 
+/* Minus/plus controls at the edges of the SIGNAL LOSS card. */
+SDL_Rect settings_beacon_return_rect(int width, int index)
+{
+    const auto & p = ui().settings;
+    const SDL_Rect card = settings_diagnostics_card_rect(width);
+    const int x = index == 0 ? card.x + p.card_pad
+                             : card.x + card.w - p.card_pad - p.loss_button_w;
+    return {x, card.y + p.loss_button_y, p.loss_button_w, p.loss_button_h};
+}
+
 /* The small "LNB CAL" button in the header of the RECEIVER TUNING card. It
  * opens the LNB calibration page (see draw_lnb_cal_page). It lives in the
  * card header, next to the LNB LO setting it relates to, because every other
@@ -1979,9 +1989,8 @@ void draw_choice_button(SDL_Renderer * renderer, TextCache & text,
 void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                         int width, int height, double lo_display_mhz,
                         int voltage_choice, int display_choice,
-                        int exit_behaviour_choice,
-                        const std::string & tuner_product,
-                        bool longmynd_connected, int native_width, int native_height,
+                        int exit_behaviour_choice, int beacon_return_seconds,
+                        int native_width, int native_height,
                         bool lnb_cal_done, const TouchState & touch)
 {
     const auto & p = ui().settings;
@@ -2065,20 +2074,28 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
                 p.button_font, false, is_pressed(touch, settings_exit_page_rect(width)));
 
     const SDL_Rect diagnostics_card = settings_diagnostics_card_rect(width);
-    draw_settings_card(renderer, text, diagnostics_card, "DIAGNOSTICS");
+    draw_settings_card(renderer, text, diagnostics_card, "SIGNAL LOSS");
     {
         const int x = diagnostics_card.x + p.card_pad;
         const int y = diagnostics_card.y;
-        text.draw("Tuner (USB)", x, y + p.diag_y[0], kText, p.diag_font);
-        text.draw(tuner_product.empty() ? "Not detected" : tuner_product,
-                  x, y + p.diag_y[1], tuner_product.empty() ? kRed : kText, p.diag_font);
-        text.draw("Longmynd Link", x, y + p.diag_y[2], kText, p.diag_font);
-        text.draw(longmynd_connected ? "Connected" : "Not connected",
-                  x, y + p.diag_y[3], longmynd_connected ? kGreen : kRed, p.diag_font);
-        text.draw("Watch in VLC (same network)", x, y + p.diag_y[4], kText, p.diag_font);
-        if(p.diag_y[5] != 0)
-            text.draw("Media > Open Network Stream:", x, y + p.diag_y[5], kTextDim, px(14));
-        text.draw(qo100::ts_stream_vlc_url(), x, y + p.diag_y[6], kCyan, p.diag_font);
+        text.draw("Return to beacon after lock loss", x, y + p.loss_label_y,
+                  kText, p.diag_font);
+        for(int index = 0; index < 2; ++index) {
+            const SDL_Rect button = settings_beacon_return_rect(width, index);
+            draw_button(renderer, text, button, index == 0 ? "-" : "+", kCyan,
+                        p.button_font, false, is_pressed(touch, button));
+        }
+        const std::string delay = beacon_return_seconds == 0
+            ? "OFF" : std::to_string(beacon_return_seconds) +
+                (beacon_return_seconds == 1 ? " second" : " seconds");
+        text.draw(delay, diagnostics_card.x + diagnostics_card.w / 2,
+                  y + p.loss_button_y + p.loss_button_h / 2,
+                  beacon_return_seconds == 0 ? kYellow : kGreen,
+                  p.button_font, true, true);
+        text.draw("Watch in VLC (same network)", x, y + p.vlc_label_y, kText, p.diag_font);
+        if(p.vlc_hint_y != 0)
+            text.draw("Media > Open Network Stream:", x, y + p.vlc_hint_y, kTextDim, px(14));
+        text.draw(qo100::ts_stream_vlc_url(), x, y + p.vlc_url_y, kCyan, p.diag_font);
     }
 
     const SDL_Rect exit_card = settings_exit_card_rect(width);
@@ -4457,7 +4474,6 @@ int main(int argc, char ** argv)
     auto last_spectrum_click = Clock::time_point{};
     bool beacon_return_armed = false;
     auto beacon_return_deadline = Clock::time_point{};
-    constexpr auto kBeaconReturnDelay = std::chrono::milliseconds(5000);
     long current_tune_if_khz = beacon_frequency_khz;
     long current_tune_symbol_rate_ksps = beacon_symbol_rate_ksps;
     struct PendingTune {
@@ -4535,6 +4551,7 @@ int main(int argc, char ** argv)
      * matching what's really on screen instead of an impossible choice. */
     int settings_display_choice = display_option_index(display.width, display.height);
     int settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
+    int settings_beacon_return_seconds = receiver_settings.beacon_return_seconds;
     std::string chat_nick;
     std::string chat_message;
     ChatInput chat_input = ChatInput::None;
@@ -5320,6 +5337,8 @@ int main(int argc, char ** argv)
                         if(settings_display_choice >= 0)
                             receiver_settings.display = display_option(settings_display_choice).name;
                         receiver_settings.exit_full_stop = settings_exit_behaviour_choice == 1;
+                        receiver_settings.beacon_return_seconds =
+                            settings_beacon_return_seconds;
                         const bool display_change_pending = settings_display_choice >= 0 &&
                             settings_display_choice !=
                                 display_option_index(display.width, display.height);
@@ -5332,12 +5351,20 @@ int main(int argc, char ** argv)
                             selected_frequency_mhz = effective_lo_mhz() +
                                 current_tune_if_khz / 1000.0;
                             qo100::log(
-                                "[SETTINGS_UI] applied LO=%.2fMHz voltage=%s display=%s exit=%s\n",
+                                "[SETTINGS_UI] applied LO=%.2fMHz voltage=%s display=%s "
+                                "exit=%s beacon_return=%ds\n",
                                 receiver_settings.lnb_lo_mhz,
                                 settings_voltage_choice == 0 ? "OFF" :
                                     (settings_voltage_choice == 1 ? "13V" : "18V"),
                                 receiver_settings.display.c_str(),
-                                settings_exit_behaviour_choice == 1 ? "full-stop" : "restart");
+                                settings_exit_behaviour_choice == 1 ? "full-stop" : "restart",
+                                receiver_settings.beacon_return_seconds);
+                            if(receiver_settings.beacon_return_seconds == 0)
+                                beacon_return_armed = false;
+                            else if(beacon_return_armed)
+                                beacon_return_deadline = Clock::now() +
+                                    std::chrono::seconds(
+                                        receiver_settings.beacon_return_seconds);
                             /* Resolution is only picked up at process start
                              * (qo100_sdl/service_launch.sh reads settings.json
                              * fresh each launch) - restart to apply, the same
@@ -5375,6 +5402,16 @@ int main(int argc, char ** argv)
                             if(point_in_rect(x, y,
                                              settings_display_res_rect(display.width, index))) {
                                 settings_display_choice = index;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        for(int index = 0; !matched && index < 2; ++index) {
+                            if(point_in_rect(x, y,
+                                             settings_beacon_return_rect(display.width, index))) {
+                                settings_beacon_return_seconds = std::clamp(
+                                    settings_beacon_return_seconds + (index == 0 ? -1 : 1),
+                                    0, 60);
                                 matched = true;
                                 break;
                             }
@@ -5601,7 +5638,7 @@ int main(int argc, char ** argv)
                         ? 0 : (receiver_settings.lnb_voltage_horizontal ? 2 : 1);
                     settings_display_choice = display_option_index(display.width, display.height);
                     settings_exit_behaviour_choice = receiver_settings.exit_full_stop ? 1 : 0;
-                    tuner_product = detect_tuner_product_string();
+                    settings_beacon_return_seconds = receiver_settings.beacon_return_seconds;
                     app_page = AppPage::Settings;
                     qo100::log("[SETTINGS_UI] opened\n");
                     continue;
@@ -5986,16 +6023,18 @@ int main(int argc, char ** argv)
                         app_page != AppPage::LnbCal && !lnb_cal.running()) {
                     const double beacon_mhz = effective_lo_mhz() +
                                               beacon_frequency_khz / 1000.0;
-                    if(std::abs(selected_frequency_mhz - beacon_mhz) > 0.02) {
+                    if(receiver_settings.beacon_return_seconds > 0 &&
+                       std::abs(selected_frequency_mhz - beacon_mhz) > 0.02) {
                         beacon_return_armed = true;
-                        beacon_return_deadline = Clock::now() + kBeaconReturnDelay;
+                        beacon_return_deadline = Clock::now() + std::chrono::seconds(
+                            receiver_settings.beacon_return_seconds);
                         /* The drop right after a retune is routine: arm the
                          * watchdog, but only say so if it isn't. */
                         beacon_return_quiet = Clock::now() - last_tune < std::chrono::seconds(3);
                         if(!beacon_return_quiet)
                             qo100::log(
-                                "[TUNE] beacon return in %lldms unless lock comes back\n",
-                                static_cast<long long>(kBeaconReturnDelay.count()));
+                                "[TUNE] beacon return in %ds unless lock comes back\n",
+                                receiver_settings.beacon_return_seconds);
                     }
                 }
             }
@@ -6250,7 +6289,7 @@ int main(int argc, char ** argv)
                                    : receiver_settings.lnb_lo_mhz,
                                settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
-                               tuner_product, receiver_client.monitor_connected(),
+                               settings_beacon_return_seconds,
                                display.native_width, display.native_height,
                                qo100::lnb_calibrated(receiver_settings),
                                touch);
@@ -6432,7 +6471,6 @@ int main(int argc, char ** argv)
         std::string video_codec = options.demo ? "DEMO" : video_decoder.codec_name();
         std::string audio_codec = video_decoder.audio_codec_name();
         std::string screenshot_tuner = tuner_product;
-        bool screenshot_monitor = receiver_client.monitor_connected();
         if(screenshot_static) {
             /* A flat noise floor with the wide beacon and three narrower
              * carriers on it, in the feed's own units (see draw_spectrum). */
@@ -6469,7 +6507,6 @@ int main(int argc, char ** argv)
             video_codec = "H.264";
             audio_codec = "MP2";
             screenshot_tuner = "MiniTiouner-Pro TS2";
-            screenshot_monitor = true;
             screenshot_chat = qo100::ChatState{};
             screenshot_chat.connection = qo100::ChatState::Connection::Connected;
             screenshot_chat.viewers = "42";
@@ -6496,7 +6533,7 @@ int main(int argc, char ** argv)
                                    : receiver_settings.lnb_lo_mhz,
                                settings_voltage_choice,
                                settings_display_choice, settings_exit_behaviour_choice,
-                               screenshot_tuner, screenshot_monitor,
+                               settings_beacon_return_seconds,
                                display.native_width, display.native_height,
                                qo100::lnb_calibrated(receiver_settings),
                                TouchState{});

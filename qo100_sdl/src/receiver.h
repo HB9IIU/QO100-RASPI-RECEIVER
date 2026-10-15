@@ -43,6 +43,9 @@ struct ReceiverSettings {
     bool lnb_voltage_enabled = false;
     bool lnb_voltage_horizontal = false;
     int audio_volume_percent = 50;
+    /* Seconds without tuner lock before returning to the QO-100 beacon.
+     * 0 disables the automatic return; the Settings UI allows 0..60. */
+    int beacon_return_seconds = 5;
     /* The screen layout chosen on SET, as "WIDTHxHEIGHT" - one of the
      * screen-size profiles (ui_profile.h). Stored as "display"; also
      * written as the older display_800x480 flag, which service_launch.sh

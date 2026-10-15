@@ -54,7 +54,7 @@ struct UiProfile {
         int column_gap;     /* between the left and right card columns */
         int card_gap;       /* between cards stacked in a column */
         int card_pad;       /* card edge to its title, labels and buttons */
-        int tall_card_h;    /* RECEIVER TUNING, DIAGNOSTICS */
+        int tall_card_h;    /* RECEIVER TUNING, SIGNAL LOSS */
         int short_card_h;   /* DISPLAY RESOLUTION, EXIT BUTTON, AUTO START */
         bool card_hints;    /* the dim one-line hints at a card's bottom */
         int label_font;
@@ -78,11 +78,16 @@ struct UiProfile {
         int choice_h;
         int save_w;         /* SAVE & APPLY and EXIT */
         int save_h;
-        /* DIAGNOSTICS card: text line offsets from the card's top - tuner
-         * label, tuner, link label, link, VLC label, "Media > Open Network
-         * Stream" (0 = not shown), VLC address. */
+        /* SIGNAL LOSS card: control and VLC line geometry. A zero VLC hint
+         * offset omits the extra instruction on the compact layout. */
         int diag_font;
-        int diag_y[7];
+        int loss_label_y;
+        int loss_button_y;
+        int loss_button_w;
+        int loss_button_h;
+        int vlc_label_y;
+        int vlc_hint_y;
+        int vlc_url_y;
     } settings;
 
     /* ---- LNB calibration page ---- */
@@ -122,7 +127,7 @@ inline constexpr UiProfile kUiProfiles[] = {
             46, 70, 38, 16, 9, 122, 144, 106, 118, 38,
             40, 166, 178, 34,
             150, 38,
-            14, {46, 64, 88, 106, 130, 0, 150},
+            14, 50, 73, 70, 38, 130, 0, 150,
         },
         /* lnb_cal */ {15, 16, 16, 236},
         /* tune */ {20, 38, 92, 46, 58, 48, 36, 8, 72, 11, 14},
@@ -136,7 +141,7 @@ inline constexpr UiProfile kUiProfiles[] = {
             50, 78, 48, 20, 11, 132, 164, 104, 116, 50,
             48, 200, 216, 40,
             200, 40,
-            16, {55, 76, 109, 130, 163, 184, 201},
+            16, 58, 84, 88, 42, 158, 181, 202,
         },
         /* lnb_cal */ {16, 18, 20, 290},
         /* tune */ {22, 46, 128, 70, 90, 76, 56, 24, 100, 14, 20},
@@ -151,7 +156,7 @@ inline constexpr UiProfile kUiProfiles[] = {
             60, 94, 58, 24, 13, 158, 197, 125, 139, 60,
             58, 240, 259, 48,
             240, 48,
-            19, {66, 91, 131, 156, 196, 221, 241},
+            19, 70, 101, 106, 50, 190, 217, 243,
         },
         /* lnb_cal */ {19, 22, 24, 348},
         /* tune */ {26, 55, 154, 84, 108, 91, 67, 29, 120, 17, 24},

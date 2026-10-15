@@ -36,6 +36,18 @@ keypress along the way. More detail is in [Setup, step by step](#setup-step-by-s
 
 # 🆕 WHAT'S NEW!!!
 
+## Adjustable return to beacon after signal loss
+
+When a tuned signal disappears, the receiver can automatically return to the
+QO-100 beacon after a delay chosen by the user. Open **SET** → **SIGNAL LOSS**
+and use the − and + buttons to select anything from **OFF** to **60 seconds**.
+The default remains 5 seconds.
+
+If the signal locks again before the delay expires, the pending return is
+cancelled. This responds to tuner lock loss; a temporary loss of video alone
+does not retune the receiver. Existing installations keep their current
+five-second behaviour until a different value is saved.
+
 ## Frequency Offset Calibration — no more entering offsets by hand
 
 You no longer have to work out your LNB's frequency error and type an offset
