@@ -4,6 +4,8 @@
 
 # Python
 .venv/
+venv/
+calibration-venv/
 __pycache__/
 *.pyc
 
@@ -27,6 +29,7 @@ rtl-sdr-server-source/reports/
 qo100_lvgl/lvgl/
 longmynd_ws/web/libwebsockets/
 PicoTuner/
+open_tuner/
 
 # Compiled binaries from longmynd_ws
 longmynd_ws/longmynd
