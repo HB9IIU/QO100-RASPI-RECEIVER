@@ -162,6 +162,7 @@ EOF
 
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=0403 --attr-match=idProduct=6010
+sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=2e8a --attr-match=idProduct=ba2c || true
 sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=0bda || true
 
 step "📻 Checking the bundled RTL-SDR spectrum server..."

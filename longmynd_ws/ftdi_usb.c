@@ -342,6 +342,32 @@ static uint8_t ftdi_usb_init(libusb_context **usb_context_ptr, libusb_device_han
     return err;
 }
 
+/* -------------------------------------------------------------------------------------------------- */
+bool ftdi_usb_present(uint8_t usb_bus, uint8_t usb_addr, uint16_t vid, uint16_t pid) {
+/* -------------------------------------------------------------------------------------------------- */
+/* looks (without opening anything) for a device with this vid/pid, at usb_bus/usb_addr if given     */
+/* return : true if there is one                                                                      */
+/* -------------------------------------------------------------------------------------------------- */
+    libusb_context *context;
+    libusb_device **list;
+    struct libusb_device_descriptor descriptor;
+    ssize_t count;
+    bool found=false;
+
+    if (libusb_init(&context)<0) return false;
+    count=libusb_get_device_list(context, &list);
+    for (ssize_t i=0; i<count && !found; i++) {
+        if ((usb_bus!=0 || usb_addr!=0) &&
+            ((libusb_get_bus_number(list[i])!=usb_bus) || (libusb_get_device_address(list[i])!=usb_addr))) continue;
+        if (libusb_get_device_descriptor(list[i], &descriptor)<0) continue;
+        found=(descriptor.idVendor==vid) && (descriptor.idProduct==pid);
+    }
+    if (count>=0) libusb_free_device_list(list, 1);
+    libusb_exit(context);
+
+    return found;
+}
+
 uint8_t ftdi_usb_init_i2c(uint8_t usb_bus, uint8_t usb_addr, uint16_t vid, uint16_t pid) {
     return ftdi_usb_init(&usb_context_i2c, &usb_device_handle_i2c, 0, usb_bus, usb_addr, vid, pid);
 }

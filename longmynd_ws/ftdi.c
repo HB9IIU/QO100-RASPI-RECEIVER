@@ -41,6 +41,11 @@
 #define FTDI_VID 0x0403
 #define FTDI_PID 0x6010
 
+/* BATC PicoTuner: a Raspberry Pi Pico in place of the FTDI chip. It copies the FTDI's interfaces,   */
+/* endpoints and MPSSE commands; its first tuner is the stream on endpoint 0x83, as on the FTDI.     */
+#define PICOTUNER_VID 0x2E8A
+#define PICOTUNER_PID 0xBA2C
+
 #define FTDI_NUM_TRIES 10
 #define FTDI_STOP_START_REPEATS 4
 #define FTDI_RDWR_TIMEOUT 100
@@ -93,6 +98,9 @@ static uint8_t ftdi_gpio_value = 0x6f;
 /* Default GPIO direction 0xf1 = 0b11110001 = LNB pins, NIM Reset are outputs, TS2SYNC is input (0 for in and 1 for out) */
 static uint8_t ftdi_gpio_direction = 0xf1;
 
+/* set by ftdi_init when the device opened is a PicoTuner, see ftdi_is_picotuner() */
+static bool ftdi_picotuner = false;
+
 /* ADBUS/low byte GPIO state for the second LNB bias output - all pins
  * output, all low (bias off) by default, matching OpenTuner's FTDIInterface.cs. */
 static uint8_t ftdi_gpio_lowbyte_value = 0x00;
@@ -124,7 +132,8 @@ uint8_t ftdi_setup_ftdi_io(void){
     num_bytes_to_send = 0;
     /* next we keep reading it until we get it back, and the reply before it */
     for (i=0; i<FTDI_NUM_TRIES; i++) {
-        if (err==ERROR_NONE) ftdi_usb_i2c_read(&in_buffer);
+        /* a failed read leaves in_buffer unset: just try again */
+        if (ftdi_usb_i2c_read(&in_buffer)!=ERROR_NONE) continue;
         if ((old_in_buffer==0xFA) && (*in_buffer==0xAA)) {
              printf("      Status: MPSSE Synched ");
              printf("%.2X %.2X\n",*in_buffer,old_in_buffer);
@@ -565,17 +574,36 @@ uint8_t ftdi_set_polarisation_supply(bool supply_enable, bool supply_horizontal)
 }
 
 /* -------------------------------------------------------------------------------------------------- */
+bool ftdi_is_picotuner(void) {
+/* -------------------------------------------------------------------------------------------------- */
+/* true when ftdi_init opened a PicoTuner instead of a MiniTiouner                                    */
+/* -------------------------------------------------------------------------------------------------- */
+    return ftdi_picotuner;
+}
+
+/* -------------------------------------------------------------------------------------------------- */
 uint8_t ftdi_init(uint8_t usb_bus, uint8_t usb_addr) {
 /* -------------------------------------------------------------------------------------------------- */
 /* initialises the ftdi module on the minitiouner                                                    */
 /* -------------------------------------------------------------------------------------------------- */
     uint8_t err;
+    uint16_t vid=FTDI_VID;
+    uint16_t pid=FTDI_PID;
 
     printf("Flow: FTDI init\n");
 
-    err=ftdi_usb_init_i2c(usb_bus, usb_addr, FTDI_VID, FTDI_PID);
+    /* a MiniTiouner first; a PicoTuner only when there is none */
+    if (!ftdi_usb_present(usb_bus, usb_addr, FTDI_VID, FTDI_PID) &&
+         ftdi_usb_present(usb_bus, usb_addr, PICOTUNER_VID, PICOTUNER_PID)) {
+        vid=PICOTUNER_VID;
+        pid=PICOTUNER_PID;
+        ftdi_picotuner=true;
+        printf("      Status: PicoTuner found (%04x:%04x), using its first tuner\n", vid, pid);
+    }
+
+    err=ftdi_usb_init_i2c(usb_bus, usb_addr, vid, pid);
     if (err==ERROR_NONE) err=ftdi_usb_set_mpsse_mode_i2c();
-    if (err==ERROR_NONE) err=ftdi_usb_init_ts(usb_bus, usb_addr, FTDI_VID, FTDI_PID);
+    if (err==ERROR_NONE) err=ftdi_usb_init_ts(usb_bus, usb_addr, vid, pid);
     if (err==ERROR_NONE) err=ftdi_usb_set_mpsse_mode_ts();
     if (err==ERROR_NONE) err=ftdi_setup_ftdi_io();
     if (err==ERROR_NONE) err=ftdi_nim_reset();

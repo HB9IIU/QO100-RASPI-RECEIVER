@@ -148,12 +148,38 @@ bool autostart_enabled()
     return access(autostart_desktop_file_path().c_str(), F_OK) == 0;
 }
 
-std::string detect_tuner_product_string()
+/* A MiniTiouner (FTDI 0403:6010) or, when there is none, a BATC PicoTuner
+ * (2e8a:ba2c) - the same order longmynd's ftdi_init() opens them in, so the
+ * name shown is the device that will actually be used.
+ * *accessible: whether that device's /dev/bus/usb node can be opened, i.e.
+ * the udev rule from scripts/initialSetup.sh is in place for it (an update
+ * through the app's own popup cannot install one - no sudo there). */
+std::string detect_tuner_product_string(bool * accessible)
 {
+    *accessible = true;
     DIR * directory = opendir("/sys/bus/usb/devices");
     if(directory == nullptr) return {};
 
+    const auto node_accessible = [](const std::string & path) {
+        int bus = 0;
+        int device = 0;
+        FILE * bus_file = std::fopen((path + "/busnum").c_str(), "r");
+        if(bus_file == nullptr) return true;
+        const bool have_bus = std::fscanf(bus_file, "%d", &bus) == 1;
+        std::fclose(bus_file);
+        FILE * device_file = std::fopen((path + "/devnum").c_str(), "r");
+        if(device_file == nullptr) return true;
+        const bool have_device = std::fscanf(device_file, "%d", &device) == 1;
+        std::fclose(device_file);
+        if(!have_bus || !have_device) return true;
+        char node[32]{};
+        std::snprintf(node, sizeof(node), "/dev/bus/usb/%03d/%03d", bus, device);
+        return access(node, R_OK | W_OK) == 0;
+    };
+
     std::string result;
+    std::string picotuner;
+    bool picotuner_accessible = true;
     while(const dirent * entry = readdir(directory)) {
         const std::string path =
             std::string("/sys/bus/usb/devices/") + entry->d_name;
@@ -163,7 +189,7 @@ std::string detect_tuner_product_string()
         const bool have_vendor =
             std::fgets(vendor, sizeof(vendor), vendor_file) != nullptr;
         std::fclose(vendor_file);
-        if(!have_vendor || std::strncmp(vendor, "0403", 4) != 0) continue;
+        if(!have_vendor) continue;
 
         char product_id[8]{};
         FILE * product_id_file =
@@ -172,22 +198,40 @@ std::string detect_tuner_product_string()
         const bool have_product_id =
             std::fgets(product_id, sizeof(product_id), product_id_file) != nullptr;
         std::fclose(product_id_file);
-        if(!have_product_id || std::strncmp(product_id, "6010", 4) != 0) continue;
+        if(!have_product_id) continue;
+
+        const bool is_minitiouner = std::strncmp(vendor, "0403", 4) == 0 &&
+                                    std::strncmp(product_id, "6010", 4) == 0;
+        const bool is_picotuner = std::strncmp(vendor, "2e8a", 4) == 0 &&
+                                  std::strncmp(product_id, "ba2c", 4) == 0;
+        if(!is_minitiouner && !is_picotuner) continue;
 
         FILE * product_file = std::fopen((path + "/product").c_str(), "r");
         if(product_file == nullptr) continue;
         char product[128]{};
+        std::string name;
         if(std::fgets(product, sizeof(product), product_file) != nullptr) {
-            result = product;
-            while(!result.empty() &&
-                  (result.back() == '\n' || result.back() == '\r'))
-                result.pop_back();
+            name = product;
+            while(!name.empty() &&
+                  (name.back() == '\n' || name.back() == '\r'))
+                name.pop_back();
         }
         std::fclose(product_file);
+        if(is_picotuner) {
+            if(picotuner.empty()) {
+                picotuner = name.empty() ? "PicoTuner" : name;
+                picotuner_accessible = node_accessible(path);
+            }
+            continue;
+        }
+        result = name;
+        *accessible = node_accessible(path);
         break;
     }
     closedir(directory);
-    return result;
+    if(!result.empty()) return result;
+    *accessible = picotuner_accessible;
+    return picotuner;
 }
 
 /* RTL2832U-based dongles (the common QO-100 wideband RTL-SDR sticks) enumerate
@@ -1569,21 +1613,25 @@ void draw_button(SDL_Renderer * renderer, TextCache & text, SDL_Rect rect,
     if(pressed) fill_rounded_rect(renderer, rect, kButtonRadius, {255, 255, 255, 60});
 }
 
-enum class TunerPopupKind { None, Detected, NotFound };
+/* NoAccess: a tuner is plugged in but its USB node can't be opened - the
+ * udev rule from scripts/initialSetup.sh is missing (see
+ * detect_tuner_product_string). */
+enum class TunerPopupKind { None, Detected, NotFound, NoAccess };
 
 SDL_Rect tuner_popup_rect(int screen_width, int screen_height,
                           TunerPopupKind kind)
 {
     const int width = std::min(px(600), screen_width - px(80));
-    const int height = px(kind == TunerPopupKind::NotFound ? 230 : 170);
+    const int height = px(kind == TunerPopupKind::Detected ? 170
+                          : kind == TunerPopupKind::NoAccess ? 320 : 230);
     return {(screen_width - width) / 2, (screen_height - height) / 2,
             width, height};
 }
 
-SDL_Rect tuner_popup_close_rect(int screen_width, int screen_height)
+SDL_Rect tuner_popup_close_rect(int screen_width, int screen_height,
+                                TunerPopupKind kind)
 {
-    const SDL_Rect popup = tuner_popup_rect(
-        screen_width, screen_height, TunerPopupKind::NotFound);
+    const SDL_Rect popup = tuner_popup_rect(screen_width, screen_height, kind);
     return {popup.x + (popup.w - px(150)) / 2, popup.y + popup.h - px(62), px(150), px(44)};
 }
 
@@ -1610,12 +1658,27 @@ void draw_tuner_popup(SDL_Renderer * renderer, TextCache & text,
         text.draw(product, centre_x, popup.y + px(105), kGreen, px(32), true);
     }
     else {
-        text.draw("NO TUNER FOUND", centre_x, popup.y + px(40), kRed, px(32), true);
-        text.draw("No MiniTiouner detected on USB.", centre_x,
-                  popup.y + px(92), kText, px(20), true);
-        text.draw("Check the cable and power, then restart the app.", centre_x,
-                  popup.y + px(122), kText, px(20), true);
-        const SDL_Rect close_button = tuner_popup_close_rect(screen_width, screen_height);
+        if(kind == TunerPopupKind::NoAccess) {
+            text.draw("TUNER NOT ENABLED", centre_x, popup.y + px(40), kRed, px(32), true);
+            text.draw(product + " found, but it needs a one-time setup.", centre_x,
+                      popup.y + px(92), kText, px(20), true);
+            text.draw("Open a Terminal and type:", centre_x,
+                      popup.y + px(122), kText, px(20), true);
+            text.draw("~/DATVreceiver/scripts/initialSetup.sh", centre_x,
+                      popup.y + px(152), kGreen, px(20), true);
+            text.draw("It asks for your password, then restarts the Pi.", centre_x,
+                      popup.y + px(182), kText, px(20), true);
+            text.draw("Sorry for the inconvenience.", centre_x,
+                      popup.y + px(212), kText, px(20), true);
+        }
+        else {
+            text.draw("NO TUNER FOUND", centre_x, popup.y + px(40), kRed, px(32), true);
+            text.draw("No MiniTiouner or PicoTuner detected on USB.", centre_x,
+                      popup.y + px(92), kText, px(20), true);
+            text.draw("Check the cable and power, then restart the app.", centre_x,
+                      popup.y + px(122), kText, px(20), true);
+        }
+        const SDL_Rect close_button = tuner_popup_close_rect(screen_width, screen_height, kind);
         draw_button(renderer, text, close_button, "CLOSE", kRed, px(16),
                     false, is_pressed(touch, close_button));
     }
@@ -4396,17 +4459,20 @@ int main(int argc, char ** argv)
 
     VideoScheduler scheduler;
     const bool use_tuner = !options.no_tuner && !options.demo;
+    bool tuner_accessible = true;
     std::string tuner_product = use_tuner
-        ? detect_tuner_product_string() : std::string{};
+        ? detect_tuner_product_string(&tuner_accessible) : std::string{};
     TunerPopupKind tuner_popup = !use_tuner
         ? TunerPopupKind::None
-        : (tuner_product.empty()
-            ? TunerPopupKind::NotFound : TunerPopupKind::Detected);
+        : (tuner_product.empty() ? TunerPopupKind::NotFound
+           : !tuner_accessible ? TunerPopupKind::NoAccess
+           : TunerPopupKind::Detected);
     if(use_tuner) {
         if(tuner_product.empty())
-            qo100::log("[TUNER_USB] no MiniTiouner detected (VID:PID 0403:6010)\n");
+            qo100::log("[TUNER_USB] no MiniTiouner (VID:PID 0403:6010) or PicoTuner (2e8a:ba2c) detected\n");
         else
-            qo100::log("[TUNER_USB] detected product=%s\n", tuner_product.c_str());
+            qo100::log("[TUNER_USB] detected product=%s%s\n", tuner_product.c_str(),
+                       tuner_accessible ? "" : " (no access: udev rule missing)");
     }
     UpdateChecker update_checker;
     update_checker.start(repository_root);
@@ -4518,7 +4584,7 @@ int main(int argc, char ** argv)
      *                           (keyboard open), chatsym (symbol keys), tune,
      *                           lnbcal, lnbcalrun (a run in progress),
      *                           fullscreen
-     *   QO100_SCREENSHOT_POPUP  a popup on top of the page: tuner, notuner,
+     *   QO100_SCREENSHOT_POPUP  a popup on top of the page: tuner, notuner, tuneraccess,
      *                           update, updating, updatefail, rtlask,
      *                           lnbprompt, sourceok, sourcefail
      *   QO100_SCREENSHOT_LOCAL=1  pretend the local RTL-SDR is the spectrum
@@ -5194,13 +5260,15 @@ int main(int argc, char ** argv)
                     rtlsdr_ask_popup != RtlSdrAskPopupKind::None))
                     continue;
                 if(boot_stage_opened && tuner_popup != TunerPopupKind::None) {
-                    if(tuner_popup == TunerPopupKind::NotFound) {
+                    if(tuner_popup != TunerPopupKind::Detected) {
                         const SDL_Rect close_button =
-                            tuner_popup_close_rect(display.width, display.height);
+                            tuner_popup_close_rect(display.width, display.height, tuner_popup);
                         if(x >= close_button.x && x < close_button.x + close_button.w &&
                            y >= close_button.y && y < close_button.y + close_button.h) {
                             tuner_popup = TunerPopupKind::None;
-                            qo100::log("[TUNER_USB] no-tuner popup closed\n");
+                            qo100::log("[TUNER_USB] %s popup closed\n",
+                                       tuner_popup == TunerPopupKind::NotFound
+                                           ? "no-tuner" : "no-access");
                         }
                     }
                     continue;
@@ -6619,6 +6687,7 @@ int main(int argc, char ** argv)
         draw_tuner_popup(renderer, text, display.width, display.height,
                          popup == "tuner" ? TunerPopupKind::Detected
                          : popup == "notuner" ? TunerPopupKind::NotFound
+                         : popup == "tuneraccess" ? TunerPopupKind::NoAccess
                          : TunerPopupKind::None,
                          screenshot_tuner, TouchState{});
         SDL_RenderPresent(renderer);

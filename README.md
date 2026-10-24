@@ -1,7 +1,8 @@
 # QO-100 DATV Receiver (Raspberry Pi 4/5)
 
 A standalone QO-100 (Es'hail-2) digital amateur TV receiver. Runs on a 
-**Raspberry Pi 4 or 5**, driving a **MiniTiouner** tuner, with a fullscreen
+**Raspberry Pi 4 or 5**, driving a **MiniTiouner** (or, experimentally, a
+**BATC PicoTuner**) tuner, with a fullscreen
 touchscreen app that shows the spectrum, decodes the video, lets you tap to
 tune, and connects to the QO-100 wideband chat. Everything is operated by
 touch — no keyboard or mouse needed once it's set up.
@@ -35,6 +36,33 @@ That installs everything, builds the app, sets it to start at boot, and
 keypress along the way. More detail is in [Setup, step by step](#setup-step-by-step).
 
 # 🆕 WHAT'S NEW!!!
+
+## PicoTuner support (experimental)
+
+The receiver can now also use a **BATC PicoTuner** — the Raspberry Pi
+Pico–based USB interface for the MiniTiouner V3 — in place of a MiniTiouner.
+Just plug it in: the app finds it by itself and shows it in the start-up
+**DETECTED TUNER** message. If both are connected, the MiniTiouner is used.
+
+<img src="assets/picotuner_emulator.png" alt="The receiver locked on the beacon through a PicoTuner emulator, showing its test card" width="70%">
+
+Please note:
+
+- **Not yet tested with a real PicoTuner.** It was developed and tested with
+  a [PicoTuner emulator](https://github.com/HB9IIU/PicoTunerEmulator) (an
+  ordinary Pico that behaves like a PicoTuner): detection, tuning, lock and
+  video all work. Real reception, LNB power and long-term running still need
+  a real one. **If you own a PicoTuner, please try it and tell me how it
+  went** — good or bad.
+- Only the PicoTuner's **first tuner** is used, the same single receiver as
+  with a MiniTiouner.
+- The PicoTuner uses USB 1.1, so it is meant for the low symbol rates used on
+  QO-100 (the beacon's 1500 kS/s and below).
+- **Already installed?** An update from the app's own popup can't install the
+  new USB permission the PicoTuner needs. Until you do it once by hand, the
+  app shows **TUNER NOT ENABLED** when a PicoTuner is plugged in. Open a
+  Terminal and type `~/DATVreceiver/scripts/initialSetup.sh` — it asks for
+  your password and restarts the Pi at the end. Sorry for the inconvenience.
 
 ## Adjustable return to beacon after signal loss
 
@@ -177,7 +205,8 @@ scripts/initialSetup.sh
 - Raspberry Pi 4 Model B or Raspberry Pi 5, running Raspberry Pi OS
   (Bookworm or newer) with a desktop.
 - A MiniTiouner tuner. Tested with the **Pro TS2** and the **S** — other
-  variants (Express, original) likely work too but haven't been tried.
+  variants (Express, original) likely work too but haven't been tried. Or,
+  experimentally, a **BATC PicoTuner** (see **What's NEW!!!** above).
 - Optionally, an RTL2832U RTL-SDR stick for a locally generated spectrum.
   Without one, the app continues to use the BATC spectrum feed. The RTL-SDR
   cannot power an LNB, so local reception also requires a suitable external
@@ -228,7 +257,7 @@ starts. Safe to
 re-run (from `cd ~/DATVreceiver && scripts/initialSetup.sh`) if something
 goes wrong partway through.
 
-Plug the MiniTiouner and optional RTL-SDR into USB ports before or during
+Plug the MiniTiouner (or PicoTuner) and optional RTL-SDR into USB ports before or during
 this step, if they are not already connected.
 
 ### 2. Check it worked
@@ -242,8 +271,10 @@ systemctl --user status qo100datv.service
 ```
 
 This shows whether it's running, and if not, why. If it says "No
-MiniTiouner detected on USB" on screen: check the tuner is properly plugged
-in. If it doesn't lock onto a signal: make sure the antenna/LNB is actually
+MiniTiouner or PicoTuner detected on USB" on screen: check the tuner is
+properly plugged in. If it says **TUNER NOT ENABLED**: the tuner's USB
+permission is missing — rerun `scripts/initialSetup.sh` (it restarts the Pi
+at the end). If it doesn't lock onto a signal: make sure the antenna/LNB is actually
 pointed at QO-100, and check the **SET** page for the LNB settings (LO
 offset, bias voltage) match your hardware.
 
@@ -263,7 +294,7 @@ version and rebuilds); it doesn't touch system packages, udev rules, or
 reboot, so it never needs a password.
 
 If an update ever needs more than that (a new dependency, a udev rule
-change), do a full update by hand instead:
+change — PicoTuner support was one), do a full update by hand instead:
 
 ```bash
 cd ~/DATVreceiver
@@ -318,7 +349,7 @@ scripts/uninstall.sh
 ```
 
 Undoes everything the setup steps above did — stops and removes both
-background services, the desktop shortcut, MiniTiouner/RTL-SDR USB rules,
+background services, the desktop shortcut, MiniTiouner/PicoTuner/RTL-SDR USB rules,
 the RTL-SDR driver blacklist, and the UDP-buffer system tweak — then
 **deletes the `DATVreceiver` folder itself**, screenshots and saved settings
 included. No confirmation prompt;
@@ -329,7 +360,7 @@ are left alone — see the script's own comments for why.
 
 | Path | What it is |
 |---|---|
-| `longmynd_ws/` | The tuner driver (a modified version of an existing open-source project), talks to the MiniTiouner over USB. |
+| `longmynd_ws/` | The tuner driver (a modified version of an existing open-source project), talks to the MiniTiouner (or PicoTuner) over USB. |
 | `qo100_sdl/` | The actual app — the touchscreen UI you see and use. |
 | `qo100_sdl/tools/rtl-sdr-server` | Bundled local RTL-SDR spectrum server. |
 | `rtl-sdr-server-source/` | Source, tests, documentation, and build tooling for the bundled spectrum server. |
@@ -351,6 +382,7 @@ thanks are owed to:
 
 - **Heather Lomond**, who wrote [Longmynd](https://github.com/BritishAmateurTelevisionClub/longmynd), the actual driver talking to the MiniTiouner hardware and doing the real DVB-S/S2 work underneath this whole receiver.
 - **Phil Crump**, whose fork of Longmynd adds the websocket status/control server this project builds on.
+- **Colin Durbridge, G4EML**, who designed the PicoTuner and wrote its firmware.
 - **BATC** (British Amateur Television Club), whose live wideband spectrum feed and QO-100 chat this app connects to.
 - **Andy Green**, author of libwebsockets, used throughout for all of the above.
 - **Tom, ZR6TG**, whose OpenTuner interface was the spark that got me wanting to build this in the first place.

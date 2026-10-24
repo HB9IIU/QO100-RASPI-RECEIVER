@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /* Definitions for flow control */
 #define USB_TIMEOUT 5000
@@ -37,6 +38,7 @@ uint8_t ftdi_usb_set_mpsse_mode_ts(void);
 uint8_t ftdi_usb_ts_read(uint8_t *, uint16_t *, uint32_t);
 uint8_t ftdi_usb_init_i2c(uint8_t, uint8_t, uint16_t, uint16_t);
 uint8_t ftdi_usb_init_ts(uint8_t, uint8_t, uint16_t, uint16_t);
+bool ftdi_usb_present(uint8_t, uint8_t, uint16_t, uint16_t);
 
 #endif
 

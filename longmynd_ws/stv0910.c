@@ -32,6 +32,7 @@
 #include "stv0910_regs.h"
 #include "stv0910_utils.h"
 #include "nim.h"
+#include "ftdi.h"
 #include "errors.h"
 #include "stv0910_regs_init.h"
 
@@ -696,6 +697,12 @@ uint8_t stv0910_init_regs() {
         if (err==ERROR_NONE) err=stv0910_write_reg(STV0910DefVal[i].reg, STV0910DefVal[i].val);
     }        
     while (STV0910DefVal[i++].reg!=RSTV0910_TSTTSRS);
+
+    /* the PicoTuner reads the transport streams serially (on D7), not in parallel */
+    if (ftdi_is_picotuner()) {
+        if (err==ERROR_NONE) err=stv0910_write_reg(RSTV0910_P1_TSCFGH, 0x40);
+        if (err==ERROR_NONE) err=stv0910_write_reg(RSTV0910_P2_TSCFGH, 0x40);
+    }
 
     /* finally (from ST example code) reset the LDPC decoder */
     if (err==ERROR_NONE) err=stv0910_write_reg(RSTV0910_TSTRES0, 0x80);
