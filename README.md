@@ -44,7 +44,9 @@ Pico–based USB interface for the MiniTiouner V3 — in place of a MiniTiouner.
 Just plug it in: the app finds it by itself and shows it in the start-up
 **DETECTED TUNER** message. If both are connected, the MiniTiouner is used.
 
+<p align="center">
 <img src="assets/picotuner_emulator.png" alt="The receiver locked on the beacon through a PicoTuner emulator, showing its test card" width="70%">
+</p>
 
 Please note:
 
