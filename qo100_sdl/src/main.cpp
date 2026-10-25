@@ -4158,11 +4158,20 @@ private:
             "' ls-remote --heads origin main 2>/dev/null");
         if(local.empty() || remote_line.empty()) return;
         const std::string remote = remote_line.substr(0, remote_line.find('\t'));
-        if(!remote.empty() && remote != local) {
-            available_.store(true);
-            qo100::log("[UPDATE] new version available (local=%.10s remote=%.10s)\n",
+        if(remote.empty() || remote == local) return;
+        /* GitHub's commit already part of this one: the Pi is ahead (local,
+         * unpushed work), nothing to update to. An unknown remote commit -
+         * the usual new release, never fetched here - makes this fail. */
+        if(!run_command_capture_output(
+               "git -C '" + repository_root + "' merge-base --is-ancestor " + remote +
+               " HEAD 2>/dev/null && echo ahead").empty()) {
+            qo100::log("[UPDATE] local=%.10s is ahead of remote=%.10s, no update\n",
                        local.c_str(), remote.c_str());
+            return;
         }
+        available_.store(true);
+        qo100::log("[UPDATE] new version available (local=%.10s remote=%.10s)\n",
+                   local.c_str(), remote.c_str());
     }
 
     std::atomic<bool> available_{false};
