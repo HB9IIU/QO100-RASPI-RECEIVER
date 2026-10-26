@@ -37,6 +37,18 @@ keypress along the way. More detail is in [Setup, step by step](#setup-step-by-s
 
 # 🆕 WHAT'S NEW!!!
 
+## Watch in VLC on any computer — now over HTTP
+
+The **SET** page shows an address such as `http://192.168.0.189:8091/`
+under **Watch in VLC**. Open VLC on a computer on the same home network,
+choose **Media → Open Network Stream** (on a Mac: **File → Open Network**),
+paste the address and play — several computers can watch at the same time.
+
+Until now this was a `udp://@239.1.x.y:5600` multicast address, which many
+home routers and Wi-Fi networks don't pass on to other devices, so VLC often
+showed nothing. The multicast address still works where it did before. Not
+available in local RTL-SDR mode, where the stream stays on the Pi.
+
 ## PicoTuner support (experimental)
 
 The receiver can now also use a **BATC PicoTuner** — the Raspberry Pi

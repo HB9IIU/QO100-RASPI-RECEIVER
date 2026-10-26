@@ -17,6 +17,7 @@ add_executable(qo100sdl
     src/main.cpp
     src/chat_client.cpp
     src/receiver.cpp
+    src/http_stream.cpp
     src/video_decoder.cpp)
 target_compile_options(qo100sdl PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(qo100sdl PRIVATE

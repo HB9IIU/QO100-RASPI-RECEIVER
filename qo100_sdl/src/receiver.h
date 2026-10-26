@@ -117,8 +117,11 @@ bool save_tune_presets(const std::string & repository_root,
                        const std::vector<TunePreset> & presets);
 
 /* Network stream URL to paste into VLC (Media > Open Network Stream) to
- * watch the same feed the app is decoding, e.g. "udp://@239.1.37.142:5600" -
- * this Pi's own multicast group (see ts_address.h). */
+ * watch the same feed the app is decoding, e.g. "http://192.168.0.189:8091/"
+ * (served by HttpStreamServer, see http_stream.h). "" when there is none to
+ * offer: local RTL-SDR mode, or no network. The multicast itself
+ * (udp://@<ts_address.h group>:5600) still works wherever the network
+ * passes multicast. */
 std::string ts_stream_vlc_url();
 
 struct ReceiverStatus {

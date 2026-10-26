@@ -43,6 +43,8 @@
 #include "ui_profile.h"
 #include "app_log.h"
 #include "chat_client.h"
+#include "http_stream.h"
+#include "ts_address.h"
 #include "video_decoder.h"
 #include "video_scheduler.h"
 
@@ -2158,7 +2160,13 @@ void draw_settings_page(SDL_Renderer * renderer, TextCache & text,
         text.draw("Watch in VLC (same network)", x, y + p.vlc_label_y, kText, p.diag_font);
         if(p.vlc_hint_y != 0)
             text.draw("Media > Open Network Stream:", x, y + p.vlc_hint_y, kTextDim, px(14));
-        text.draw(qo100::ts_stream_vlc_url(), x, y + p.vlc_url_y, kCyan, p.diag_font);
+        const std::string vlc_url = qo100::ts_stream_vlc_url();
+        if(!vlc_url.empty())
+            text.draw(vlc_url, x, y + p.vlc_url_y, kCyan, p.diag_font);
+        else
+            text.draw(qo100::ts_stream_address() == "127.0.0.1"
+                          ? "Not in local RTL-SDR mode" : "No network connection",
+                      x, y + p.vlc_url_y, kTextDim, p.diag_font);
     }
 
     const SDL_Rect exit_card = settings_exit_card_rect(width);
@@ -4277,7 +4285,8 @@ int main(int argc, char ** argv)
     g_ui_profile = &qo100::ui_profile_for(display.width, display.height);
     qo100::log("[DISPLAY] %dx%d, layout profile %s\n",
                display.width, display.height, ui().name);
-    qo100::log("[TS] stream %s\n", qo100::ts_stream_vlc_url().c_str());
+    qo100::log("[TS] stream udp://@%s:%d\n", qo100::ts_stream_address().c_str(),
+               qo100::ts_stream_port());
     /* The SET page greys out the resolutions that don't fit the real screen
      * (display.native_width/height), so a too-big layout can't be picked in
      * the first place. Under QO100_DISPLAY "native" is whatever was pinned;
@@ -4461,6 +4470,8 @@ int main(int argc, char ** argv)
     }
     qo100::ChatClient chat_client;
     chat_client.start();
+    qo100::HttpStreamServer http_stream;
+    if(options.screenshot.empty()) http_stream.start();
 
     SDL_Texture * video_texture = nullptr;
     int video_source_width = 0;
@@ -6533,6 +6544,7 @@ int main(int argc, char ** argv)
 
     SDL_StopTextInput();
     chat_client.stop();
+    http_stream.stop();
     spectrum_feed.stop();
     rtl_sdr_process.stop();
     video_decoder.stop();

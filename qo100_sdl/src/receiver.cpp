@@ -1,6 +1,7 @@
 #include "receiver.h"
 #include "app_log.h"
 #include "ts_address.h"
+#include "http_stream.h"
 
 #include <json-c/json.h>
 #include <libwebsockets.h>
@@ -146,7 +147,12 @@ bool pid_matches_binary(int pid, const std::string & expected_binary)
 
 std::string ts_stream_vlc_url()
 {
-    return "udp://@" + ts_stream_address() + ":" + std::to_string(ts_stream_port());
+    /* Local RTL-SDR mode sends the stream to 127.0.0.1 only (see
+     * http_stream.h), and without a network address no one can reach us. */
+    if(ts_stream_address().rfind("239.", 0) != 0) return {};
+    const std::string address = lan_ipv4_address();
+    if(address.empty()) return {};
+    return "http://" + address + ":" + std::to_string(kHttpStreamPort) + "/";
 }
 
 ReceiverSettings load_receiver_settings(const std::string & repository_root)
